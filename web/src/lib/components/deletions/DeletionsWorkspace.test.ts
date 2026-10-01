@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { appShortcuts, initShortcuts } from '@kenn-io/kit-ui';
 
 import { createAPIClient } from '../../api/client';
+import { formatDateTime } from '../../util/format';
 import type { ExploreSelection as GeneratedExploreSelection } from '../../api/generated/models';
 import DeletionsWorkspace from './DeletionsWorkspace.svelte';
 
@@ -144,6 +145,8 @@ describe('DeletionsWorkspace', () => {
       'Actions',
     ]);
     expect(within(table).getByText('Pending')).toBeDefined();
+    expect(within(table).getByTitle(formatDateTime('2026-07-19T10:00:00Z', 'long'))).toBeDefined();
+    expect(within(table).queryByTitle('2026-07-19T10:00:00Z')).toBeNull();
     expect(within(table).getByRole('button', { name: 'Cancel batch-1' }).className).not.toContain('kit-button--danger');
     await fireEvent.click(within(table).getByRole('button', { name: 'Inspect batch-1' }));
     expect(await screen.findByText('archive@example.com')).toBeDefined();

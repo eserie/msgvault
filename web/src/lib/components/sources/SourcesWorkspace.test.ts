@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { createAPIClient } from '../../api/client';
+import { formatDateTime } from '../../util/format';
 import SourcesWorkspace from './SourcesWorkspace.svelte';
 
 function source(overrides: Record<string, unknown> = {}) {
@@ -158,7 +159,8 @@ describe('SourcesWorkspace', () => {
     expect(screen.getByText('Sync not set up')).toBeDefined();
     expect(screen.getAllByText('Not scheduled')).toHaveLength(2);
     expect(screen.getAllByText('Never synced')).toHaveLength(2);
-    expect(screen.getAllByTitle('2026-07-19T10:00:00Z')).toHaveLength(2);
+    expect(screen.getAllByTitle(formatDateTime('2026-07-19T10:00:00Z', 'long'))).toHaveLength(2);
+    expect(screen.queryAllByTitle('2026-07-19T10:00:00Z')).toHaveLength(0);
   });
 
   it('presents generic meeting imports as on-demand API sources', async () => {
@@ -195,11 +197,23 @@ describe('SourcesWorkspace', () => {
     });
 
     expect(await screen.findByText('At :00 past every 6th hour')).toBeDefined();
-    expect(screen.getByTitle('2026-07-19T18:00:00Z')).toBeDefined();
+    expect(screen.getByTitle(formatDateTime('2026-07-19T18:00:00Z', 'long'))).toBeDefined();
+    expect(screen.getByTitle(formatDateTime('2026-07-19T11:30:00Z', 'long'))).toBeDefined();
+    expect(screen.queryByTitle(/T\d\d:\d\d:\d\dZ$/)).toBeNull();
     expect(screen.queryByText('This result may be out of date.')).toBeNull();
     await fireEvent.click(screen.getByRole('button', { name: 'Show details for Archive' }));
     expect(screen.getByText('1 item error')).toBeDefined();
     expect(screen.getByText('Malformed MIME header')).toBeDefined();
+  });
+
+  it('shows the last successful sync with a readable full date in its tooltip', async () => {
+    const fetchFn = vi.fn<typeof fetch>(async () => Response.json({ sources: [source({
+      last_successful_sync: run('completed', 4, { completed_at: '2026-07-18T08:15:00Z' })
+    })] }));
+    render(SourcesWorkspace, { client: createAPIClient(fetchFn) });
+
+    expect(await screen.findByTitle(formatDateTime('2026-07-18T08:15:00Z', 'long'))).toBeDefined();
+    expect(screen.queryByTitle('2026-07-18T08:15:00Z')).toBeNull();
   });
 
   it('names a terminal result older than the documented threshold as stale', async () => {

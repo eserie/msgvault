@@ -359,7 +359,7 @@
               </div>
               <span>{[sourceTypeLabel(source.source_type), source.identifier].filter(Boolean).join(' · ')}</span>
               <span
-                >Updated <time datetime={source.updated_at} title={source.updated_at}
+                >Updated <time datetime={source.updated_at} title={formatDateTime(source.updated_at, 'long')}
                   >{formatDateTime(source.updated_at)}</time
                 ></span
               >
@@ -375,7 +375,7 @@
                 {/if}
                 {#if source.next_sync_at}
                   <span
-                    >Next <time datetime={source.next_sync_at} title={source.next_sync_at}
+                    >Next <time datetime={source.next_sync_at} title={formatDateTime(source.next_sync_at, 'long')}
                       >{formatDateTime(source.next_sync_at)}</time
                     ></span
                   >
@@ -395,7 +395,7 @@
                   errors</span
                 >
               {:else if latestAt}
-                <time datetime={latestAt} title={latestAt}>{formatDateTime(latestAt)}</time>
+                <time datetime={latestAt} title={formatDateTime(latestAt, 'long')}>{formatDateTime(latestAt)}</time>
                 {#if staleLastResult(source)}<span class="stale">This result may be out of date.</span>{/if}
               {/if}
             </div>
@@ -404,7 +404,7 @@
             {#if source.last_successful_sync?.completed_at}
               <time
                 datetime={source.last_successful_sync.completed_at}
-                title={source.last_successful_sync.completed_at}
+                title={formatDateTime(source.last_successful_sync.completed_at, 'long')}
               >
                 {formatDateTime(source.last_successful_sync.completed_at)}
               </time>

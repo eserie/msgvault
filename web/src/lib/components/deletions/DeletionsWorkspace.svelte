@@ -398,7 +398,7 @@
             <td>{manifest.description}</td>
             <td>{manifest.message_count.toLocaleString()} {manifest.message_count === 1 ? 'item' : 'items'}</td>
             <td><Chip size="sm" tone={chip.tone} uppercase={false}>{chip.label}</Chip></td>
-            <td><time datetime={manifest.created_at} title={manifest.created_at}>{formatDateTime(manifest.created_at)}</time></td>
+            <td><time datetime={manifest.created_at} title={formatDateTime(manifest.created_at, 'long')}>{formatDateTime(manifest.created_at)}</time></td>
             <td class="row-actions">
               <Button
                 size="sm"
