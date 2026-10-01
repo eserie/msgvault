@@ -35,7 +35,7 @@
     TableHeaderCell,
     appShortcuts,
   } from '@kenn-io/kit-ui';
-  import { onDestroy, onMount } from 'svelte';
+  import { onDestroy, onMount, tick } from 'svelte';
   import type { APIClient } from '../../api/client';
   import { preflightReasonLabel } from '../../explore/labels';
   import { formatBytes, formatDateTime, formatRelativeTime } from '../../util/format';
@@ -67,6 +67,7 @@
   } = $props();
   let manifests = $state<ManifestSummary[]>([]);
   let detail = $state<ManifestDetail>();
+  let manifestsElement = $state<HTMLElement>();
   let reviewed = $state<Preflight>();
   let reviewedFingerprint = '';
   let loading = $state(true);
@@ -227,6 +228,14 @@
       pending = false;
     }
   }
+  async function closeDetail(): Promise<void> {
+    const id = detail?.id;
+    detail = undefined;
+    await tick();
+    const rows = manifestsElement?.querySelectorAll<HTMLTableRowElement>('tr[data-manifest-id]') ?? [];
+    const row = Array.from(rows).find((candidate) => candidate.dataset['manifestId'] === id);
+    row?.querySelector<HTMLButtonElement>('.inspect-action')?.focus();
+  }
   async function inspect(manifest: ManifestSummary): Promise<void> {
     pending = true;
     error = '';
@@ -372,8 +381,8 @@
       description="Deletions you stage appear here, along with their execution status."
     />
   {:else}
-    <div class="manifests" class:has-detail={Boolean(detail)}>
-      <Table ariaLabel="Deletion manifests" zebra={false} class="manifest-table">
+    <div class="manifests" class:has-detail={Boolean(detail)} bind:this={manifestsElement}>
+      <Table ariaLabel="Deletion manifests" zebra={false}>
         {#snippet header()}
           <TableHeaderCell label="ID" />
           <TableHeaderCell label="Description" />
@@ -384,14 +393,20 @@
         {/snippet}
         {#each manifests as manifest (manifest.id)}
           {@const chip = manifestStatusChip(manifest.status)}
-          <tr>
+          <tr data-manifest-id={manifest.id}>
             <td><code>{manifest.id}</code></td>
             <td>{manifest.description}</td>
             <td>{manifest.message_count.toLocaleString()} {manifest.message_count === 1 ? 'item' : 'items'}</td>
             <td><Chip size="sm" tone={chip.tone} uppercase={false}>{chip.label}</Chip></td>
             <td><time datetime={manifest.created_at} title={manifest.created_at}>{formatDateTime(manifest.created_at)}</time></td>
             <td class="row-actions">
-              <Button size="sm" surface="outline" label={`Inspect ${manifest.id}`} onclick={() => void inspect(manifest)} />
+              <Button
+                size="sm"
+                surface="outline"
+                class="inspect-action"
+                label={`Inspect ${manifest.id}`}
+                onclick={() => void inspect(manifest)}
+              />
               {#if manifest.status === 'pending' || manifest.status === 'in_progress'}
                 <Button
                   size="sm"
@@ -416,9 +431,7 @@
                 size="sm"
                 surface="soft"
                 label="Close manifest detail"
-                onclick={() => {
-                  detail = undefined;
-                }}
+                onclick={() => void closeDetail()}
               />
             </div>
             <Chip size="sm" tone={detailChip.tone} uppercase={false}>{detailChip.label}</Chip>

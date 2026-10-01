@@ -123,7 +123,7 @@ describe('DeletionsWorkspace', () => {
     expect(screen.getByRole('button', { name: 'Confirm stage deletion' }).className).toContain('kit-button--danger');
   });
 
-  it('lists manifests with status chips and closes the detail', async () => {
+  it('lists manifests with status chips and closes the detail back to its Inspect button', async () => {
     render(DeletionsWorkspace, {
       client: createAPIClient(
         vi.fn<typeof fetch>(async (input) => {
@@ -149,6 +149,9 @@ describe('DeletionsWorkspace', () => {
     expect(await screen.findByText('archive@example.com')).toBeDefined();
     await fireEvent.click(screen.getByRole('button', { name: 'Close manifest detail' }));
     expect(screen.queryByText('archive@example.com')).toBeNull();
+    await waitFor(() =>
+      expect(document.activeElement).toBe(within(table).getByRole('button', { name: 'Inspect batch-1' })),
+    );
   });
 
   it('requires the deletable-count contract before offering staging', async () => {
