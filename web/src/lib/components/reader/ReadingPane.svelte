@@ -37,6 +37,7 @@
   import { filtersForGroup } from '../../explore/group-context';
   import type { ExploreCacheUnavailable, ExploreFileFact, ExploreFilter } from '../../explore/models';
   import { isEmailMessageType } from '../../explore/models';
+  import { formatBytes } from '../../util/format';
   import IdentityBadge from '../explore/IdentityBadge.svelte';
   import TaskLinks from '../tasks/TaskLinks.svelte';
   import MeetingPanel from '../meetings/MeetingPanel.svelte';
@@ -231,11 +232,6 @@
       : new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' }).format(parsed);
   }
 
-  function formatBytes(value: number): string {
-    if (value < 1024) return `${value} B`;
-    if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`;
-    return `${(value / (1024 * 1024)).toFixed(1)} MB`;
-  }
 </script>
 
 <aside class="reading-pane" aria-label={`Reading pane: ${title}`}>

@@ -1,15 +1,19 @@
 <script lang="ts">
   import { Button, StatusDot } from '@kenn-io/kit-ui';
 
+  import {
+    OPERATION_ACTION_LABELS,
+    OPERATION_KIND_LABELS,
+    OPERATION_LANE_LABELS,
+    RELATED_STATUS_LABELS,
+    type RelatedStatus
+  } from '../../operations/labels';
   import type {
     OperationAction,
-    OperationKind,
-    OperationLane,
     OperationRunSummary,
     OperationStatusLane
   } from '../../operations/models';
-
-  type RelatedStatus = NonNullable<OperationStatusLane['kinds'][number]['related_status']>;
+  import { formatDateTime } from '../../util/format';
 
   let {
     lanes,
@@ -23,37 +27,6 @@
     onAction?: (action: OperationAction) => void;
   } = $props();
 
-  const laneLabels: Record<OperationLane, string> = {
-    messages: 'Messages',
-    person_facts: 'Facts',
-    contacts: 'Contacts',
-    documents: 'Documents',
-    visual_attachments: 'Attachments'
-  };
-  const kindLabels: Record<OperationKind, string> = {
-    source_sync: 'Source sync',
-    message_embedding: 'Message embedding',
-    person_sweep: 'Person fact sweep',
-    person_embedding: 'Person embedding',
-    person_enrichment: 'Person enrichment',
-    carddav_sync: 'CardDAV sync',
-    document_extraction: 'Document extraction',
-    document_embedding: 'Document embedding',
-    visual_embedding: 'Visual embedding'
-  };
-  const relatedLabels: Record<RelatedStatus, string> = {
-    listSourceStatus: 'Sources status',
-    getDocumentIndexStatus: 'Document index status',
-    getDocumentVectorStatus: 'Document vector status',
-    getVisualAttachmentStatus: 'Visual attachment status',
-    getCardDAVStatus: 'CardDAV settings'
-  };
-  const actionLabels: Record<OperationAction, string> = {
-    carddav_sync: 'Start CardDAV sync',
-    visual_build: 'Build visual index',
-    visual_resume: 'Resume visual index'
-  };
-
   function stateLabel(run: OperationRunSummary): string {
     return run.state.charAt(0).toUpperCase() + run.state.slice(1);
   }
@@ -65,27 +38,19 @@
     if (run.state === 'failed') return 'unclean' as const;
     return 'stale' as const;
   }
-
-  function formatTimestamp(value: string): string {
-    const parsed = new Date(value);
-    if (!Number.isFinite(parsed.getTime())) return 'Time unavailable';
-    return new Intl.DateTimeFormat(undefined, {
-      dateStyle: 'medium', timeStyle: 'short'
-    }).format(parsed);
-  }
 </script>
 
 <section class="lane-cards" aria-label="Operation lanes">
   {#each lanes as lane (lane.lane)}
-    <article class="lane-card" aria-label={`${laneLabels[lane.lane]} operations`}>
-      <h2>{laneLabels[lane.lane]}</h2>
+    <article class="lane-card" aria-label={`${OPERATION_LANE_LABELS[lane.lane]} operations`}>
+      <h2>{OPERATION_LANE_LABELS[lane.lane]}</h2>
       {#if lane.kinds.length === 0}
         <p class="availability"><span aria-hidden="true"><StatusDot status="quiet" /></span> Status unavailable</p>
       {:else}
         <div class="kind-list">
           {#each lane.kinds as kind (kind.kind)}
-            <section class="kind" aria-label={kindLabels[kind.kind]}>
-              <h3>{kindLabels[kind.kind]}</h3>
+            <section class="kind" aria-label={OPERATION_KIND_LABELS[kind.kind]}>
+              <h3>{OPERATION_KIND_LABELS[kind.kind]}</h3>
               <div class="availability">
                 <span>
                   <span aria-hidden="true"><StatusDot status={kind.configured ? 'idle' : 'unclean'} /></span>
@@ -103,7 +68,7 @@
                     <dd>
                       <span aria-hidden="true"><StatusDot status={statusDot(kind.active)} /></span>
                       <span>{stateLabel(kind.active)}</span>
-                      <time datetime={kind.active.started_at}>{formatTimestamp(kind.active.started_at)}</time>
+                      <time datetime={kind.active.started_at}>{formatDateTime(kind.active.started_at)}</time>
                     </dd>
                   </div>
                 {/if}
@@ -113,7 +78,7 @@
                     <dd>
                       <span aria-hidden="true"><StatusDot status={statusDot(kind.latest)} /></span>
                       <span>{stateLabel(kind.latest)}</span>
-                      <time datetime={kind.latest.started_at}>{formatTimestamp(kind.latest.started_at)}</time>
+                      <time datetime={kind.latest.started_at}>{formatDateTime(kind.latest.started_at)}</time>
                     </dd>
                   </div>
                 {/if}
@@ -123,7 +88,7 @@
                     <dd>
                       <span aria-hidden="true"><StatusDot status="idle" /></span>
                       <span>Succeeded</span>
-                      <time datetime={kind.latest_successful.started_at}>{formatTimestamp(kind.latest_successful.started_at)}</time>
+                      <time datetime={kind.latest_successful.started_at}>{formatDateTime(kind.latest_successful.started_at)}</time>
                     </dd>
                   </div>
                 {/if}
@@ -137,7 +102,7 @@
                     <Button
                       size="sm"
                       surface="soft"
-                      label={`Open ${relatedLabels[kind.related_status]}`}
+                      label={`Open ${RELATED_STATUS_LABELS[kind.related_status]}`}
                       onclick={(event) => onNavigate(kind.related_status!, event.currentTarget as HTMLButtonElement)}
                     />
                   {/if}
@@ -145,7 +110,7 @@
                     <Button
                       size="sm"
                       tone="info"
-                      label={actionPending === action ? `${actionLabels[action]}…` : actionLabels[action]}
+                      label={actionPending === action ? `${OPERATION_ACTION_LABELS[action]}…` : OPERATION_ACTION_LABELS[action]}
                       disabled={actionPending !== null}
                       onclick={() => onAction(action)}
                     />

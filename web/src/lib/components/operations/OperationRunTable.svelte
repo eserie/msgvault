@@ -1,8 +1,10 @@
 <script lang="ts">
   import { StatusDot, Table, TableHeaderCell } from '@kenn-io/kit-ui';
 
-  import type { OperationKind, OperationRunSummary } from '../../operations/models';
+  import type { OperationRunSummary } from '../../operations/models';
   import { orderedOperationRows } from '../../operations/focus';
+  import { OPERATION_KIND_LABELS, operationDuration } from '../../operations/labels';
+  import { formatDateTime } from '../../util/format';
 
   let {
     rows,
@@ -16,17 +18,6 @@
     onSelect?: (id: string, button: HTMLButtonElement) => void;
   } = $props();
 
-  const kindLabels: Record<OperationKind, string> = {
-    source_sync: 'Source sync',
-    message_embedding: 'Message embedding',
-    person_sweep: 'Person fact sweep',
-    person_embedding: 'Person embedding',
-    person_enrichment: 'Person enrichment',
-    carddav_sync: 'CardDAV sync',
-    document_extraction: 'Document extraction',
-    document_embedding: 'Document embedding',
-    visual_embedding: 'Visual embedding'
-  };
   const sortedRows = $derived(orderedOperationRows(rows));
 
   function titleCase(value: string | undefined): string {
@@ -40,25 +31,6 @@
     if (run.state === 'succeeded') return 'idle' as const;
     if (run.state === 'failed') return 'unclean' as const;
     return 'stale' as const;
-  }
-
-  function formatTimestamp(value: string): string {
-    const parsed = new Date(value);
-    if (!Number.isFinite(parsed.getTime())) return 'Time unavailable';
-    return new Intl.DateTimeFormat(undefined, {
-      dateStyle: 'medium', timeStyle: 'short'
-    }).format(parsed);
-  }
-
-  function duration(run: OperationRunSummary): string {
-    if (!run.finished_at) return run.state === 'running' ? 'In progress' : 'Not available';
-    const milliseconds = Date.parse(run.finished_at) - Date.parse(run.started_at);
-    if (!Number.isFinite(milliseconds) || milliseconds < 0) return 'Not available';
-    const totalSeconds = Math.floor(milliseconds / 1_000);
-    const minutes = Math.floor(totalSeconds / 60);
-    const seconds = totalSeconds % 60;
-    if (minutes === 0) return `${seconds} ${seconds === 1 ? 'second' : 'seconds'}`;
-    return `${minutes} ${minutes === 1 ? 'minute' : 'minutes'}${seconds ? ` ${seconds} ${seconds === 1 ? 'second' : 'seconds'}` : ''}`;
   }
 
   function counters(run: OperationRunSummary): string {
@@ -76,14 +48,14 @@
         <button
           type="button"
           data-run-id={run.id}
-          aria-label={`Open ${kindLabels[run.kind]} run`}
+          aria-label={`Open ${OPERATION_KIND_LABELS[run.kind]} run`}
           aria-current={selectedID === run.id ? 'true' : undefined}
           onclick={(event) => onSelect(run.id, event.currentTarget)}
         >
-          <span class="row-title">{kindLabels[run.kind]}</span>
+          <span class="row-title">{OPERATION_KIND_LABELS[run.kind]}</span>
           <span><span aria-hidden="true"><StatusDot status={dotStatus(run)} /></span> {titleCase(run.state)}</span>
-          <span>{titleCase(run.trigger)} · <time datetime={run.started_at}>{formatTimestamp(run.started_at)}</time></span>
-          <span>{duration(run)} · {counters(run)}</span>
+          <span>{titleCase(run.trigger)} · <time datetime={run.started_at}>{formatDateTime(run.started_at)}</time></span>
+          <span>{operationDuration(run)} · {counters(run)}</span>
         </button>
       </div>
     {/each}
@@ -107,14 +79,14 @@
               class="run-link"
               type="button"
               data-run-id={run.id}
-              aria-label={`Open ${kindLabels[run.kind]} run`}
+              aria-label={`Open ${OPERATION_KIND_LABELS[run.kind]} run`}
               onclick={(event) => onSelect(run.id, event.currentTarget)}
-            >{kindLabels[run.kind]}</button>
+            >{OPERATION_KIND_LABELS[run.kind]}</button>
           </td>
           <td>{titleCase(run.trigger)}</td>
           <td><span class="state"><span aria-hidden="true"><StatusDot status={dotStatus(run)} /></span> {titleCase(run.state)}</span></td>
-          <td><time datetime={run.started_at}>{formatTimestamp(run.started_at)}</time></td>
-          <td>{duration(run)}</td>
+          <td><time datetime={run.started_at}>{formatDateTime(run.started_at)}</time></td>
+          <td>{operationDuration(run)}</td>
           <td>{counters(run)}</td>
         </tr>
       {/each}

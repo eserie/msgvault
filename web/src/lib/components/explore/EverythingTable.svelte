@@ -12,6 +12,7 @@
   import { DEFAULT_EXPLORE_COLUMNS, isEmailMessageType } from '../../explore/models';
   import type { ExploreSelectionState } from '../../explore/state.svelte';
   import { rebaseVirtualScroll, RowGeometry, tableViewportHeight } from '../../theme/preferences.svelte';
+  import { formatBytes } from '../../util/format';
   import IdentityBadge from './IdentityBadge.svelte';
   import RowKind from './RowKind.svelte';
 
@@ -237,12 +238,6 @@
       day: 'numeric',
       year: date.getFullYear() === new Date().getFullYear() ? undefined : 'numeric'
     }).format(date);
-  }
-
-  function formatBytes(value: number): string {
-    if (value < 1024) return `${value} B`;
-    if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`;
-    return `${(value / (1024 * 1024)).toFixed(1)} MB`;
   }
 
   function scrollActiveIntoView(index: number): void {
