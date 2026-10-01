@@ -344,7 +344,7 @@
       <Button
         type="submit"
         disabled={activeAction !== undefined}
-        tone="success"
+        tone="info"
         surface="solid"
         label={activeAction === 'save' ? 'Saving…' : 'Save CardDAV account'}
       />
