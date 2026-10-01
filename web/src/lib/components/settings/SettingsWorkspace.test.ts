@@ -266,8 +266,8 @@ describe('SettingsWorkspace', () => {
   });
 
   it.each([
-    [{ authority: 'document_index', categoryID: 'archive', settingKey: 'analytics.auto_build_cache' }, 'Archive'],
-    [{ authority: 'document_vector', categoryID: 'search', settingKey: 'vector.enabled' }, 'Search'],
+    [{ authority: 'semantic_search', categoryID: 'search', settingKey: 'vector.enabled' }, 'Search'],
+    [{ authority: 'person_embeddings', categoryID: 'search', settingKey: 'vector.people.enabled' }, 'Search'],
     [{ authority: 'visual_attachments', categoryID: 'search', settingKey: 'vector.multimodal.enabled' }, 'Search']
   ] as const)('opens and focuses the requested $0.authority setting authority', async (navigationTarget, categoryLabel) => {
     const fetchFn = vi.fn<typeof fetch>(async () => Response.json({
@@ -278,6 +278,7 @@ describe('SettingsWorkspace', () => {
       settings: [
         setting('analytics.auto_build_cache', false, { group: 'archive', kind: 'boolean' }),
         setting('vector.enabled', true, { group: 'search', kind: 'boolean' }),
+        setting('vector.people.enabled', false, { group: 'search', kind: 'boolean' }),
         setting('vector.multimodal.enabled', false, { group: 'search', kind: 'boolean' })
       ],
       pending_restart: false

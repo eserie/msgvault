@@ -16,20 +16,20 @@
     resolveOperationFocusAnchor,
     type OperationFocusAnchor
   } from '../../operations/focus';
-  import type {
-    OperationAction,
-    OperationKind,
-    OperationRunDetail as OperationRunDetailModel,
-    OperationsURLState
-  } from '../../operations/models';
-  import { OPERATION_KIND_LABELS, OPERATION_LANE_LABELS } from '../../operations/labels';
-  import OperationLaneCards from './OperationLaneCards.svelte';
+  import type { OperationAction, OperationKind, OperationsURLState } from '../../operations/models';
+  import {
+    OPERATION_KIND_LABELS,
+    OPERATION_LANE_LABELS,
+    RELATED_STATUS_LABELS,
+    type OperationSettingsTarget,
+    type RelatedStatus
+  } from '../../operations/labels';
   import OperationRelatedStatus from './OperationRelatedStatus.svelte';
   import OperationRunDetail from './OperationRunDetail.svelte';
   import OperationRunTable from './OperationRunTable.svelte';
+  import OperationStatusList from './OperationStatusList.svelte';
   import PageHeader from '../shell/PageHeader.svelte';
 
-  type RelatedStatus = NonNullable<OperationRunDetailModel['related_status']>;
   type Controller = Pick<OperationsController, 'snapshot' | 'refresh' | 'loadMore' | 'restart' | 'runAction'>;
 
   let {
@@ -39,7 +39,8 @@
     onStateChange = () => undefined,
     onNavigate = () => undefined,
     onAnnounce = () => undefined,
-    onConfigure = () => undefined
+    onConfigure = () => undefined,
+    onSetUp = () => undefined
   }: {
     controller: Controller;
     client?: APIClient;
@@ -47,7 +48,8 @@
     onStateChange?: (patch: Partial<OperationsURLState>) => void;
     onNavigate?: (target: RelatedStatus) => void;
     onAnnounce?: (message: string) => void;
-    onConfigure?: (target: OperationStatusAuthority) => void;
+    onConfigure?: () => void;
+    onSetUp?: (target: OperationSettingsTarget) => void;
   } = $props();
 
   let root = $state<HTMLElement>();
@@ -81,11 +83,6 @@
     carddav_sync: 'CardDAV sync request completed; current operation state was refreshed.',
     visual_build: 'Visual index build request completed; current operation state was refreshed.',
     visual_resume: 'Visual index resume request completed; current operation state was refreshed.'
-  };
-  const relatedStatusLabels: Record<OperationStatusAuthority, string> = {
-    getDocumentIndexStatus: 'Open Document index status',
-    getDocumentVectorStatus: 'Open Document vector status',
-    getVisualAttachmentStatus: 'Open Visual attachment status'
   };
 
   onMount(() => {
@@ -126,11 +123,15 @@
     return undefined;
   }
 
+  function relatedStatusButton(target: OperationStatusAuthority): string {
+    return `Open ${RELATED_STATUS_LABELS[target]}`;
+  }
+
   function navigateStatus(target: RelatedStatus, button: HTMLButtonElement): void {
     if (target === 'getDocumentIndexStatus' || target === 'getDocumentVectorStatus' ||
       target === 'getVisualAttachmentStatus') {
       const buttons = Array.from(root?.querySelectorAll<HTMLButtonElement>('button') ?? []);
-      const targetButtons = buttons.filter((candidate) => candidate.ariaLabel === relatedStatusLabels[target]);
+      const targetButtons = buttons.filter((candidate) => candidate.ariaLabel === relatedStatusButton(target));
       statusFocus = {
         target,
         ordinal: Math.max(0, targetButtons.indexOf(button)),
@@ -146,7 +147,7 @@
     await tick();
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
     const buttons = Array.from(root?.querySelectorAll<HTMLButtonElement>('button') ?? []);
-    const targetButtons = buttons.filter((button) => button.ariaLabel === relatedStatusLabels[focus.target]);
+    const targetButtons = buttons.filter((button) => button.ariaLabel === relatedStatusButton(focus.target));
     (targetButtons[focus.ordinal] ?? buttons[focus.slot])?.focus();
     statusFocus = undefined;
   }
@@ -288,11 +289,12 @@
     </PageHeader>
 
     {#if current.statusReadable}
-      <OperationLaneCards
+      <OperationStatusList
         lanes={current.statusLanes}
         actionPending={current.actionPending}
         onNavigate={navigateStatus}
         onAction={(action) => void runAction(action)}
+        {onSetUp}
       />
     {/if}
 

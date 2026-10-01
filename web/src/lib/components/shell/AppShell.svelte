@@ -23,7 +23,6 @@
     ExploreGroupDimension,
     ExploreGroupRow,
     ExploreSearchMode,
-    OperationStatusAuthority,
     ExploreURLState,
     ExploreWorkspace,
     FileViewerTarget,
@@ -42,11 +41,11 @@
   import { RelationshipReviewController } from '../../directory/relationship-review-controller.svelte';
   import { FactLedgerController } from '../../directory/fact-ledger-controller.svelte';
   import { OperationsController } from '../../operations/controller.svelte';
+  import type { OperationSettingsTarget } from '../../operations/labels';
   import type { OperationRunDetail, OperationsURLState } from '../../operations/models';
   import {
     settingsNavigationTarget as targetForSettingsAuthority,
     type CardDAVSettingsRequest,
-    type SettingsNavigationAuthority,
     type SettingsNavigationTarget
   } from '../../carddav/navigation';
   import { createCommandRegistry, type AppCommand, type CommandHandlers } from '../../commands/registry';
@@ -334,13 +333,14 @@
     commitNavigation({ workspace: 'operations', operationStatus: target });
   }
 
-  function openOperationConfiguration(target: OperationStatusAuthority): void {
-    const settingsTargets: Record<OperationStatusAuthority, SettingsNavigationAuthority> = {
-      getDocumentIndexStatus: 'document_index',
-      getDocumentVectorStatus: 'document_vector',
-      getVisualAttachmentStatus: 'visual_attachments'
-    };
-    commitNavigation({ workspace: 'settings', settingsAuthority: settingsTargets[target] });
+  function openVisualAttachmentSettings(): void {
+    commitNavigation({
+      workspace: 'settings', settingsCategory: 'search', settingsAuthority: 'visual_attachments'
+    });
+  }
+
+  function setUpOperation(target: OperationSettingsTarget): void {
+    commitNavigation({ workspace: 'settings', ...target });
   }
 
   setContext('msgvault:open-carddav-operations', () => openOperations('contacts', 'carddav_sync'));
@@ -1339,7 +1339,8 @@
           }}
           onStateChange={(patch) => commitNavigation(patch)}
           onNavigate={openOperationAuthority}
-          onConfigure={openOperationConfiguration}
+          onConfigure={openVisualAttachmentSettings}
+          onSetUp={setUpOperation}
           onAnnounce={announceOperation}
         />
       {:else if exploreState.current.workspace === 'deletions'}

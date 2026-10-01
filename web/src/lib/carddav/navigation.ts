@@ -1,10 +1,4 @@
 const SETTINGS_NAVIGATION_TARGETS = {
-  document_index: {
-    authority: 'document_index', categoryID: 'archive', settingKey: 'analytics.auto_build_cache'
-  },
-  document_vector: {
-    authority: 'document_vector', categoryID: 'search', settingKey: 'vector.enabled'
-  },
   semantic_search: {
     authority: 'semantic_search', categoryID: 'search', settingKey: 'vector.enabled'
   },

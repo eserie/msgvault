@@ -1054,15 +1054,15 @@ describe('AppShell', () => {
     }
   });
 
-  it('opens document Settings without a live status request when Operations proves it is unconfigured', async () => {
+  it('opens visual attachment Settings without a live status request', async () => {
     window.history.replaceState(null, '', `/?explore=${encodeURIComponent(JSON.stringify({ workspace: 'operations' }))}`);
     const requests: string[] = [];
     const fetchFn = vi.fn<typeof fetch>(async (input) => {
       const path = new URL(input instanceof Request ? input.url : String(input)).pathname;
       requests.push(path);
       if (path.endsWith('/operations/status')) return Response.json({ lanes: [{
-        kind: 'document_extraction', lane: 'documents', configured: false,
-        history_availability: 'available', related_status: 'getDocumentIndexStatus', supported_actions: []
+        kind: 'visual_embedding', lane: 'visual_attachments', configured: false,
+        history_availability: 'available', related_status: 'getVisualAttachmentStatus', supported_actions: []
       }] });
       if (path.endsWith('/operations/runs')) return Response.json({
         runs: [], unavailable_kinds: [], membership_revision: 1
@@ -1071,14 +1071,46 @@ describe('AppShell', () => {
     });
     const state = new ExploreState(window);
     const rendered = render(AppShell, { client: createAPIClient(fetchFn), state, enabled: false });
+    try {
+      await fireEvent.click(await screen.findByRole('button', { name: 'Open Visual attachment status' }));
+      await fireEvent.click(await screen.findByRole('button', { name: 'Open visual attachment settings' }));
+      expect(state.current).toMatchObject({
+        workspace: 'settings', settingsCategory: 'search', settingsAuthority: 'visual_attachments'
+      });
+      expect(requests).not.toContain('/api/v1/multimodal/status');
+    } finally {
+      rendered.unmount();
+      state.destroy();
+    }
+  });
 
-    await fireEvent.click(await screen.findByRole('button', { name: 'Open Document index status' }));
-    await fireEvent.click(await screen.findByRole('button', { name: 'Open document index settings' }));
-    expect(state.current).toMatchObject({ workspace: 'settings', settingsAuthority: 'document_index' });
-    expect(requests).not.toContain('/api/v1/documents/status/current');
-
-    rendered.unmount();
-    state.destroy();
+  it('sends an Off Operations kind to its Settings category with Set up', async () => {
+    window.history.replaceState(null, '', `/?explore=${encodeURIComponent(JSON.stringify({ workspace: 'operations' }))}`);
+    const fetchFn = vi.fn<typeof fetch>(async (input) => {
+      const path = new URL(input instanceof Request ? input.url : String(input)).pathname;
+      if (path.endsWith('/operations/status')) return Response.json({ lanes: [{
+        kind: 'person_sweep', lane: 'person_facts', configured: false,
+        history_availability: 'available', supported_actions: []
+      }] });
+      if (path.endsWith('/operations/runs')) return Response.json({
+        runs: [], unavailable_kinds: [], membership_revision: 1
+      });
+      return Response.json(exploreResponse());
+    });
+    const settings = createRawSnippet(() => ({ render: () => '<main aria-label="Settings fixture"></main>' }));
+    const state = new ExploreState(window);
+    const rendered = render(AppShell, {
+      client: createAPIClient(fetchFn), state, enabled: false, settings: settings as never
+    });
+    try {
+      await fireEvent.click(await screen.findByRole('button', { name: 'Set up Person fact sweep' }));
+      expect(state.current).toMatchObject({
+        workspace: 'settings', settingsCategory: 'people', settingsAuthority: ''
+      });
+    } finally {
+      rendered.unmount();
+      state.destroy();
+    }
   });
 
   it('passes the URL Settings category to Settings and commits a chosen one', async () => {

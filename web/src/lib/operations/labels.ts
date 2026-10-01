@@ -1,5 +1,6 @@
 import type { ChipTone } from '@kenn-io/kit-ui';
 import type { OperationPublicCounter } from '../api/generated/models';
+import type { SettingsNavigationAuthority } from '../carddav/navigation';
 import { sentenceCase } from '../explore/labels';
 import type { OperationAction, OperationKind, OperationLane, OperationLaneStatus, OperationRunSummary } from './models';
 
@@ -22,6 +23,49 @@ export const RELATED_STATUS_LABELS: Readonly<Record<RelatedStatus, string>> = {
 };
 export const OPERATION_ACTION_LABELS: Readonly<Record<OperationAction, string>> = {
   carddav_sync: 'Start CardDAV sync', visual_build: 'Build visual index', visual_resume: 'Resume visual index'
+};
+
+export interface OperationSettingsTarget {
+  settingsCategory: string;
+  settingsAuthority: SettingsNavigationAuthority | '';
+}
+export interface OperationHostSetup {
+  kind: 'host';
+  text: string;
+  guideLabel: string;
+  guideHref: string;
+}
+export type OperationSetup = { kind: 'settings'; target: OperationSettingsTarget } | OperationHostSetup;
+
+export const DOCUMENT_INDEX_SETUP: OperationHostSetup = {
+  kind: 'host',
+  text: 'Configured in config.toml on the daemon host.',
+  guideLabel: 'Document indexing setup',
+  guideHref: 'https://msgvault.io/docs/usage/document-indexing/#configure-the-policy'
+};
+export const DOCUMENT_SEARCH_SETUP: OperationHostSetup = {
+  kind: 'host',
+  text: 'Configured in config.toml on the daemon host. Also needs semantic search.',
+  guideLabel: 'Document search setup',
+  guideHref: 'https://msgvault.io/docs/usage/document-indexing/#semantic-and-hybrid-document-search'
+};
+
+// Where an Off kind is turned on (spec "Set up targets"). source_sync and
+// carddav_sync have no entry: their related-status buttons already lead there.
+export const OPERATION_SETUP: Readonly<Partial<Record<OperationKind, OperationSetup>>> = {
+  message_embedding: {
+    kind: 'settings', target: { settingsCategory: 'search', settingsAuthority: 'semantic_search' }
+  },
+  person_embedding: {
+    kind: 'settings', target: { settingsCategory: 'search', settingsAuthority: 'person_embeddings' }
+  },
+  visual_embedding: {
+    kind: 'settings', target: { settingsCategory: 'search', settingsAuthority: 'visual_attachments' }
+  },
+  person_enrichment: { kind: 'settings', target: { settingsCategory: 'enrichment', settingsAuthority: '' } },
+  person_sweep: { kind: 'settings', target: { settingsCategory: 'people', settingsAuthority: '' } },
+  document_extraction: DOCUMENT_INDEX_SETUP,
+  document_embedding: DOCUMENT_SEARCH_SETUP
 };
 
 const STATE_CHIPS: Readonly<Record<string, { label: string; tone: ChipTone }>> = {

@@ -264,7 +264,7 @@ describe('Explore URL state', () => {
   });
 
   it('round-trips only closed Settings authorities', () => {
-    for (const settingsAuthority of ['document_index', 'document_vector', 'semantic_search', 'person_embeddings', 'visual_attachments'] as const) {
+    for (const settingsAuthority of ['semantic_search', 'person_embeddings', 'visual_attachments'] as const) {
       const restored = parseExploreURLState(serializeExploreURLState({
         ...defaultExploreURLState,
         workspace: 'settings',
@@ -281,12 +281,20 @@ describe('Explore URL state', () => {
     expect(invalid.settingsAuthority).toBe('');
   });
 
+  it('opens Settings on Appearance for a retired document authority link', () => {
+    const restored = parseExploreURLState(`?workspace=settings&explore=${encodeURIComponent(JSON.stringify({
+      schemaVersion: 2, settingsAuthority: 'document_index'
+    }))}`);
+    expect(restored.settingsAuthority).toBe('');
+    expect(restored.settingsCategory).toBe('browser');
+  });
+
   it.each([
     ['constructor', 'constructor'],
     ['toString', 'toString'],
     ['__proto__', '__proto__'],
-    ['an object', { authority: 'document_index' }],
-    ['a function', () => 'document_index']
+    ['an object', { authority: 'semantic_search' }],
+    ['a function', () => 'semantic_search']
   ] as const)('rejects inherited or non-string Settings authority %s', (_description, settingsAuthority) => {
     const restored = parseExploreURLState(serializeExploreURLState({
       ...defaultExploreURLState,
@@ -300,12 +308,12 @@ describe('Explore URL state', () => {
   it('centrally clears a Settings authority on every generic workspace navigation', () => {
     window.history.replaceState(null, '', '/');
     const state = new ExploreState(window);
-    state.commitNavigation({ workspace: 'settings', settingsAuthority: 'document_index' });
+    state.commitNavigation({ workspace: 'settings', settingsAuthority: 'semantic_search' });
 
     state.commitWorkspace('everything');
     expect(state.current.settingsAuthority).toBe('');
 
-    state.commitNavigation({ workspace: 'settings', settingsAuthority: 'document_vector' });
+    state.commitNavigation({ workspace: 'settings', settingsAuthority: 'person_embeddings' });
     state.commitWorkspace('settings');
     expect(state.current.settingsAuthority).toBe('');
     state.destroy();

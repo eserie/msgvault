@@ -58,36 +58,67 @@ describe('OperationRelatedStatus', () => {
     expect(document.body.textContent).not.toContain('private');
   });
 
-  it.each([
-    ['missing or disabled document configuration', 'getDocumentIndexStatus', 'Open document index settings'],
-    ['unconfigured visual attachments', 'getVisualAttachmentStatus', 'Open visual attachment settings']
-  ] as const)('does not fetch %s and instead opens its Settings authority', async (
-    _case, authority, settingsLabel
-  ) => {
+  it('does not fetch unconfigured visual attachments and instead opens their Settings', async () => {
     const onConfigure = vi.fn();
     const fetchFn = vi.fn<typeof fetch>();
     render(OperationRelatedStatus, {
-      client: createAPIClient(fetchFn), authority, configured: false, onClose: vi.fn(), onConfigure
+      client: createAPIClient(fetchFn), authority: 'getVisualAttachmentStatus', configured: false,
+      onClose: vi.fn(), onConfigure
     });
 
-    await fireEvent.click(await screen.findByRole('button', { name: settingsLabel }));
-    expect(onConfigure).toHaveBeenCalledWith(authority);
+    await fireEvent.click(await screen.findByRole('button', { name: 'Open visual attachment settings' }));
+    expect(onConfigure).toHaveBeenCalledWith();
     expect(fetchFn).not.toHaveBeenCalled();
   });
 
-  it('offers Settings only when a status response proves configuration needs attention', async () => {
-    const onConfigure = vi.fn();
-    const fetchFn = vi.fn<typeof fetch>(async () => Response.json({
-      ...documentStatus,
-      status: { ...documentStatus.status, profile_enabled: false, exact_consent: false }
-    }));
+  it.each([
+    ['getDocumentIndexStatus', 'Configured in config.toml on the daemon host.', 'Document indexing setup'],
+    ['getDocumentVectorStatus', 'Configured in config.toml on the daemon host. Also needs semantic search.',
+      'Document search setup']
+  ] as const)('explains host configuration for unconfigured %s without a request', async (
+    authority, text, linkName
+  ) => {
+    const fetchFn = vi.fn<typeof fetch>();
     render(OperationRelatedStatus, {
-      client: createAPIClient(fetchFn), authority: 'getDocumentIndexStatus',
-      configured: true, onClose: vi.fn(), onConfigure
+      client: createAPIClient(fetchFn), authority, configured: false, onClose: vi.fn(), onConfigure: vi.fn()
     });
 
-    await fireEvent.click(await screen.findByRole('button', { name: 'Open document index settings' }));
-    expect(onConfigure).toHaveBeenCalledWith('getDocumentIndexStatus');
+    expect(await screen.findByText('Off')).toBeDefined();
+    expect(screen.getByText(text, { exact: false })).toBeDefined();
+    expect(screen.getByRole('link', { name: linkName })).toBeDefined();
+    expect(screen.queryByRole('button', { name: /settings/i })).toBeNull();
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['getDocumentIndexStatus', {
+      ...documentStatus, status: { ...documentStatus.status, profile_enabled: false }
+    }, 'Document indexing setup',
+    'https://msgvault.io/docs/usage/document-indexing/#configure-the-policy'],
+    ['getDocumentVectorStatus', { enabled: false, configured: true }, 'Document search setup',
+      'https://msgvault.io/docs/usage/document-indexing/#semantic-and-hybrid-document-search']
+  ] as const)('links %s to its host setup guide when the status needs configuration', async (
+    authority, response, linkName, href
+  ) => {
+    const fetchFn = vi.fn<typeof fetch>(async () => Response.json(response));
+    render(OperationRelatedStatus, {
+      client: createAPIClient(fetchFn), authority, configured: true, onClose: vi.fn(), onConfigure: vi.fn()
+    });
+
+    const link = await screen.findByRole('link', { name: linkName });
+    expect(link.getAttribute('href')).toBe(href);
+    expect(screen.queryByRole('button', { name: /settings/i })).toBeNull();
+  });
+
+  it('omits the host setup guide when document status is fully configured', async () => {
+    const fetchFn = vi.fn<typeof fetch>(async () => Response.json(documentStatus));
+    render(OperationRelatedStatus, {
+      client: createAPIClient(fetchFn), authority: 'getDocumentIndexStatus', configured: true,
+      onClose: vi.fn(), onConfigure: vi.fn()
+    });
+
+    expect(await screen.findByText('4 of 5 owners ready')).toBeDefined();
+    expect(screen.queryByRole('link', { name: 'Document indexing setup' })).toBeNull();
   });
 
   it('keeps endpoint failures on the status authority with fixed retry and no Settings redirect', async () => {
