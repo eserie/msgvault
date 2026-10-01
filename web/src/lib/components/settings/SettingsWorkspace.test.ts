@@ -360,6 +360,52 @@ describe('SettingsWorkspace', () => {
     );
   });
 
+  it('reports saved appearance values and nothing for other settings', async () => {
+    const onAppearanceSaved = vi.fn();
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(settingsResponse(initialSettings, '"etag-a"'))
+      .mockResolvedValueOnce(settingsResponse({
+        ...initialSettings,
+        settings: initialSettings.settings.map((item) =>
+          item.key === 'web.theme' ? { ...item, value: { string: 'dark' } } : item
+        )
+      }, '"etag-b"'));
+    render(SettingsWorkspace, { client: createAPIClient(fetchFn), onAppearanceSaved });
+    await chooseSelectOption(await screen.findByLabelText('Theme'), 'Dark');
+    await fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+
+    await waitFor(() => expect(onAppearanceSaved).toHaveBeenCalledWith({ theme: 'dark' }));
+    expect(
+      screen.getByText(
+        'Choose “Use daemon theme” and Temporary density “Auto” in the Display menu to return this tab to these saved values.'
+      )
+    ).toBeDefined();
+  });
+
+  it('does not report appearance after saving a setting outside Appearance', async () => {
+    const onAppearanceSaved = vi.fn();
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(settingsResponse(initialSettings, '"etag-a"'))
+      .mockResolvedValueOnce(settingsResponse({
+        ...initialSettings,
+        settings: initialSettings.settings.map((item) =>
+          item.key === 'vector.embeddings.endpoint'
+            ? { ...item, value: { string: 'http://127.0.0.1:11435' } }
+            : item
+        )
+      }, '"etag-b"'));
+    render(SettingsWorkspace, { client: createAPIClient(fetchFn), category: 'search', onAppearanceSaved });
+    const endpoint = await screen.findByLabelText('Text embedding endpoint');
+    await fireEvent.input(endpoint, { target: { value: 'http://127.0.0.1:11435' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Save changes' })).toBeNull());
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+    expect(onAppearanceSaved).not.toHaveBeenCalled();
+  });
+
   it('states when saved changes apply for each posture', async () => {
     render(SettingsWorkspace, {
       client: createAPIClient(vi.fn<typeof fetch>(async () => settingsResponse(initialSettings, '"etag-a"')))

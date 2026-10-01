@@ -97,7 +97,7 @@ var settingsGroups = []SettingGroup{
 var settingsMetadata = map[string]settingMetadata{
 	"carddav.provider":        {"CardDAV provider", "Google Contacts or a server using a password.", "carddav"},
 	"carddav.oauth_app":       {"CardDAV OAuth app", "Named Google OAuth application used for contacts.", "carddav"},
-	"web.default_search_mode": {"Default search mode", "Search mode the web app opens with.", ""},
+	"web.default_search_mode": {"Default search mode", "Used when a tab opens without a search mode in its link. Your current search keeps its mode.", ""},
 	"web.theme":               {"Theme", "Light, dark, or follow the system.", ""},
 	"web.density":             {"Density", "Spacing of tables and toolbars.", ""},
 

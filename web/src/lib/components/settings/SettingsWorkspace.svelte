@@ -17,6 +17,8 @@
 
   const hostManagedNote = 'Host-managed values are set in config.toml on the daemon host.';
   const OWN_SAVE_NOTE = 'These save immediately when you use their buttons — not with Save changes.';
+  const APPEARANCE_NOTE =
+    'Choose “Use daemon theme” and Temporary density “Auto” in the Display menu to return this tab to these saved values.';
 </script>
 
 <script lang="ts">
@@ -48,6 +50,7 @@
     SettingsResponse as GeneratedSettingsResponse,
   } from '../../api/generated/models';
   import type { CardDAVSettingsRequest, SettingsNavigationTarget } from '../../carddav/navigation';
+  import type { SavedAppearance } from '../../theme/preferences.svelte';
   import PageHeader from '../shell/PageHeader.svelte';
   import CardDAVSettingsWorkspace from './CardDAVSettingsWorkspace.svelte';
   import PeopleInferenceSettings from './PeopleInferenceSettings.svelte';
@@ -89,6 +92,7 @@
     category = 'browser',
     onCategoryChange = () => undefined,
     onCardDAVRequestConsumed = () => undefined,
+    onAppearanceSaved = () => undefined,
   }: {
     client: APIClient;
     plainHTTPWarning?: boolean;
@@ -97,6 +101,7 @@
     category?: string;
     onCategoryChange?: (categoryID: string) => void;
     onCardDAVRequestConsumed?: (key: number) => void;
+    onAppearanceSaved?: (saved: SavedAppearance) => void;
   } = $props();
   let settings = $state<SettingState[]>([]);
   let groups = $state<SettingGroupState[]>([]);
@@ -277,6 +282,20 @@
   function isDirty(key: string): boolean {
     return Object.hasOwn(drafts, key) || Object.hasOwn(secretUpdates, key);
   }
+  const APPEARANCE_FIELDS: Readonly<Record<string, keyof SavedAppearance>> = {
+    'web.theme': 'theme',
+    'web.density': 'density',
+    'web.default_search_mode': 'defaultSearchMode',
+  };
+  function savedAppearance(saved: readonly SettingState[], keys: ReadonlySet<string>): SavedAppearance | undefined {
+    const result: SavedAppearance = {};
+    for (const setting of saved) {
+      const field = Object.hasOwn(APPEARANCE_FIELDS, setting.key) ? APPEARANCE_FIELDS[setting.key] : undefined;
+      const value = setting.value && 'string' in setting.value ? setting.value.string : undefined;
+      if (field && keys.has(setting.key) && typeof value === 'string') result[field] = value;
+    }
+    return Object.keys(result).length > 0 ? result : undefined;
+  }
   async function saveSettings() {
     const updates: SettingUpdate[] = [
       ...Object.entries(drafts)
@@ -323,6 +342,8 @@
       credentialETag = response.headers.get('Credential-ETag') ?? result.credential_etag ?? credentialETag;
       discardChanges();
       void focusCategoryHeading();
+      const appearance = savedAppearance(result.settings, new Set(updates.map(({ key }) => key)));
+      if (appearance) onAppearanceSaved(appearance);
     } catch (cause) {
       error = cause instanceof Error ? cause.message : 'Unable to save settings.';
     } finally {
@@ -696,6 +717,7 @@
                 {/if}
                 {postureText(posture)}
               </p>
+              {#if group.id === 'browser'}<p class="posture-note">{APPEARANCE_NOTE}</p>{/if}
             </header>
 
             {#if group.sections.length > 0}
@@ -837,6 +859,10 @@
   }
   .posture--providers {
     margin: 0;
+  }
+  .category .posture-note {
+    color: var(--text-muted);
+    font-size: var(--font-size-xs);
   }
   .own-save {
     margin: 0;

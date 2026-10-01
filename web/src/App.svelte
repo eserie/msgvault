@@ -9,8 +9,13 @@
   import AppShell from './lib/components/shell/AppShell.svelte';
   import MessagePage from './lib/components/reader/MessagePage.svelte';
   import type { ExploreSearchMode } from './lib/explore/models';
-  import { parseSearchMode } from './lib/search/modes';
-  import { createAppearancePreferences, type AppearanceDefaults } from './lib/theme/preferences.svelte';
+  import { availableSearchModeStorage, parseSearchMode, rememberSearchMode } from './lib/search/modes';
+  import {
+    createAppearancePreferences,
+    mergeSavedAppearance,
+    type AppearanceDefaults,
+    type SavedAppearance,
+  } from './lib/theme/preferences.svelte';
   let {
     session = createSessionController(),
   }: {
@@ -64,6 +69,13 @@
       // Keep the safe fallback when settings authority is temporarily unavailable.
     }
   }
+  function appearanceSaved(saved: SavedAppearance): void {
+    appearanceDefaults = mergeSavedAppearance(appearanceDefaults, saved);
+    const mode = parseSearchMode(saved.defaultSearchMode);
+    // The open view keeps its mode and URL; tabs opened later without a mode
+    // in their link read this browser's remembered mode first.
+    if (mode) rememberSearchMode(mode, availableSearchModeStorage());
+  }
   function settingString(
     setting:
       | {
@@ -102,6 +114,7 @@
         {navigationTarget}
         {category}
         {onCategoryChange}
+        onAppearanceSaved={appearanceSaved}
       />
     {/snippet}
   </AppShell>
