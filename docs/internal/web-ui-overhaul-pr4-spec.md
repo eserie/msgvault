@@ -1,7 +1,8 @@
 # Web UI overhaul, PR 4: Manage
 
-Status: draft for review, 2026-09-30; revised after review the same day. PR 4
-has not started. This spec refines
+Status: approved 2026-09-30 after review; implemented on the ui-ux-manage
+branch (PR pending). [Implementation rulings](#implementation-rulings) records
+where the build differs from the text below. This spec refines
 the Manage sections of the [Web UI overhaul design](web-ui-overhaul-design.md)
 (Sources, Operations, Deletions, Settings, and the sign-in and boot screens)
 against the code on `main` at a3f5f04d. The design owns the shared rules
@@ -11,7 +12,8 @@ changes. Where the two disagree, this spec records the deviation under
 [Decisions for review](#decisions-for-review).
 
 PR 4 is the last overhaul pull request, so it also brings the
-[Web UI guide](../web-ui.md) and its screenshots up to date.
+[Web UI guide](../web-ui.md) text up to date. A maintainer regenerates its
+screenshots separately (ruling R1).
 
 ## Outcome
 
@@ -63,7 +65,8 @@ Observed with the Enron docs fixture at 1440×900 and 420×860, light and dark.
     types the daemon reports (`internal/api/scheduler_jobs.go`): Gmail, IMAP,
     Microsoft mail, Teams, Discord, Meeting import, SMS backup, iMazing CSV,
     Circleback, Google Calendar, Muesli, Granola, Notion meetings, PST import,
-    Apple Mail, Mbox import. Unknown types fall back to sentence case.
+    Apple Mail, Mbox import, plus the types in ruling R3. An empty type shows
+    no label, only the identifier. Unknown types fall back to sentence case.
   - **Schedule:** the `scheduleSummary` sentence with the cron text in its
     tooltip only; the visible cron line is removed. "Not scheduled" and "On
     demand · imported through the API" stay.
@@ -117,7 +120,7 @@ Observed with the Enron docs fixture at 1440×900 and 420×860, light and dark.
   | Part | Content |
   |---|---|
   | Name | Kind label, as today |
-  | Status | A chip: **Off** (gray) when not configured; otherwise the latest run's state with the shared tones, or "No runs yet" (gray) |
+  | Status | A chip: the active run's state (Running or Queued) when one exists; otherwise **Off** (gray) when not configured; otherwise the latest run's state with the shared tones; otherwise "No runs yet" (gray) when history is available, and no chip when it is not |
   | Time | Latest run's start time; "Last succeeded {time}" when it differs from the latest |
   | Actions | The existing related-status and action buttons, unchanged names; **Set up** for an Off kind with a settings target |
 
@@ -209,8 +212,9 @@ Observed with the Enron docs fixture at 1440×900 and 420×860, light and dark.
   - Row actions keep their names: "Inspect {id}" (outline) and "Cancel {id}"
     (outline, not red; only for Pending and In progress). "Confirm cancel
     manifest" stays red.
-  - The detail opens beside the table at 900px and wider, below it on narrow
-    screens, with a "Close manifest detail" button. Status uses the same chip.
+  - The detail opens beside the table wider than 900px and below it at 900px
+    and narrower, with a "Close manifest detail" button. Closing it returns
+    focus to that manifest's "Inspect {id}" button. Status uses the same chip.
 - **Selection bar (deferred from PR 2).** When the Everything preflight
   reports `stage_deletion` unavailable, "Review for deletion…" is disabled and
   shows the reason sentence, the same way "Open selection in source" does.
@@ -250,8 +254,8 @@ Observed with the Enron docs fixture at 1440×900 and 420×860, light and dark.
     App through a callback, and App updates its defaults.
   - **Theme and density** apply to the open tab at once, unless a Display menu
     override is active in this tab; the override still wins. The Appearance
-    note says: "Use daemon theme and Density: Auto in the Display menu return
-    this tab to these saved values."
+    note says: "Choose “Use daemon theme” and Temporary density “Auto” in the
+    Display menu to return this tab to these saved values."
   - **Default search mode** does not change the open view's mode or URL.
     Saving writes the new mode to this browser's remembered mode
     (localStorage `msgvault-search-mode`), so the next tab opened here without
@@ -274,9 +278,9 @@ into one shared rule. Copy is unchanged.
 
 - `docs/web-ui.md` describes the shipped navigation, toolbars, and every
   workspace as they are after PR 4, in the guide's existing structure.
-- The docs screenshots are regenerated with
-  `docs/screenshots/generate-web-fixture-screenshots.sh`, following its
-  fixture-lock and provenance rules.
+- The docs screenshots are not regenerated in PR 4 (ruling R1). A maintainer
+  regenerates them with `docs/screenshots/generate-web-fixture-screenshots.sh`,
+  following its fixture-lock and provenance rules.
 
 ## Decisions for review
 
@@ -313,6 +317,45 @@ into one shared rule. Copy is unchanged.
    reviewed selection on screen.
 6. **Zero counters hidden in the table.** The table hides counters whose value
    is 0; the run detail shows them all.
+
+## Implementation rulings
+
+Review of the implementation settled these points. Each one overrides the
+text above where they differ.
+
+- **R1. Screenshots deferred.** PR 4 updates the guide text only. Regenerating
+  the docs screenshots needs a macOS run for the darwin images and an
+  authorized docs-assets publish, so a maintainer does it.
+- **R2. New Settings authorities.** `settingsAuthority` gains
+  `semantic_search` (Search, focusing `vector.enabled`) and
+  `person_embeddings` (Search, focusing `vector.people.enabled`).
+- **R3. More source-type labels.** The label map also covers Beeper, Slack,
+  EML import, Maildir import, WhatsApp, Apple Messages, Facebook Messenger, and
+  Google Groups. An empty `source_type` shows no type label (the identifier
+  only), not "Gmail".
+- **R4. Refresh keeps focus.** Kit disables the refresh button while busy, so
+  when a refresh started from it completes, focus returns to the button. It
+  returns only if focus is still on the page body or inside the refresh
+  control; a control the person moved to keeps focus.
+- **R5. Standard breakpoint.** The manifest detail sits beside the table above
+  the standard 900px breakpoint and stacks below it at 900px and narrower.
+- **R6. Notice label.** Kit `Notice` prints a visible "Warning" label above
+  the plain-HTTP text. That label is accepted.
+- **R7. Appearance note copy.** The note reads "Choose “Use daemon theme” and
+  Temporary density “Auto” in the Display menu to return this tab to these
+  saved values."
+- **R8. Focus after the save bar closes.** When Save or Discard removes the
+  save bar, focus moves to the category heading. The same happens when a
+  conflict reload (412) leaves no drafts.
+- **R9. An active run beats Off.** A kind that is not configured but has a
+  running or queued run shows that run's state chip instead of Off.
+- **No runs yet needs history.** "No runs yet" shows only when the kind's
+  history is available. A kind with unavailable history and no run shows no
+  state chip, only its "History unavailable" note.
+- **Muted chip contrast.** Kit mixes muted chip text toward its background,
+  which falls below 4.5:1 in the light theme. `web/src/styles/tokens.css`
+  overrides the muted chip text color with the palette's muted text token, so
+  Off, No runs yet, and Cancelled meet 4.5:1 in both themes.
 
 ## Not in PR 4
 
@@ -366,5 +409,5 @@ New tests cover:
   Sources row detail, the Operations status list, a Deletions review, and each
   Settings category with a draft.
 
-The PR includes before and after screenshots at 1440×900 and 420×860, light
-and dark, from the docs fixture.
+Before and after screenshots at 1440×900 and 420×860, light and dark, from
+the docs fixture wait for the maintainer screenshot run (ruling R1).
