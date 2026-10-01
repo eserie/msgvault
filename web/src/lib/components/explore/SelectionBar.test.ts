@@ -192,6 +192,35 @@ describe('SelectionBar', () => {
     expect(onReviewDeletion).toHaveBeenLastCalledWith('all_matching');
   });
 
+  it('disables Review for deletion with the staging reason as a sentence', () => {
+    const selection = new ExploreSelectionState();
+    selection.selectVisible(['message:1']);
+    render(SelectionBar, {
+      selection,
+      totalCount: 2,
+      onReviewDeletion: vi.fn(),
+      preflight: preflight([
+        { action: 'stage_deletion', reason: 'selection_contains_items_that_cannot_be_deleted_from_source' },
+      ]),
+    });
+
+    const review = screen.getByRole('button', { name: 'Review for deletion…' }) as HTMLButtonElement;
+    expect(review.disabled).toBe(true);
+    const reason = screen.getByText('None of the selected items can be deleted from their source.');
+    expect(review.getAttribute('aria-describedby')).toBe(reason.id);
+    expect(reason.getAttribute('title')).toBe('selection_contains_items_that_cannot_be_deleted_from_source');
+  });
+
+  it('keeps Review for deletion enabled when staging is available', () => {
+    const selection = new ExploreSelectionState();
+    selection.selectVisible(['message:1']);
+    render(SelectionBar, { selection, totalCount: 2, onReviewDeletion: vi.fn(), preflight: preflight() });
+
+    const review = screen.getByRole('button', { name: 'Review for deletion…' }) as HTMLButtonElement;
+    expect(review.disabled).toBe(false);
+    expect(review.getAttribute('aria-describedby')).toBeNull();
+  });
+
   it('keeps meeting context independent from raw-export preflight eligibility', async () => {
     const selection = new ExploreSelectionState();
     selection.selectVisible(['message:7', 'message:91']);

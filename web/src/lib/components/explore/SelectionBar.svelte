@@ -43,6 +43,10 @@
 
   const exportReason = $derived(preflight?.unavailable_actions.find((item) => item.action === 'export')?.reason);
   const openReason = $derived(preflight?.unavailable_actions.find((item) => item.action === 'open_in_source')?.reason);
+  const stageReason = $derived(
+    preflight?.unavailable_actions.find((item) => item.action === 'stage_deletion')?.reason,
+  );
+  const stageReasonID = $props.id();
   const visible = $derived(selection.mode === 'all_matching' || selection.count > 0);
   const openMenuVisible = $derived(Boolean(openReason) || Boolean(preflight && onOpenInSource));
   const exportTarget = $derived(preflight?.action_targets?.find((item) => item.action === 'export'));
@@ -113,8 +117,15 @@
         size="sm"
         surface="soft"
         label="Review for deletion…"
+        disabled={Boolean(stageReason)}
+        ariaDescribedby={stageReason ? stageReasonID : undefined}
         onclick={() => onReviewDeletion(selection.mode === 'all_matching' ? 'all_matching' : 'explicit')}
       />
+      {#if stageReason}
+        <span id={stageReasonID} class="action-reason" title={stageReason}>
+          {preflightReasonLabel('stage_deletion', stageReason)}
+        </span>
+      {/if}
     {/if}
     {#if openMenuVisible}
       <Menu align="end">
