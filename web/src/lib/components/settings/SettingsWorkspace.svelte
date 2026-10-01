@@ -328,6 +328,7 @@
         await loadSettings(true);
         error =
           'The configuration changed on disk. Latest settings were loaded; review your local changes and save again.';
+        if (dirtyCount === 0) void focusCategoryHeading();
         return;
       }
       if (!result) {

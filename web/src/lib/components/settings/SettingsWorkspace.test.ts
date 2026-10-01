@@ -830,6 +830,30 @@ describe('SettingsWorkspace', () => {
     expect(fetchFn).toHaveBeenCalledTimes(3);
   });
 
+  it('moves focus to the category heading when a conflict reload settles every draft', async () => {
+    const latest = {
+      ...initialSettings,
+      settings: initialSettings.settings.map((item) =>
+        item.key === 'web.theme' ? { ...item, value: { string: 'dark' } } : item
+      )
+    };
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(settingsResponse(initialSettings, '"etag-a"'))
+      .mockResolvedValueOnce(Response.json({ error: 'settings_conflict' }, { status: 412 }))
+      .mockResolvedValueOnce(settingsResponse(latest, '"etag-latest"'));
+    render(SettingsWorkspace, { client: createAPIClient(fetchFn) });
+
+    await chooseSelectOption(await screen.findByLabelText('Theme'), 'Dark');
+    await fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+
+    expect((await screen.findByRole('alert')).textContent).toContain('changed on disk');
+    expect(screen.queryByRole('button', { name: 'Save changes' })).toBeNull();
+    await waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByRole('heading', { level: 2, name: 'Appearance' }))
+    );
+  });
+
   it('edits cron schedules with the cron field and its presets', async () => {
     const requests: Request[] = [];
     const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
