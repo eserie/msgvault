@@ -1,6 +1,7 @@
 # Web UI overhaul, PR 4: Manage
 
-Status: draft for review, 2026-09-30. PR 4 has not started. This spec refines
+Status: draft for review, 2026-09-30; revised after review the same day. PR 4
+has not started. This spec refines
 the Manage sections of the [Web UI overhaul design](web-ui-overhaul-design.md)
 (Sources, Operations, Deletions, Settings, and the sign-in and boot screens)
 against the code on `main` at a3f5f04d. The design owns the shared rules
@@ -96,7 +97,22 @@ Observed with the Enron docs fixture at 1440×900 and 420×860, light and dark.
 
 - **Header.** "Refresh operations" becomes kit `RefreshControl` in the header
   actions, labelled "Refresh operations", with "Updated N ago" from the last
-  successful status load. See [decision 1](#decisions-for-review).
+  successful status load. It refreshes every 5 minutes as well as on demand.
+  See [decision 1](#decisions-for-review).
+- **Refresh keeps your place.** Kit calls the same function for a click and
+  for the timer, so both behave the same way:
+  - The status list reloads.
+  - The first page of runs reloads and is merged into the loaded history by
+    run ID: rows already loaded update in place, and runs that are not loaded
+    yet are added at the top.
+  - Pages loaded with "Load more operation history", the cursor for the next
+    page, the selected run and its open detail, scroll position, and keyboard
+    focus all stay as they were.
+  - "Load more operation history" skips runs that are already loaded, so a run
+    that moved between pages is never shown twice.
+  - Changing a filter or the date range still restarts from page one, as
+    today. A refresh that fails leaves the loaded rows and shows the existing
+    error.
 - **Status list.** The five lane cards become one region "Operation lanes"
   holding one list per lane (headings Messages, Facts, Contacts, Documents,
   Attachments), with one row per operation kind:
@@ -112,24 +128,36 @@ Observed with the Enron docs fixture at 1440×900 and 420×860, light and dark.
     an amber note on the row.
   - "Active" runs show as the status chip (Running or Queued, blue).
   - A lane with no kinds shows "Status unavailable" (gray).
-- **Set up targets.** **Set up** opens Settings on the category, and focuses
-  the setting when one exists:
+- **Set up targets.** An Off kind shows one of three things, depending on
+  where it is configured:
 
-  | Kind | Opens |
+  | Kind | Off row shows |
   |---|---|
-  | `message_embedding` | Search, `vector.enabled` |
-  | `person_embedding` | Search, `vector.people.enabled` |
-  | `document_embedding` | Search, `vector.enabled` |
-  | `visual_embedding` | Search, `vector.multimodal.enabled` |
-  | `person_enrichment` | Person enrichment |
-  | `person_sweep` | People sweep |
-  | `document_extraction` | Attachments |
-  | `carddav_sync` | CardDAV account (existing "Open CardDAV settings") |
+  | `message_embedding` | **Set up**: Settings → Search, focusing `vector.enabled` |
+  | `person_embedding` | **Set up**: Settings → Search, focusing `vector.people.enabled` |
+  | `visual_embedding` | **Set up**: Settings → Search, focusing `vector.multimodal.enabled` |
+  | `person_enrichment` | **Set up**: Settings → Person enrichment (its own editor) |
+  | `person_sweep` | **Set up**: Settings → People sweep (its own editor) |
+  | `carddav_sync` | The existing "Open CardDAV settings" |
+  | `document_extraction` | "Configured in config.toml on the daemon host." and a link, [Document indexing setup](https://msgvault.io/docs/usage/document-indexing/#configure-the-policy) |
+  | `document_embedding` | "Configured in config.toml on the daemon host. Also needs semantic search." and a link, [Document search setup](https://msgvault.io/docs/usage/document-indexing/#semantic-and-hybrid-document-search) |
   | `source_sync` | No Set up; "Open Sources status" stays |
 
-  The existing related-status panel's settings buttons ("Open document index
-  settings" and the others) use the same targets, which fixes the document
-  index link.
+  - The daemon decides "configured" (`internal/api/operations.go`).
+    Document extraction needs `attachments.documents.enabled` and a usable
+    document index scope. Document embedding needs `vector.enabled` and
+    `attachments.documents.index.embeddings.enabled`. Neither has a Settings
+    control, so no Set up button points at Settings for them. No new settings
+    controls are added.
+  - The related-status panels use the same rule. "Open visual attachment
+    settings" keeps its Search target. The document index and document vector
+    panels replace their settings buttons ("Open document index settings",
+    "Open document vector settings") with the same host-configuration line
+    and guide link as the rows above. The `document_index` and
+    `document_vector` values of `settingsAuthority` go away with them; an old
+    link carrying one opens Settings on Appearance.
+  - Guide links open in a new tab, like the existing Google Contacts setup
+    link in CardDAV settings.
 - **Toolbar.** Lane, Kind, State, and the date range stay in one row with their
   URL keys and names.
 - **Runs table.**
@@ -176,7 +204,7 @@ Observed with the Enron docs fixture at 1440×900 and 420×860, light and dark.
     amber box. The partial-staging warning stays an amber `alert`.
 - **Manifests.**
   - No manifests: an `EmptyState` "No staged deletions" with "Deletions you
-    stage appear here until `msgvault delete-staged` runs them."
+    stage appear here, along with their execution status."
   - A table "Deletion manifests" with columns ID (monospace), Description,
     Items, Status, Created, and Actions. Status is a chip: Pending (blue), In
     progress (blue), Completed (green), Failed (red), Cancelled (gray).
@@ -256,16 +284,20 @@ into one shared rule. Copy is unchanged.
 ## Decisions for review
 
 1. **Refresh control.** Kit `RefreshControl` refreshes on an interval
-   (default 5 minutes) as well as on demand. This spec adopts it with the
-   default interval, so Operations status updates while the page stays open.
-   Today the page refreshes only when asked. The interval request is the same
-   status call the button already makes.
+   (default 5 minutes) as well as on demand, through one callback. Today's
+   refresh reloads status and page one of runs, cancels paging, and replaces
+   the loaded rows (`operations/controller.svelte.ts`, `loadPageOne`). Run on
+   a timer, that would throw away history someone paged through. So the
+   refresh callback becomes a merge-in-place refresh, as described under
+   Operations, and both clicks and the timer use it.
 2. **Gray "Off" uses a chip, not a dot.** Kit `StatusDot` has no gray status.
    Operations uses kit `Chip` (tone `muted`) for Off and for other statuses, so
    every status in the list is a chip with a word, not a colored dot alone.
-3. **Set up for kinds without a setting key.** `person_sweep`,
-   `document_extraction`, and `document_embedding` have no single catalog key
-   for "on". Set up opens their category without focusing a row.
+3. **Set up only where Settings can change it.** People sweep and person
+   enrichment have their own editors, so Set up opens their category without
+   focusing a row. The document kinds are configured only in config.toml on
+   the daemon host, so their rows explain that and link to the setup guide
+   instead of opening a Settings page that cannot turn them on.
 4. **Error sentences come from the daemon.** The design asks for a sentence per
    `OperationPublicErrorCode`. The daemon already sends a fixed, public-safe
    sentence for every code (`fixedPublicErrorMessages`), so the UI shows that
@@ -305,9 +337,15 @@ New tests cover:
 
 - Sources: each reason label; the status chip for each latest result; the row
   detail toggle with errors and its absence without them.
-- Operations: Off and Set up for each kind in the targets table; the document
-  index settings link opens Attachments; counters format with mixed units and
-  zero values; trigger "—"; refresh control calls the status load.
+- Operations: Off and its target for each kind in the targets table,
+  including the host-configuration line and guide link for both document
+  kinds and the document related-status panels; counters format with mixed
+  units and zero values; trigger "—".
+- Operations refresh: load a second page of runs and open a run's detail,
+  then let the refresh timer fire (fake timers). The second page's rows, the
+  next-page cursor, the open detail, and focus remain; an updated run's state
+  changes in place; a new run appears at the top; "Load more" afterward does
+  not duplicate a run. A click on the refresh control behaves the same way.
 - Deletions: empty state with no selection; stage_deletion sentence; only the
   confirmation button is red; manifest status chips and detail close.
 - Settings: category survives reload and Back; `settingsAuthority` still
