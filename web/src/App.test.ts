@@ -1,5 +1,5 @@
 import { getHealth as generatedGetHealth } from './lib/api/generated/api/api';
-import { fireEvent, render, screen, waitFor } from '@testing-library/svelte';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import App from './App.svelte';
 import { createAPIClient } from './lib/api/client';
@@ -36,6 +36,30 @@ describe('application foundation', () => {
     render(App, { session });
     expect(screen.getByRole('main', { name: 'Connecting' })).toBeDefined();
     expect(document.title).toBe('msgvault');
+  });
+  it('shows the OAuth callback in the same layout as connecting', () => {
+    vi.stubGlobal(
+      'BroadcastChannel',
+      class {
+        postMessage(): void {}
+        close(): void {}
+      },
+    );
+    const close = vi.spyOn(window, 'close').mockImplementation(() => undefined);
+    window.history.replaceState(null, '', '/?state=msgvault-carddav-synthetic&code=synthetic');
+    try {
+      render(App, { session: createSessionController(vi.fn<typeof fetch>()) });
+      const main = screen.getByRole('main');
+      expect(main.className).toContain('boot-screen');
+      expect(within(main).getByText('msgvault').className).toContain('boot-screen__brand');
+      expect(
+        within(main).getByText('Return to CardDAV settings to finish connecting. You can close this window.'),
+      ).toBeDefined();
+    } finally {
+      close.mockRestore();
+      vi.unstubAllGlobals();
+      window.history.replaceState(null, '', '/');
+    }
   });
   it('shows a bootstrap error with retry instead of the shell, and recovers on retry', async () => {
     let sessionCalls = 0;

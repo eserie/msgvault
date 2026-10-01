@@ -97,7 +97,7 @@
 </svelte:head>
 
 {#if oauthCallback}
-  <main class="boot"><p>Return to CardDAV settings to finish connecting. You can close this window.</p></main>
+  <main class="boot-screen"><p class="boot-screen__brand">msgvault</p><p>Return to CardDAV settings to finish connecting. You can close this window.</p></main>
 {:else if session.authMode === 'required'}
   <Login {session} />
 {:else if shellMounted}
@@ -120,52 +120,15 @@
   </AppShell>
   {/if}
 {:else if session.error !== undefined}
-  <main class="boot" aria-label="Connection error">
-    <p class="boot__brand">msgvault</p>
+  <main class="boot-screen" aria-label="Connection error">
+    <p class="boot-screen__brand">msgvault</p>
     <h1>Can't reach the msgvault daemon</h1>
     <p role="alert">{session.error}</p>
     <Button tone="info" surface="solid" label="Retry" onclick={() => void session.bootstrap()} />
   </main>
 {:else}
-  <main class="boot" aria-label="Connecting">
-    <p class="boot__brand">msgvault</p>
+  <main class="boot-screen" aria-label="Connecting">
+    <p class="boot-screen__brand">msgvault</p>
     <p>Connecting…</p>
   </main>
 {/if}
-
-<style>
-  .boot {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: var(--space-5);
-    max-width: 28rem;
-    margin: 0 auto;
-    padding: var(--space-8) var(--space-6);
-    font-size: var(--font-size-md);
-  }
-
-  .boot p,
-  .boot h1 {
-    margin: 0;
-  }
-
-  .boot h1 {
-    font-size: var(--font-size-xl);
-    font-weight: 650;
-  }
-
-  .boot__brand {
-    color: var(--text-primary);
-    font-size: var(--font-size-md);
-    font-weight: 650;
-  }
-
-  .boot p:not(.boot__brand) {
-    color: var(--text-muted);
-  }
-
-  .boot p[role='alert'] {
-    color: var(--text-danger);
-  }
-</style>

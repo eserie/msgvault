@@ -34,3 +34,42 @@ h3 {
   font-size: var(--font-size-md);
   font-weight: 600;
 }
+
+/* Sign-in and boot screens share one narrow column with a brand line. */
+.boot-screen,
+.boot-screen > form {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-5);
+}
+
+.boot-screen {
+  max-width: 28rem;
+  margin: 0 auto;
+  padding: var(--space-8) var(--space-6);
+  font-size: var(--font-size-md);
+}
+
+.boot-screen p,
+.boot-screen h1 {
+  margin: 0;
+}
+
+.boot-screen h1 {
+  font-size: var(--font-size-xl);
+  font-weight: 650;
+}
+
+.boot-screen__brand {
+  color: var(--text-primary);
+  font-weight: 650;
+}
+
+.boot-screen p:not(.boot-screen__brand) {
+  color: var(--text-muted);
+}
+
+.boot-screen p[role='alert'] {
+  color: var(--text-danger);
+}
