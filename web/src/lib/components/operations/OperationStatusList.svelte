@@ -120,15 +120,15 @@
   ul { display: grid; margin: 0; padding: 0; list-style: none; }
   li {
     display: grid;
-    grid-template-columns: minmax(10rem, 1fr) auto minmax(10rem, 1fr) auto;
+    grid-template-columns: minmax(10rem, 14rem) minmax(7rem, 10rem) minmax(0, 1fr) auto;
     align-items: center;
     gap: var(--space-2) var(--space-3);
     padding-block: var(--space-2);
     border-top: 1px solid var(--border-muted);
   }
-  .name { font-size: var(--font-size-sm); font-weight: 600; }
+  .name { min-width: 0; font-size: var(--font-size-sm); font-weight: 600; }
   .status, .actions { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); }
-  .actions { justify-content: flex-end; }
+  .actions { justify-content: flex-end; min-width: 0; max-width: 28rem; }
   .history-note { color: var(--status-warning-ink); font-size: var(--font-size-xs); }
   .time { display: grid; gap: var(--space-1); color: var(--text-muted); font-size: var(--font-size-xs); }
 
