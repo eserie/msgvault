@@ -367,7 +367,9 @@ Operations filtered to source sync.
 **Sync now** is available only when that source reports the capability. When it
 is not, the Action column says why in words: "Imported file — nothing to sync",
 "Sync in progress", "Scheduler unavailable", "Sync not set up", or "Sync
-unavailable". The daemon's reason code stays in the text's tooltip. A `202
+unavailable". The daemon's reason code stays in the text's tooltip.
+Meeting-import sources show "On-demand API source" instead, because meetings
+arrive through the API rather than a sync. A `202
 Accepted` response means the daemon accepted the request, not that work has
 finished. While the page is visible, the UI polls source status with bounded
 backoff to show the run and live progress; it opens no streaming connection.
@@ -411,7 +413,7 @@ from the latest run, the row adds "Last succeeded" and its time. The status chip
 reads:
 
 - **Queued** or **Running** while a run is active.
-- **Off** when the work is not configured.
+- **Off** when the work is not configured and no run is active.
 - **Succeeded**, **Partial**, **Failed**, or **Cancelled** for the latest run.
 - **No runs yet** when the work is configured, history is available, and
   nothing has run.
@@ -451,7 +453,8 @@ The run history table lists Kind, Trigger, State, Started, Duration, and
 Counters. Trigger is Manual, Scheduled, or a dash when none was recorded. Queued,
 running, succeeded, partial, failed, and cancelled are distinct states. Counters
 name each unit once, as in "20 messages processed · 20 added", and leave out
-zero counts; "No counters" means none were reported. A failed or partial run
+zero counts. "No counters" means none were reported or every count was zero;
+open the run to see them all. A failed or partial run
 shows the daemon's error sentence under its state.
 
 Open a run to inspect its progress, outcome, timestamps, every counter, and
