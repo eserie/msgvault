@@ -89,7 +89,9 @@
     settings?: Snippet<[
       CardDAVSettingsRequest | undefined,
       (key: number) => void,
-      SettingsNavigationTarget | undefined
+      SettingsNavigationTarget | undefined,
+      string,
+      (categoryID: string) => void
     ]>;
     appearanceDefaults?: AppearanceDefaults;
     searchModeDefault?: ExploreSearchMode;
@@ -280,11 +282,16 @@
     cardDAVSettingsRequest = { conflictID, key: ++cardDAVSettingsRequestKey };
     announceOperation(`Opening CardDAV conflict ${conflictID} in Settings.`);
     commitWorkspace('settings');
+    replaceCommittedNavigation({ settingsCategory: 'carddav' });
+  }
+  function selectSettingsCategory(categoryID: string): void {
+    commitNavigation({ settingsCategory: categoryID, settingsAuthority: '' });
   }
   function openCardDAVSettings(): void {
     cardDAVSettingsRequest = { key: ++cardDAVSettingsRequestKey };
     announceOperation('Opening CardDAV settings.');
     commitWorkspace('settings');
+    replaceCommittedNavigation({ settingsCategory: 'carddav' });
   }
   function openOperations(
     operationLane: OperationsURLState['operationLane'],
@@ -1301,7 +1308,13 @@
     </header>
     <div class="app-main">
       {#if exploreState.current.workspace === 'settings'}
-        {#if settings}{@render settings(cardDAVSettingsRequest, consumeCardDAVSettingsRequest, settingsNavigationTarget)}{/if}
+        {#if settings}{@render settings(
+          cardDAVSettingsRequest,
+          consumeCardDAVSettingsRequest,
+          settingsNavigationTarget,
+          exploreState.current.settingsCategory,
+          selectSettingsCategory
+        )}{/if}
       {:else if exploreState.current.workspace === 'saved_views'}
         <SavedViewsWorkspace
           {client}

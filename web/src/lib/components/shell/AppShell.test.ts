@@ -1024,6 +1024,36 @@ describe('AppShell', () => {
     state.destroy();
   });
 
+  it('opens CardDAV settings from Operations on the CardDAV category', async () => {
+    window.history.replaceState(null, '', `/?explore=${encodeURIComponent(JSON.stringify({ workspace: 'operations' }))}`);
+    const fetchFn = vi.fn<typeof fetch>(async (input) => {
+      const path = new URL(input instanceof Request ? input.url : String(input)).pathname;
+      if (path.endsWith('/operations/status')) return Response.json({ lanes: [{
+        kind: 'carddav_sync', lane: 'contacts', configured: true,
+        history_availability: 'available', related_status: 'getCardDAVStatus', supported_actions: []
+      }] });
+      if (path.endsWith('/operations/runs')) return Response.json({
+        runs: [], unavailable_kinds: [], membership_revision: 1
+      });
+      return Response.json(exploreResponse());
+    });
+    const settings = createRawSnippet<[unknown, (key: number) => void, unknown]>(() => ({
+      render: () => '<main aria-label="CardDAV Settings fixture"></main>'
+    }));
+    const state = new ExploreState(window);
+    const rendered = render(AppShell, {
+      client: createAPIClient(fetchFn), state, enabled: false, settings: settings as never
+    });
+    try {
+      await fireEvent.click(await screen.findByRole('button', { name: 'Open CardDAV settings' }));
+      expect(state.current).toMatchObject({ workspace: 'settings', settingsCategory: 'carddav' });
+      expect(new URL(window.location.href).searchParams.get('explore')).toContain('"settingsCategory":"carddav"');
+    } finally {
+      rendered.unmount();
+      state.destroy();
+    }
+  });
+
   it('opens document Settings without a live status request when Operations proves it is unconfigured', async () => {
     window.history.replaceState(null, '', `/?explore=${encodeURIComponent(JSON.stringify({ workspace: 'operations' }))}`);
     const requests: string[] = [];
@@ -1049,6 +1079,38 @@ describe('AppShell', () => {
 
     rendered.unmount();
     state.destroy();
+  });
+
+  it('passes the URL Settings category to Settings and commits a chosen one', async () => {
+    window.history.replaceState(null, '', `/?explore=${encodeURIComponent(JSON.stringify({
+      workspace: 'settings', settingsCategory: 'search'
+    }))}`);
+    const categories: string[] = [];
+    let choose: ((categoryID: string) => void) | undefined;
+    const settings = createRawSnippet<
+      [unknown, (key: number) => void, unknown, string, (categoryID: string) => void]
+    >((_request, _consumed, _target, getCategory, getChoose) => ({
+      render: () => '<main aria-label="Settings category fixture"></main>',
+      setup: () => {
+        categories.push(getCategory());
+        choose = getChoose();
+      }
+    }));
+    const state = new ExploreState(window);
+    const rendered = render(AppShell, {
+      client: createAPIClient(vi.fn()), state, enabled: false, settings: settings as never
+    });
+    try {
+      expect(await screen.findByRole('main', { name: 'Settings category fixture' })).toBeDefined();
+      expect(categories.at(-1)).toBe('search');
+      choose!('server');
+      expect(state.current).toMatchObject({
+        workspace: 'settings', settingsCategory: 'server', settingsAuthority: ''
+      });
+    } finally {
+      rendered.unmount();
+      state.destroy();
+    }
   });
 
   it.each(['constructor', 'toString', '__proto__'] as const)(
@@ -1577,7 +1639,7 @@ describe('AppShell', () => {
 
     await fireEvent.click(await screen.findByRole('tab', { name: 'Maintenance' }));
     await fireEvent.click(await screen.findByRole('button', { name: 'Review CardDAV conflict 41' }));
-    expect(state.current.workspace).toBe('settings');
+    expect(state.current).toMatchObject({ workspace: 'settings', settingsCategory: 'carddav' });
     expect(settingsHandoffs.at(-1)?.request).toMatchObject({ conflictID: 41 });
     expect(settingsHandoffs.at(-1)?.target).toBeUndefined();
     expect(screen.getByRole('status', { name: 'Operation status' }).textContent)

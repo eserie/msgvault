@@ -30,7 +30,11 @@ import { isGroupingDimension, validateGroupingChain } from '../grouping/catalog'
 import { hasValidSearchAuthority, predicateFingerprint } from './selection';
 import { parseAttachmentSelection } from './attachment-authority';
 import { ARCHIVE_MEETING_HISTORY_KEY, parseArchiveMeetingHistory, type ArchiveMeetingHistory } from '../meetings/archive-selection';
-import { normalizeSettingsNavigationAuthority } from '../carddav/navigation';
+import {
+  normalizeSettingsNavigationAuthority,
+  settingsNavigationTarget,
+  type SettingsNavigationAuthority
+} from '../carddav/navigation';
 import {
   availableSearchModeStorage,
   explicitSearchModeFromURL,
@@ -95,7 +99,8 @@ const RESTORATION_INVALIDATING_FIELDS = new Set<keyof ExploreURLState>([
   'operationStartedFrom',
   'operationStartedBefore',
   'operationStatus',
-  'settingsAuthority'
+  'settingsAuthority',
+  'settingsCategory'
 ]);
 const FILE_MIME_FAMILIES = new Set<FileMIMEFamily>([
   'image', 'pdf', 'audio', 'video', 'text', 'document', 'archive', 'other'
@@ -178,6 +183,7 @@ export const defaultExploreURLState: ExploreURLState = {
   operationRunID: null,
   operationStatus: '',
   settingsAuthority: '',
+  settingsCategory: 'browser',
   columns: [...DEFAULT_EXPLORE_COLUMNS],
   columnWidths: {},
   activeRow: null,
@@ -360,6 +366,17 @@ function operationRunID(value: unknown): string | null {
     : null;
 }
 
+const SETTINGS_CATEGORY_PATTERN = /^[a-z][a-z0-9_-]{0,63}$/;
+
+// A Settings authority link chooses its category; otherwise keep a
+// well-formed category id. Settings shows Appearance for ids the daemon
+// does not list.
+function settingsCategory(value: unknown, authority: SettingsNavigationAuthority | ''): string {
+  const target = settingsNavigationTarget(authority);
+  if (target) return target.categoryID;
+  return typeof value === 'string' && SETTINGS_CATEGORY_PATTERN.test(value) ? value : 'browser';
+}
+
 function legacyRelationshipTarget(
   analysisTarget: string | null,
   facet: RelationshipFacet
@@ -428,6 +445,7 @@ function normalize(value: unknown): ExploreURLState {
     value.relationshipReviewState === 'accepted' || value.relationshipReviewState === 'rejected'
       ? value.relationshipReviewState
       : 'pending';
+  const settingsAuthority = normalizeSettingsNavigationAuthority(value.settingsAuthority);
   const operationLane = typeof value.operationLane === 'string' &&
     OPERATION_LANES.has(value.operationLane as OperationLane)
     ? value.operationLane as OperationLane
@@ -507,7 +525,8 @@ function normalize(value: unknown): ExploreURLState {
       OPERATION_STATUS_AUTHORITIES.has(value.operationStatus as OperationStatusAuthority)
       ? value.operationStatus as OperationStatusAuthority
       : '',
-    settingsAuthority: normalizeSettingsNavigationAuthority(value.settingsAuthority),
+    settingsAuthority,
+    settingsCategory: settingsCategory(value.settingsCategory, settingsAuthority),
     columns: columns(value.columns),
     columnWidths: widths(value.columnWidths),
     activeRow:
@@ -559,7 +578,8 @@ const WORKSPACE_FIELDS: Partial<Record<keyof ExploreURLState, ReadonlyArray<Expl
   operationStartedBefore: ['operations'],
   operationRunID: ['operations'],
   operationStatus: ['operations'],
-  settingsAuthority: ['settings']
+  settingsAuthority: ['settings'],
+  settingsCategory: ['settings']
 };
 // Keyboard focus and scroll position live only in browser history.
 const SESSION_ONLY_FIELDS = new Set<keyof ExploreURLState>(['activeRow', 'scrollAnchor']);

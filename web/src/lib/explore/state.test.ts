@@ -219,8 +219,49 @@ describe('Explore URL state', () => {
     expect(invalid.operationStatus).toBe('');
   });
 
+  it('round-trips the Settings category and shares it only from Settings', () => {
+    const restored = parseExploreURLState(serializeExploreURLState({
+      ...defaultExploreURLState, workspace: 'settings', settingsCategory: 'search'
+    }));
+    expect(restored.settingsCategory).toBe('search');
+    const elsewhere = serializeExploreURLState({
+      ...defaultExploreURLState, workspace: 'everything', settingsCategory: 'search'
+    });
+    expect(elsewhere).not.toContain('settingsCategory');
+    for (const invalid of ['<script>', 42, '', 'Search']) {
+      expect(parseExploreURLState(serializeExploreURLState({
+        ...defaultExploreURLState, workspace: 'settings', settingsCategory: invalid
+      } as unknown as ExploreURLState)).settingsCategory).toBe('browser');
+    }
+  });
+
+  it('lets a Settings authority choose its category', () => {
+    const restored = parseExploreURLState(serializeExploreURLState({
+      ...defaultExploreURLState,
+      workspace: 'settings',
+      settingsAuthority: 'person_embeddings',
+      settingsCategory: 'server'
+    }));
+    expect(restored.settingsCategory).toBe('search');
+  });
+
+  it('restores the Settings category on Back', async () => {
+    window.history.replaceState(null, '', '/');
+    const state = new ExploreState(window);
+    try {
+      state.commitNavigation({ workspace: 'settings', settingsCategory: 'search' });
+      state.commitNavigation({ settingsCategory: 'server' });
+      const restored = new Promise((resolve) => window.addEventListener('popstate', resolve, { once: true }));
+      window.history.back();
+      await restored;
+      expect(state.current.settingsCategory).toBe('search');
+    } finally {
+      state.destroy();
+    }
+  });
+
   it('round-trips only closed Settings authorities', () => {
-    for (const settingsAuthority of ['document_index', 'document_vector', 'visual_attachments'] as const) {
+    for (const settingsAuthority of ['document_index', 'document_vector', 'semantic_search', 'person_embeddings', 'visual_attachments'] as const) {
       const restored = parseExploreURLState(serializeExploreURLState({
         ...defaultExploreURLState,
         workspace: 'settings',

@@ -168,6 +168,7 @@ export interface ExploreURLState {
   operationRunID: string | null;
   operationStatus: '' | OperationStatusAuthority;
   settingsAuthority: '' | SettingsNavigationAuthority;
+  settingsCategory: string;
   columns: ExploreColumn[];
   columnWidths: Partial<Record<ExploreColumn, number>>;
   activeRow: string | null;

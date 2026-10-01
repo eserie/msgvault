@@ -49,6 +49,26 @@ const initialSettings = {
 afterEach(() => vi.useRealTimers());
 
 describe('SettingsWorkspace', () => {
+  it('opens the category it is given, reports changes, and falls back to Appearance', async () => {
+    const onCategoryChange = vi.fn();
+    const client = createAPIClient(vi.fn<typeof fetch>(async () => settingsResponse(initialSettings, '"etag-a"')));
+    const rendered = render(SettingsWorkspace, { client, category: 'search', onCategoryChange });
+    try {
+      expect(await screen.findByRole('heading', { level: 2, name: 'Search' })).toBeDefined();
+      await openSettingsCategory('Daemon');
+      expect(onCategoryChange).toHaveBeenCalledWith('server');
+    } finally {
+      rendered.unmount();
+    }
+
+    const fallback = render(SettingsWorkspace, { client, category: 'retired_category' });
+    try {
+      expect(await screen.findByRole('heading', { level: 2, name: 'Appearance' })).toBeDefined();
+    } finally {
+      fallback.unmount();
+    }
+  });
+
   it('reads a host-configured environment profile and waits for daemon credentials before checking', async () => {
     const requests: Request[] = [];
     const created = true;

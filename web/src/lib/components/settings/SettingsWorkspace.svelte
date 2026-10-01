@@ -37,7 +37,7 @@
   import LockIcon from '@lucide/svelte/icons/lock';
   import RotateCwIcon from '@lucide/svelte/icons/rotate-cw';
   import ZapIcon from '@lucide/svelte/icons/zap';
-  import { onMount, tick } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import type { APIClient } from '../../api/client';
   import type {
     PersonEnrichmentProviderSetting as GeneratedPersonEnrichmentProviderSetting,
@@ -84,12 +84,16 @@
     plainHTTPWarning = false,
     cardDAVRequest = undefined,
     navigationTarget = undefined,
+    category = 'browser',
+    onCategoryChange = () => undefined,
     onCardDAVRequestConsumed = () => undefined,
   }: {
     client: APIClient;
     plainHTTPWarning?: boolean;
     cardDAVRequest?: CardDAVSettingsRequest;
     navigationTarget?: SettingsNavigationTarget;
+    category?: string;
+    onCategoryChange?: (categoryID: string) => void;
     onCardDAVRequestConsumed?: (key: number) => void;
   } = $props();
   let settings = $state<SettingState[]>([]);
@@ -103,7 +107,7 @@
   let loading = $state(true);
   let saving = $state(false);
   let error = $state('');
-  let activeCategory = $state('browser');
+  let activeCategory = $state(untrack(() => category));
   let root = $state<HTMLElement>();
   let consumedCategoryRequestKey: number | undefined;
   let focusedNavigationSettingKey: string | undefined;
@@ -113,6 +117,9 @@
     { id: 'carddav', label: 'CardDAV account' },
     { id: 'people', label: 'People sweep' },
   ]);
+  const resolvedCategory = $derived(
+    categories.some((candidate) => candidate.id === activeCategory) ? activeCategory : 'browser',
+  );
   const dirtyCount = $derived(Object.keys(drafts).length + Object.keys(secretUpdates).length);
   // An emptied number field is a draft in progress, not a value: it keeps the
   // row on, cannot be saved, and never stands in for the off value.
@@ -124,6 +131,18 @@
   onMount(() => {
     void loadSettings(false);
   });
+  // A parent re-render that leaves the category unchanged must not undo a
+  // category chosen or requested locally.
+  let followedCategory = untrack(() => category);
+  $effect(() => {
+    if (category === followedCategory) return;
+    followedCategory = category;
+    activeCategory = category;
+  });
+  function selectCategory(categoryID: string): void {
+    activeCategory = categoryID;
+    onCategoryChange(categoryID);
+  }
   $effect(() => {
     const target = navigationTarget;
     if (target) {
@@ -137,10 +156,7 @@
       focusedNavigationSettingKey = settingKey;
       return;
     }
-    if (focusedNavigationSettingKey !== undefined) {
-      focusedNavigationSettingKey = undefined;
-      activeCategory = 'browser';
-    }
+    focusedNavigationSettingKey = undefined;
   });
 
   $effect(() => {
@@ -615,9 +631,9 @@
   {:else}
     <SettingsLayout
       {categories}
-      bind:active={activeCategory}
+      bind:active={() => resolvedCategory, selectCategory}
       title=""
-      footer={activeCategory === 'carddav' || activeCategory === 'people' ? undefined : settingsFooter}
+      footer={resolvedCategory === 'carddav' || resolvedCategory === 'people' ? undefined : settingsFooter}
     >
       {#snippet panel(activeId)}
         <div class="notices">
