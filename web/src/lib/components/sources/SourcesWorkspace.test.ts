@@ -114,6 +114,24 @@ describe('SourcesWorkspace', () => {
     expect(screen.queryByText('Malformed MIME header')).toBeNull();
   });
 
+  it('drops an open detail row when a refresh clears the errors', async () => {
+    const failed = run('failed', 1, { completed_at: '2026-07-19T11:30:00Z', error_message: 'Mailbox unavailable' });
+    let current = source({ latest_sync: failed });
+    const fetchFn = vi.fn<typeof fetch>(async () => Response.json({ sources: [current] }));
+    const { container } = render(SourcesWorkspace, {
+      client: createAPIClient(fetchFn), now: () => new Date('2026-07-19T12:00:00Z')
+    });
+    await fireEvent.click(await screen.findByRole('button', { name: 'Show details for Archive' }));
+    expect(screen.getByText('Mailbox unavailable')).toBeDefined();
+
+    current = source({ latest_sync: run('completed', 1, { completed_at: '2026-07-19T11:45:00Z' }) });
+    document.dispatchEvent(new Event('visibilitychange'));
+
+    await waitFor(() => expect(screen.queryByText('Mailbox unavailable')).toBeNull());
+    expect(screen.queryByRole('button', { name: 'Show details for Archive' })).toBeNull();
+    expect(container.querySelector('#source-1-details')).toBeNull();
+  });
+
   it('keeps the cron text in the schedule tooltip only', async () => {
     const fetchFn = vi.fn<typeof fetch>(async () => Response.json({ sources: [source({
       scheduled: true, schedule: '0 */6 * * *', next_sync_at: '2026-07-19T18:00:00Z'

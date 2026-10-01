@@ -430,7 +430,7 @@
             {/if}
           </td>
         </tr>
-        {#if expanded.has(source.id)}
+        {#if expanded.has(source.id) && hasDetails(source)}
           <tr class="detail-row" id={detailID}>
             <td colspan="5">
               <div class="details">
