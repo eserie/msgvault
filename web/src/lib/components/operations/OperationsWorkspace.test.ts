@@ -166,6 +166,24 @@ describe('OperationsWorkspace', () => {
     expect(within(screen.getByRole('listitem', { name: 'Person embedding' })).getByText('No runs yet')).toBeDefined();
   });
 
+  it('leaves focus where the person moved it while a status refresh was pending', async () => {
+    let finish!: (value: boolean) => void;
+    const stub = controller();
+    stub.refreshStatus.mockImplementation(() => new Promise<boolean>((resolve) => { finish = resolve; }));
+    render(OperationsWorkspace, { controller: stub as never, state: urlState() });
+    const refresh = screen.getByRole('button', { name: 'Refresh operation status' });
+    refresh.focus();
+    await fireEvent.click(refresh);
+    expect(stub.refreshStatus).toHaveBeenCalledOnce();
+
+    const reload = screen.getByRole('button', { name: 'Reload run history' });
+    reload.focus();
+    finish(true);
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(document.activeElement).toBe(reload);
+  });
+
   it('shows Status unavailable for a lane without kinds', () => {
     renderKinds([]);
     expect(screen.getAllByText('Status unavailable')).toHaveLength(5);

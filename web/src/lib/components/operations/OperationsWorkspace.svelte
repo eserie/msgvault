@@ -194,8 +194,11 @@
     const hadFocus = Boolean(control?.contains(document.activeElement));
     await controller.refreshStatus();
     // Kit disables the button while busy, and a disabled button drops focus.
+    // Restore it only if the person has not moved focus elsewhere meanwhile.
     if (!hadFocus) return;
     await tick();
+    const active = document.activeElement;
+    if (active && active !== document.body && !control?.contains(active)) return;
     control?.querySelector<HTMLButtonElement>('button')?.focus();
   }
 
