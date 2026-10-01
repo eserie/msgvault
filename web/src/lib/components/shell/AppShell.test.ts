@@ -964,7 +964,7 @@ describe('AppShell', () => {
     const state = new ExploreState(window);
     const rendered = render(AppShell, { client: createAPIClient(fetchFn), state, enabled: false });
 
-    await fireEvent.click(await screen.findByRole('button', { name: 'View source operations' }));
+    await fireEvent.click(await screen.findByRole('button', { name: 'Sync history' }));
 
     expect(state.current).toMatchObject({
       workspace: 'operations', operationLane: 'messages', operationKind: 'source_sync'
