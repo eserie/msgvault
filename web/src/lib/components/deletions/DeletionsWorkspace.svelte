@@ -1,3 +1,22 @@
+<script lang="ts" module>
+  import type { ChipTone } from '@kenn-io/kit-ui';
+  import { sentenceCase } from '../../explore/labels';
+
+  const MANIFEST_STATUS: Readonly<Record<string, { label: string; tone: ChipTone }>> = {
+    pending: { label: 'Pending', tone: 'info' },
+    in_progress: { label: 'In progress', tone: 'info' },
+    completed: { label: 'Completed', tone: 'success' },
+    failed: { label: 'Failed', tone: 'danger' },
+    cancelled: { label: 'Cancelled', tone: 'muted' },
+  };
+
+  function manifestStatusChip(status: string): { label: string; tone: ChipTone } {
+    return Object.hasOwn(MANIFEST_STATUS, status)
+      ? MANIFEST_STATUS[status]!
+      : { label: sentenceCase(status), tone: 'neutral' };
+  }
+</script>
+
 <script lang="ts">
   import {
     cancelDeletion as generatedCancelDeletion,
@@ -6,9 +25,20 @@
     stageDeletion as generatedStageDeletion,
   } from '../../api/generated/api/api';
   import { preflightExploreSelection as generatedPreflightExploreSelection } from '../../api/generated/exploration/exploration';
-  import { Button, Card, KbdBadge, Modal, appShortcuts } from '@kenn-io/kit-ui';
+  import {
+    Button,
+    Card,
+    Chip,
+    EmptyState,
+    Modal,
+    Table,
+    TableHeaderCell,
+    appShortcuts,
+  } from '@kenn-io/kit-ui';
   import { onDestroy, onMount } from 'svelte';
   import type { APIClient } from '../../api/client';
+  import { preflightReasonLabel } from '../../explore/labels';
+  import { formatBytes, formatDateTime, formatRelativeTime } from '../../util/format';
   import PageHeader from '../shell/PageHeader.svelte';
   import type {
     DeletionManifestDetail as GeneratedDeletionManifestDetail,
@@ -27,11 +57,13 @@
     selection = undefined,
     reviewOnMount = false,
     onReviewStarted = () => undefined,
+    now = () => new Date(),
   }: {
     client: APIClient;
     selection?: ExploreSelection;
     reviewOnMount?: boolean;
     onReviewStarted?: () => void;
+    now?: () => Date;
   } = $props();
   let manifests = $state<ManifestSummary[]>([]);
   let detail = $state<ManifestDetail>();
@@ -267,106 +299,139 @@
 </script>
 
 <main class="deletions" aria-label="Deletions">
-  <PageHeader
-    title="Deletions"
-    description="Deletions you've staged. Nothing is deleted until you run msgvault delete-staged."
-  />
+  <PageHeader title="Deletions">
+    {#snippet descriptionContent()}Deletions you've staged. Nothing is deleted until you run <code>msgvault delete-staged</code>.{/snippet}
+  </PageHeader>
   {#if error}<p class="notice notice--error" role="alert">{error}</p>{/if}
 
-  <Card padding="sm">
-    <section class="staging" aria-labelledby="deletion-staging-title">
-      <div>
-        <h2 id="deletion-staging-title">Reviewed staging</h2>
-        <p>Preflight the current session selection before creating a manifest.</p>
-      </div>
-      <div class="actions">
-        <Button
-          tone="info"
-          surface="soft"
-          label="Review selection"
-          disabled={!selection || pending}
-          onclick={() => void reviewSelection()}
-        />
-        <span><KbdBadge keys={['d']} /> selected</span><span><KbdBadge keys={['D']} /> matching</span>
-      </div>
-      {#if reviewed}
-        <div class="review" role="status">
-          <strong
-            >{reviewed.count.toLocaleString()}
-            {reviewed.count === 1 ? 'item' : 'items'} · {reviewed.estimated_bytes.toLocaleString()} bytes</strong
-          >
-          <span>
-            {reviewed.deletable_count.toLocaleString()} can be staged · {(reviewed.count - reviewed.deletable_count).toLocaleString()} will be skipped.{selectionExclusions()}
-          </span>
-          <span>Authority expires {reviewed.expires_at}</span>
-          {#if reviewed.search_deletion_scope === 'active'}
-            <span>Semantic search covers active messages only.</span>
-          {/if}
-          {#each reviewed.unavailable_actions as unavailable (`${unavailable.action}:${unavailable.reason}`)}
-            <span class="reason">{unavailable.action}: {unavailable.reason}</span>
-          {/each}
-        </div>
-        <div class="actions">
-          <Button surface="soft" label="Dry run" disabled={pending} onclick={() => void dryRun()} />
+  {#if !selection}
+    <EmptyState
+      title="Nothing selected for deletion"
+      description="Select items in Everything, then choose Review for deletion…"
+    />
+  {:else}
+    <Card padding="sm">
+      <section class="staging" aria-labelledby="deletion-review-title">
+        <div class="staging-header">
+          <h2 id="deletion-review-title">Review selection</h2>
           <Button
-            tone="danger"
-            surface="solid"
-            label="Stage deletion"
-            disabled={pending || Boolean(unavailableReason('stage_deletion'))}
-            onclick={() => {
-              if (reviewedIsCurrent()) confirmStage = selection?.mode;
-            }}
+            tone="info"
+            surface="soft"
+            label="Review selection"
+            disabled={pending}
+            onclick={() => void reviewSelection()}
           />
         </div>
-      {/if}
-      {#if preview}
-        <p class="preview" role="status">{resultSummary(preview)}</p>
-        {#if stageCounts(preview).skipped > 0}<p class="notice" role="alert">{partialWarning(preview)}</p>{/if}
-      {/if}
-    </section>
-  </Card>
-
-  {#if loading}<p role="status">Loading deletion manifests…</p>
-  {:else if manifests.length === 0}<p class="notice" role="status">No deletion manifests yet.</p>
-  {:else}
-    <section class="manifest-list" aria-label="Deletion manifests">
-      {#each manifests as manifest (manifest.id)}
-        <article>
-          <div><strong>{manifest.id}</strong><span>{manifest.description}</span></div>
-          <span>{manifest.message_count.toLocaleString()} {manifest.message_count === 1 ? 'item' : 'items'}</span>
-          <span>{manifest.status}</span>
-          <div class="actions">
-            <Button size="sm" surface="soft" label={`Inspect ${manifest.id}`} onclick={() => void inspect(manifest)} />
-            {#if manifest.status === 'pending' || manifest.status === 'in_progress'}
-              <Button
-                size="sm"
-                tone="danger"
-                surface="soft"
-                label={`Cancel ${manifest.id}`}
-                onclick={() => {
-                  confirmCancel = manifest;
-                }}
-              />
+        {#if reviewed}
+          {@const stageReason = unavailableReason('stage_deletion')}
+          <div class="review" role="status">
+            <strong
+              >{reviewed.count.toLocaleString()}
+              {reviewed.count === 1 ? 'item' : 'items'} · {formatBytes(reviewed.estimated_bytes)}</strong
+            >
+            <span>
+              {reviewed.deletable_count.toLocaleString()} can be staged · {(reviewed.count - reviewed.deletable_count).toLocaleString()} will be skipped.{selectionExclusions()}
+            </span>
+            <span
+              >Review expires <time datetime={reviewed.expires_at} title={formatDateTime(reviewed.expires_at, 'long')}
+                >{formatRelativeTime(reviewed.expires_at, now())}</time
+              ></span
+            >
+            {#if reviewed.search_deletion_scope === 'active'}
+              <span>Semantic search covers active messages only.</span>
+            {/if}
+            {#if stageReason}
+              <span class="reason" title={stageReason}>{preflightReasonLabel('stage_deletion', stageReason)}</span>
             {/if}
           </div>
-        </article>
-      {/each}
-    </section>
+          <div class="actions">
+            <Button surface="outline" label="Dry run" disabled={pending} onclick={() => void dryRun()} />
+            <Button
+              tone="info"
+              surface="solid"
+              label="Stage deletion…"
+              disabled={pending || Boolean(stageReason)}
+              onclick={() => {
+                if (reviewedIsCurrent()) confirmStage = selection?.mode;
+              }}
+            />
+          </div>
+        {/if}
+        {#if preview}
+          <p class="result" role="status">{resultSummary(preview)}</p>
+          {#if stageCounts(preview).skipped > 0}<p class="warning" role="alert">{partialWarning(preview)}</p>{/if}
+        {/if}
+      </section>
+    </Card>
   {/if}
 
-  {#if detail}
-    <Card padding="sm" ariaLabel={`Deletion manifest ${detail.id}`}>
-      <aside>
-        <h2>{detail.id}</h2>
-        <strong>{detail.status}</strong>
-        <span>{detail.account || 'Account unavailable'}</span>
-        <span>{detail.message_count.toLocaleString()} items · {detail.description}</span>
-        {#if detail.execution}
-          <span>{detail.execution.succeeded} succeeded · {detail.execution.failed} failed</span>
-          {#each detail.execution.failed_ids ?? [] as id}<code>{id}</code>{/each}
-        {/if}
-      </aside>
-    </Card>
+  {#if loading}<p role="status">Loading deletion manifests…</p>
+  {:else if manifests.length === 0}
+    <EmptyState
+      title="No staged deletions"
+      description="Deletions you stage appear here, along with their execution status."
+    />
+  {:else}
+    <div class="manifests" class:has-detail={Boolean(detail)}>
+      <Table ariaLabel="Deletion manifests" zebra={false} class="manifest-table">
+        {#snippet header()}
+          <TableHeaderCell label="ID" />
+          <TableHeaderCell label="Description" />
+          <TableHeaderCell label="Items" />
+          <TableHeaderCell label="Status" />
+          <TableHeaderCell label="Created" />
+          <TableHeaderCell label="Actions" />
+        {/snippet}
+        {#each manifests as manifest (manifest.id)}
+          {@const chip = manifestStatusChip(manifest.status)}
+          <tr>
+            <td><code>{manifest.id}</code></td>
+            <td>{manifest.description}</td>
+            <td>{manifest.message_count.toLocaleString()} {manifest.message_count === 1 ? 'item' : 'items'}</td>
+            <td><Chip size="sm" tone={chip.tone} uppercase={false}>{chip.label}</Chip></td>
+            <td><time datetime={manifest.created_at} title={manifest.created_at}>{formatDateTime(manifest.created_at)}</time></td>
+            <td class="row-actions">
+              <Button size="sm" surface="outline" label={`Inspect ${manifest.id}`} onclick={() => void inspect(manifest)} />
+              {#if manifest.status === 'pending' || manifest.status === 'in_progress'}
+                <Button
+                  size="sm"
+                  surface="outline"
+                  label={`Cancel ${manifest.id}`}
+                  onclick={() => {
+                    confirmCancel = manifest;
+                  }}
+                />
+              {/if}
+            </td>
+          </tr>
+        {/each}
+      </Table>
+      {#if detail}
+        {@const detailChip = manifestStatusChip(detail.status)}
+        <Card padding="sm" ariaLabel={`Deletion manifest ${detail.id}`}>
+          <aside class="detail">
+            <div class="detail-header">
+              <h2><code>{detail.id}</code></h2>
+              <Button
+                size="sm"
+                surface="soft"
+                label="Close manifest detail"
+                onclick={() => {
+                  detail = undefined;
+                }}
+              />
+            </div>
+            <Chip size="sm" tone={detailChip.tone} uppercase={false}>{detailChip.label}</Chip>
+            <span>{detail.account || 'Account unavailable'}</span>
+            <span>{detail.message_count.toLocaleString()} items · {detail.description}</span>
+            {#if detail.execution}
+              <span>{detail.execution.succeeded} succeeded · {detail.execution.failed} failed</span>
+              {#each detail.execution.failed_ids ?? [] as id}<code>{id}</code>{/each}
+            {/if}
+          </aside>
+        </Card>
+      {/if}
+    </div>
   {/if}
 </main>
 
@@ -435,63 +500,74 @@
     gap: var(--space-4);
     padding: var(--space-5) var(--page-gutter) var(--space-4);
   }
-  article,
   .actions,
-  .staging {
+  .staging-header,
+  .detail-header,
+  .row-actions {
     display: flex;
     align-items: center;
     gap: var(--space-3);
+  }
+  .staging {
+    display: grid;
+    gap: var(--space-3);
+  }
+  .staging-header,
+  .detail-header {
+    justify-content: space-between;
   }
   h2,
   .staging p {
     margin: 0;
   }
-  article span,
-  .staging p,
-  .actions span,
-  aside span {
+  .detail span {
     color: var(--text-muted);
     font-size: var(--font-size-xs);
-  }
-  .staging {
-    flex-wrap: wrap;
-    justify-content: space-between;
   }
   .review {
     display: grid;
     gap: var(--space-1);
   }
-  .reason,
+  .reason {
+    color: var(--text-secondary);
+  }
   .notice--error {
     color: var(--text-danger);
   }
-  .manifest-list {
+  .manifests.has-detail {
     display: grid;
-    border-top: 1px solid var(--border-muted);
+    grid-template-columns: minmax(0, 2fr) minmax(16rem, 1fr);
+    gap: var(--space-4);
+    align-items: start;
   }
-  article {
-    justify-content: space-between;
-    padding: var(--space-3);
-    border-bottom: 1px solid var(--border-muted);
-  }
-  article > div:first-child,
-  aside {
+  .detail {
     display: grid;
-    gap: var(--space-1);
+    gap: var(--space-2);
   }
   .notice,
-  .preview {
+  .result,
+  .warning {
     padding: var(--space-3);
     border: 1px solid var(--accent-amber);
-    border-radius: var(--radius-md);
     background: var(--bg-subtle);
+  }
+  .notice,
+  .warning {
+    border-radius: var(--radius-md);
+  }
+  .result {
+    border-color: var(--border-default);
   }
   .notice--error {
     border-color: var(--accent-red);
   }
+  @media (max-width: 900px) {
+    .manifests.has-detail {
+      grid-template-columns: 1fr;
+    }
+  }
   @media (max-width: 760px) {
-    article,
-    .staging {
+    .staging-header {
       align-items: stretch;
       flex-direction: column;
     }

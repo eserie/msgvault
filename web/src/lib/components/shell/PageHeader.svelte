@@ -4,18 +4,19 @@
   interface Props {
     title: string;
     description?: string;
+    descriptionContent?: Snippet;
     actions?: Snippet;
     view?: Snippet;
   }
 
-  let { title, description, actions, view }: Props = $props();
+  let { title, description, descriptionContent, actions, view }: Props = $props();
 </script>
 
 <header class="page-header">
   <div class="page-header__row">
     <div class="page-header__text">
       <h1>{title}</h1>
-      {#if description}<p>{description}</p>{/if}
+      {#if descriptionContent}<p>{@render descriptionContent()}</p>{:else if description}<p>{description}</p>{/if}
     </div>
     {#if actions}<div class="page-header__actions">{@render actions()}</div>{/if}
   </div>
