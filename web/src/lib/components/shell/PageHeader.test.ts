@@ -6,12 +6,12 @@ import PageHeader from './PageHeader.svelte';
 
 describe('PageHeader', () => {
   it('renders one level-one heading, the description, and actions', () => {
-    const actions = createRawSnippet(() => ({ render: () => '<button>Refresh operations</button>' }));
+    const actions = createRawSnippet(() => ({ render: () => '<button>Example action</button>' }));
     render(PageHeader, { title: 'Operations', description: 'Background work and its history.', actions });
 
     expect(screen.getByRole('heading', { level: 1, name: 'Operations' })).toBeTruthy();
     expect(screen.getByText('Background work and its history.')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Refresh operations' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Example action' })).toBeTruthy();
   });
 
   it('renders the view row below the title', () => {
