@@ -563,6 +563,7 @@ describe('SettingsWorkspace', () => {
 
     await openSettingsCategory('Integrations');
     await fireEvent.click(await screen.findByRole('button', { name: 'Add task integration API key' }));
+    expect(screen.getByText('Applied when you save changes.')).toBeDefined();
     await fireEvent.input(screen.getByLabelText('New task integration API key'), {
       target: { value: 'typed-then-removed' }
     });

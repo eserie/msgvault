@@ -566,7 +566,7 @@
             configured={shown.configured}
             hint={shown.hint}
             source={setting.secret?.source}
-            applyNote="Applied when you save settings."
+            applyNote="Applied when you save changes."
             onreplace={(value) => {
               setSecret(setting.key, value);
               return true;
