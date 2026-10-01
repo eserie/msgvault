@@ -95,24 +95,21 @@ Observed with the Enron docs fixture at 1440×900 and 420×860, light and dark.
 
 ## Operations
 
-- **Header.** "Refresh operations" becomes kit `RefreshControl` in the header
-  actions, labelled "Refresh operations", with "Updated N ago" from the last
-  successful status load. It refreshes every 5 minutes as well as on demand.
-  See [decision 1](#decisions-for-review).
-- **Refresh keeps your place.** Kit calls the same function for a click and
-  for the timer, so both behave the same way:
-  - The status list reloads.
-  - The first page of runs reloads and is merged into the loaded history by
-    run ID: rows already loaded update in place, and runs that are not loaded
-    yet are added at the top.
-  - Pages loaded with "Load more operation history", the cursor for the next
-    page, the selected run and its open detail, scroll position, and keyboard
-    focus all stay as they were.
-  - "Load more operation history" skips runs that are already loaded, so a run
-    that moved between pages is never shown twice.
-  - Changing a filter or the date range still restarts from page one, as
-    today. A refresh that fails leaves the loaded rows and shows the existing
-    error.
+- **Header.** The "Refresh operations" button becomes kit `RefreshControl`
+  in the header actions, labelled "Refresh operation status", with "Updated N
+  ago" from the last successful status load. It reloads the status list only,
+  every 5 minutes and on demand. It never touches run history. See
+  [decision 1](#decisions-for-review).
+- **Run history reload.** A "Reload run history" button at the end of the
+  filter row keeps today's refresh behavior for history: it reloads status and
+  page one of runs, cancels paging, and replaces the loaded rows.
+  - Because run IDs are encrypted per response and the history cursor belongs
+    to one snapshot, a refreshed status list can show a newer latest run than
+    the loaded history. The history changes only when someone reloads it,
+    changes a filter, or loads more.
+  - When "Load more operation history" meets a history that changed, the
+    existing notice "Operation history changed. Restart from the first page."
+    and its "Restart operation history" button stay as they are.
 - **Status list.** The five lane cards become one region "Operation lanes"
   holding one list per lane (headings Messages, Facts, Contacts, Documents,
   Attachments), with one row per operation kind:
@@ -283,13 +280,18 @@ into one shared rule. Copy is unchanged.
 
 ## Decisions for review
 
-1. **Refresh control.** Kit `RefreshControl` refreshes on an interval
-   (default 5 minutes) as well as on demand, through one callback. Today's
-   refresh reloads status and page one of runs, cancels paging, and replaces
-   the loaded rows (`operations/controller.svelte.ts`, `loadPageOne`). Run on
-   a timer, that would throw away history someone paged through. So the
-   refresh callback becomes a merge-in-place refresh, as described under
-   Operations, and both clicks and the timer use it.
+1. **Refresh control refreshes status only.** Kit `RefreshControl` calls one
+   callback for clicks and for its 5-minute timer. Today's refresh reloads
+   status and page one of runs and replaces the loaded rows, so on a timer it
+   would discard history someone paged through. Merging new runs into loaded
+   history is not possible with the current API: each response encrypts run
+   IDs with a fresh nonce (`internal/api/operation_tokens.go`), so the same
+   run has a different ID every time, and any run change advances the
+   history's membership revision, so the API rejects an older cursor with
+   409 `operation_history_conflict`. The refresh control therefore reloads
+   the status list only, and history keeps a manual "Reload run history"
+   with today's restart behavior. Merging history waits for a backend
+   contract (see [Not in PR 4](#not-in-pr-4)).
 2. **Gray "Off" uses a chip, not a dot.** Kit `StatusDot` has no gray status.
    Operations uses kit `Chip` (tone `muted`) for Off and for other statuses, so
    every status in the list is a chip with a word, not a colored dot alone.
@@ -317,6 +319,9 @@ into one shared rule. Copy is unchanged.
 - New operation kinds, settings, or deletion capabilities.
 - Sync progress polling changes on Sources.
 - The kit `Typeahead` accessibility fix (kenn-io/kit-ui#79).
+- Merging refreshed runs into loaded history. It needs a run identity that
+  stays the same across responses and a pagination contract that survives new
+  or changed runs; the API provides neither today.
 
 ## Tests
 
@@ -327,7 +332,7 @@ Changed assertions, by file:
 | `SourcesWorkspace.test.ts`, `AppShell.test.ts:967`, `tests/operations.spec.ts:60` | "Sync history"; reason labels instead of codes; status chip; visible cron text removed; row details |
 | `tests/archive-management.spec.ts` | Sources row text; deletion buttons and dialogs |
 | `OperationsWorkspace.test.ts`, `tests/operations.spec.ts`, `tests/e2e/operations.spec.ts` | Status list in place of cards; Off; "History available" gone; counters format; trigger "—"; error sentence |
-| `tests/e2e/accessibility.spec.ts`, `tests/e2e/keyboard.spec.ts` | Refresh control name; status list; deletions empty state |
+| `tests/e2e/accessibility.spec.ts`, `tests/e2e/keyboard.spec.ts`, `tests/e2e/operations.spec.ts:124` | "Refresh operations" becomes "Refresh operation status" (status only) or "Reload run history" (history); status list; deletions empty state |
 | `DeletionsWorkspace.test.ts` | Empty states; reason sentence instead of the raw code (:398); size format; button tones; manifests table |
 | `SelectionBar.test.ts` | Review for deletion disabled with a reason |
 | `SettingsWorkspace.test.ts`, `App.test.ts`, `tests/session-navigation.spec.ts`, `tests/e2e/security.spec.ts:151` | "Save changes"; save bar hidden without drafts; posture copy; Notice role |
@@ -341,11 +346,15 @@ New tests cover:
   including the host-configuration line and guide link for both document
   kinds and the document related-status panels; counters format with mixed
   units and zero values; trigger "—".
-- Operations refresh: load a second page of runs and open a run's detail,
-  then let the refresh timer fire (fake timers). The second page's rows, the
-  next-page cursor, the open detail, and focus remain; an updated run's state
-  changes in place; a new run appears at the top; "Load more" afterward does
-  not duplicate a run. A click on the refresh control behaves the same way.
+- Operations refresh: with a second page of runs loaded and a run's detail
+  open, let the refresh timer fire (fake timers) and click the refresh
+  control. Each time only the status request is sent; the loaded rows, the
+  open detail, and focus stay. "Reload run history" sends the status and
+  page-one runs requests and replaces the rows. A "Load more" answered with
+  409 `operation_history_conflict` shows the existing conflict notice and
+  "Restart operation history". Test fixtures give each response freshly
+  encoded run IDs, as the daemon does, so a test cannot pass by matching IDs
+  across responses.
 - Deletions: empty state with no selection; stage_deletion sentence; only the
   confirmation button is red; manifest status chips and detail close.
 - Settings: category survives reload and Back; `settingsAuthority` still
