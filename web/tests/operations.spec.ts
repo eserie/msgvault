@@ -57,7 +57,7 @@ test('desktop operations journey restores filters, pages, opaque detail, history
   await page.getByRole('region', { name: 'Operation run detail' })
     .getByRole('button', { name: 'Open Sources status' }).click();
   await expect(page.getByRole('main', { name: 'Sources' })).toBeVisible();
-  await page.getByRole('button', { name: 'View source operations' }).click();
+  await page.getByRole('button', { name: 'Sync history' }).click();
   await expect(page.getByRole('main', { name: 'Operations' })).toBeVisible();
   await expect.poll(() => fixture.listQueries.at(-1)?.get('kind')).toBe('source_sync');
 });

@@ -45,6 +45,7 @@ export type InstalledOperations = {
   actionRequests: OperationAction[];
   listQueries: URLSearchParams[];
   statusRequests: string[];
+  readonly operationStatusReads: number;
   conflictNextCardDAV(): void;
   driftNextPage(): void;
   failNextDocumentStatus(): void;
@@ -57,6 +58,7 @@ export async function installOperations(page: Page): Promise<InstalledOperations
   const actionRequests: OperationAction[] = [];
   const listQueries: URLSearchParams[] = [];
   const statusRequests: string[] = [];
+  let operationStatusReads = 0;
   let cardDAVConflict = false;
   let pageDrift = false;
   let documentStatusFailure = false;
@@ -67,10 +69,18 @@ export async function installOperations(page: Page): Promise<InstalledOperations
   let visualConfigured = true;
 
   await page.route('**/api/session', sessionRoute);
-  await page.route('**/api/v1/settings', (route) => route.fulfill({ json: {
+  await page.route('**/api/v1/settings', (route) => route.fulfill({ headers: { ETag: '"operations-fixture"' }, json: {
+    groups: [
+      { id: 'browser', label: 'Appearance', description: 'How the web app looks.' },
+      { id: 'search', label: 'Search', description: 'Semantic search.' }
+    ],
     settings: [
-      { key: 'web.theme', group: 'web', kind: 'string', value: { string: 'light' }, restart_required: false },
-      { key: 'web.density', group: 'web', kind: 'string', value: { string: 'compact' }, restart_required: false }
+      { key: 'web.theme', group: 'browser', label: 'Theme', kind: 'string', value: { string: 'light' },
+        options: ['system', 'light', 'dark'], restart_required: false },
+      { key: 'web.density', group: 'browser', label: 'Density', kind: 'string', value: { string: 'compact' },
+        options: ['compact', 'comfortable'], restart_required: false },
+      { key: 'vector.enabled', group: 'search', label: 'Semantic search', kind: 'boolean',
+        value: { boolean: false }, restart_required: true }
     ],
     pending_restart: false
   } }));
@@ -115,8 +125,10 @@ export async function installOperations(page: Page): Promise<InstalledOperations
     } });
   });
 
-  await page.route('**/api/v1/operations/status', (route) =>
-    fulfillOperation(route, statusResponse(referencesRotated, documentConfigured, visualConfigured)));
+  await page.route('**/api/v1/operations/status', (route) => {
+    operationStatusReads += 1;
+    return fulfillOperation(route, statusResponse(referencesRotated, documentConfigured, visualConfigured));
+  });
   await page.route('**/api/v1/operations/runs**', async (route) => {
     const url = new URL(route.request().url());
     const detailID = decodeURIComponent(url.pathname.slice('/api/v1/operations/runs/'.length));
@@ -181,6 +193,7 @@ export async function installOperations(page: Page): Promise<InstalledOperations
     actionRequests,
     listQueries,
     statusRequests,
+    get operationStatusReads(): number { return operationStatusReads; },
     conflictNextCardDAV(): void { cardDAVConflict = true; },
     driftNextPage(): void { pageDrift = true; },
     failNextDocumentStatus(): void { documentStatusFailure = true; },
