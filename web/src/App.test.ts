@@ -11,6 +11,7 @@ describe('application foundation', () => {
     localStorage.removeItem(SEARCH_MODE_PREFERENCE_KEY);
     sessionStorage.removeItem('msgvault.appearance.override');
     document.documentElement.classList.remove('dark');
+    window.history.replaceState(null, '', '/');
   });
   it('mounts the Relationships landmark once bootstrap succeeds', async () => {
     const session = createSessionController(async () =>
@@ -148,6 +149,7 @@ describe('application foundation', () => {
     expect(patch?.headers.get('If-Match')).toBe('"etag-a"');
   });
   it('returns to login when a settings mutation is unauthorized', async () => {
+    window.history.replaceState(null, '', '/?workspace=settings');
     const fetchFn = vi.fn<typeof fetch>(async (input) => {
       const request = input instanceof Request ? input : new Request(input);
       const path = new URL(request.url).pathname;
