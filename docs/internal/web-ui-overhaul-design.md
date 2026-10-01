@@ -2,8 +2,8 @@
 
 Status: approved 2026-09-28 and revised 2026-09-29 after review. PR 1
 (foundation and shell) is merged (#995), and PR 2 (Everything, Files, and
-Saved views) is merged (#1009). PR 3 (People) is specified in
-[its spec](web-ui-overhaul-pr3-spec.md); PR 4 is not started. Delivery is four stacked
+Saved views) is merged (#1009), and PR 3 (People) is merged (#1019). PR 4
+(Manage) is specified in [its spec](web-ui-overhaul-pr4-spec.md). Delivery is four stacked
 pull requests, described under
 [Delivery](#delivery). This record describes the intended end state; the
 current source remains authoritative until each pull request lands.
