@@ -49,7 +49,7 @@ const initialSettings = {
 afterEach(() => vi.useRealTimers());
 
 describe('SettingsWorkspace', () => {
-  it('opens the category it is given, reports changes, and falls back to Appearance', async () => {
+  it('opens the category it is given and reports changes', async () => {
     const onCategoryChange = vi.fn();
     const client = createAPIClient(vi.fn<typeof fetch>(async () => settingsResponse(initialSettings, '"etag-a"')));
     const rendered = render(SettingsWorkspace, { client, category: 'search', onCategoryChange });
@@ -60,12 +60,35 @@ describe('SettingsWorkspace', () => {
     } finally {
       rendered.unmount();
     }
+  });
 
-    const fallback = render(SettingsWorkspace, { client, category: 'retired_category' });
+  it('shows Appearance for a category the daemon does not list, even when it is not listed first', async () => {
+    const [browser, ...others] = initialSettings.groups;
+    const reordered = { ...initialSettings, groups: [...others, browser] };
+    const client = createAPIClient(vi.fn<typeof fetch>(async () => settingsResponse(reordered, '"etag-a"')));
+    const rendered = render(SettingsWorkspace, { client, category: 'retired_category' });
     try {
       expect(await screen.findByRole('heading', { level: 2, name: 'Appearance' })).toBeDefined();
     } finally {
-      fallback.unmount();
+      rendered.unmount();
+    }
+  });
+
+  it('follows a changed category prop but keeps a local choice when the prop is unchanged', async () => {
+    const fetchFn = vi.fn<typeof fetch>(async () => settingsResponse(initialSettings, '"etag-a"'));
+    const rendered = render(SettingsWorkspace, { client: createAPIClient(fetchFn), category: 'search' });
+    try {
+      expect(await screen.findByRole('heading', { level: 2, name: 'Search' })).toBeDefined();
+      await rendered.rerender({ client: createAPIClient(fetchFn), category: 'server' });
+      expect(await screen.findByRole('heading', { level: 2, name: 'Daemon' })).toBeDefined();
+
+      await openSettingsCategory('Integrations');
+      expect(await screen.findByRole('heading', { level: 2, name: 'Integrations' })).toBeDefined();
+      await rendered.rerender({ client: createAPIClient(fetchFn), category: 'server' });
+      expect(screen.getByRole('heading', { level: 2, name: 'Integrations' })).toBeDefined();
+      expect(screen.queryByRole('heading', { level: 2, name: 'Daemon' })).toBeNull();
+    } finally {
+      rendered.unmount();
     }
   });
 

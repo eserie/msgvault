@@ -245,16 +245,19 @@ describe('Explore URL state', () => {
     expect(restored.settingsCategory).toBe('search');
   });
 
-  it('restores the Settings category on Back', async () => {
+  it('restores the Settings category on Back, including one an authority chose', async () => {
     window.history.replaceState(null, '', '/');
     const state = new ExploreState(window);
     try {
-      state.commitNavigation({ workspace: 'settings', settingsCategory: 'search' });
-      state.commitNavigation({ settingsCategory: 'server' });
+      state.commitNavigation({ workspace: 'settings', settingsAuthority: 'person_embeddings' });
+      state.commitNavigation({ settingsCategory: 'server', settingsAuthority: '' });
+      expect(state.current.settingsCategory).toBe('server');
       const restored = new Promise((resolve) => window.addEventListener('popstate', resolve, { once: true }));
       window.history.back();
       await restored;
-      expect(state.current.settingsCategory).toBe('search');
+      expect(state.current).toMatchObject({
+        settingsCategory: 'search', settingsAuthority: 'person_embeddings'
+      });
     } finally {
       state.destroy();
     }
