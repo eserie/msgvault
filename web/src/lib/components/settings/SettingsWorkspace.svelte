@@ -16,6 +16,7 @@
   }
 
   const hostManagedNote = 'Host-managed values are set in config.toml on the daemon host.';
+  const OWN_SAVE_NOTE = 'These save immediately when you use their buttons — not with Save changes.';
 </script>
 
 <script lang="ts">
@@ -27,6 +28,7 @@
     Button,
     Card,
     Chip,
+    Notice,
     SelectDropdown,
     SettingsLayout,
     SettingsSection,
@@ -236,7 +238,7 @@
     }
     secretUpdates = nextSecrets;
   }
-  // A new key waits with the other drafts until Save settings; the row shows
+  // A new key waits with the other drafts until Save changes; the row shows
   // its masked hint meanwhile. Clearing drops a waiting key, and stages the
   // removal of a stored one.
   function setSecret(key: string, value: string) {
@@ -258,6 +260,19 @@
   function discardChanges() {
     drafts = {};
     secretUpdates = {};
+  }
+  // The save bar takes the focused button with it, so focus moves to the
+  // category heading.
+  async function focusCategoryHeading() {
+    await tick();
+    root?.querySelector<HTMLElement>('#settings-category-heading')?.focus();
+  }
+  function discard() {
+    discardChanges();
+    void focusCategoryHeading();
+  }
+  function isCredentialControl(setting: SettingState): boolean {
+    return setting.kind === 'secret' && Boolean(setting.credential_id) && !isReadOnly(setting);
   }
   function isDirty(key: string): boolean {
     return Object.hasOwn(drafts, key) || Object.hasOwn(secretUpdates, key);
@@ -307,6 +322,7 @@
       etag = response.headers.get('ETag') ?? etag;
       credentialETag = response.headers.get('Credential-ETag') ?? result.credential_etag ?? credentialETag;
       discardChanges();
+      void focusCategoryHeading();
     } catch (cause) {
       error = cause instanceof Error ? cause.message : 'Unable to save settings.';
     } finally {
@@ -371,11 +387,11 @@
   function postureText(posture: RestartPosture): string {
     switch (posture) {
       case 'live':
-        return 'Changes apply right away.';
+        return 'Saved changes apply right away — no restart needed.';
       case 'restart':
-        return 'Changes take effect after the daemon restarts.';
+        return 'Saved changes apply after the daemon restarts.';
       case 'mixed':
-        return 'Most changes take effect after the daemon restarts. Rows that differ are marked.';
+        return 'Most saved changes apply after the daemon restarts. Rows that differ are marked.';
       default:
         return 'Set in config.toml on the daemon host.';
     }
@@ -466,16 +482,14 @@
 
 {#snippet settingsFooter()}
   <span class="unsaved" role="status">
-    {dirtyCount === 0
-      ? 'No unsaved changes'
-      : `${dirtyCount} unsaved ${dirtyCount === 1 ? 'change' : 'changes'}${incompleteDrafts > 0 ? '. Enter a number to save.' : ''}`}
+    {`${dirtyCount} unsaved ${dirtyCount === 1 ? 'change' : 'changes'}${incompleteDrafts > 0 ? '. Enter a number to save.' : ''}`}
   </span>
-  <Button label="Discard" disabled={saving || dirtyCount === 0} onclick={discardChanges} />
+  <Button label="Discard" disabled={saving} onclick={discard} />
   <Button
-    disabled={saving || dirtyCount === 0 || incompleteDrafts > 0}
-    tone="success"
+    disabled={saving || incompleteDrafts > 0}
+    tone="info"
     surface="solid"
-    label={saving ? 'Saving…' : 'Save settings'}
+    label={saving ? 'Saving…' : 'Save changes'}
     onclick={() => void saveSettings()}
   />
 {/snippet}
@@ -633,15 +647,17 @@
       {categories}
       bind:active={() => resolvedCategory, selectCategory}
       title=""
-      footer={resolvedCategory === 'carddav' || resolvedCategory === 'people' ? undefined : settingsFooter}
+      footer={resolvedCategory === 'carddav' || resolvedCategory === 'people' || dirtyCount === 0
+        ? undefined
+        : settingsFooter}
     >
       {#snippet panel(activeId)}
         <div class="notices">
           {#if plainHTTPWarning}
-            <p class="notice notice--warning" role="alert">
-              This browser session uses plain HTTP, so its cookie cannot use the Secure flag. Prefer HTTPS for remote
-              access.
-            </p>
+            <Notice
+              tone="warning"
+              message="This browser session uses plain HTTP, so its cookie cannot use the Secure flag. Prefer HTTPS for remote access."
+            />
           {/if}
           {#if error}<p class="notice notice--error" role="alert">{error}</p>{/if}
           {#if pendingRestart}
@@ -653,6 +669,7 @@
 
         {#if activeId === 'carddav'}
           <h2 class="kit-sr-only">CardDAV settings</h2>
+          <p class="own-save">{OWN_SAVE_NOTE}</p>
           <CardDAVSettingsWorkspace
             {client}
             {settings}
@@ -661,12 +678,13 @@
             onSettingsRefresh={() => loadSettings(true)}
           />
         {:else if activeId === 'people'}
+          <p class="own-save">{OWN_SAVE_NOTE}</p>
           <PeopleInferenceSettings {client} />
         {:else}
           {#each settingsGroups.filter((candidate) => candidate.id === activeId) as group (group.id)}
             {@const posture = restartPosture(group.settings)}
             <header class="category">
-              <h2>{group.label}</h2>
+              <h2 id="settings-category-heading" tabindex="-1">{group.label}</h2>
               {#if group.description}<p>{group.description}</p>{/if}
               <p class="posture" data-posture={posture}>
                 {#if posture === 'live'}
@@ -683,15 +701,19 @@
             {#if group.sections.length > 0}
               {#each group.sections as section (section.id)}
                 <SettingsSection title={section.label} description={sectionDescription(section) || undefined}>
+                  {@const firstOwnSave = section.settings.find(isCredentialControl)?.key}
                   {#each section.settings as setting (setting.key)}
+                    {#if setting.key === firstOwnSave}<p class="own-save">{OWN_SAVE_NOTE}</p>{/if}
                     {@render row(setting, group)}
                   {/each}
                 </SettingsSection>
               {/each}
             {:else}
               <Card padding="md">
+                {@const firstOwnSave = group.settings.find(isCredentialControl)?.key}
                 <div class="rows">
                   {#each group.settings as setting (setting.key)}
+                    {#if setting.key === firstOwnSave}<p class="own-save">{OWN_SAVE_NOTE}</p>{/if}
                     {@render row(setting, group)}
                   {/each}
                 </div>
@@ -703,6 +725,7 @@
                 <ZapIcon size={12} aria-hidden="true" />
                 Provider API keys apply right away.
               </p>
+              <p class="own-save">{OWN_SAVE_NOTE}</p>
               <div class="provider-list">
                 {#each ['exa', 'sixtyfour'] as kind}
                   <PersonEnrichmentProviderCreator
@@ -766,6 +789,10 @@
     display: grid;
     gap: var(--space-3);
   }
+  .notices :global(.kit-notice) {
+    padding: var(--space-3) var(--space-4);
+    gap: var(--space-3);
+  }
   .notice {
     margin: 0;
     padding: 0.75rem 1rem;
@@ -810,6 +837,11 @@
   }
   .posture--providers {
     margin: 0;
+  }
+  .own-save {
+    margin: 0;
+    color: var(--text-muted);
+    font-size: var(--font-size-xs);
   }
   .posture :global(svg) {
     flex-shrink: 0;

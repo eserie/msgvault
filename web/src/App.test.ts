@@ -112,7 +112,7 @@ describe('application foundation', () => {
     await session.bootstrap();
     await fireEvent.click(await screen.findByRole('button', { name: 'Settings' }));
     await chooseSelectOption(await screen.findByLabelText('Theme'), 'Dark');
-    await fireEvent.click(screen.getByRole('button', { name: 'Save settings' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
     await waitFor(() => expect(requests.some((request) => request.method === 'PATCH')).toBe(true));
     const patch = requests.find((request) => request.method === 'PATCH');
     expect(patch?.headers.get('X-CSRF-Token')).toBe('csrf-token');
@@ -138,7 +138,7 @@ describe('application foundation', () => {
     await session.bootstrap();
     await fireEvent.click(await screen.findByRole('button', { name: 'Settings' }));
     await chooseSelectOption(await screen.findByLabelText('Theme'), 'Dark');
-    await fireEvent.click(screen.getByRole('button', { name: 'Save settings' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
     expect(await screen.findByRole('form', { name: 'Log in' })).toBeDefined();
   });
   it('loads appearance once after interactive login while a session override wins', async () => {
