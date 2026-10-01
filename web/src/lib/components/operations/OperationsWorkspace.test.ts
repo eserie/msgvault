@@ -197,6 +197,7 @@ describe('OperationsWorkspace', () => {
     const link = within(row).getByRole('link', { name: linkName });
     expect(link.getAttribute('href')).toBe(href);
     expect(link.getAttribute('target')).toBe('_blank');
+    expect(link.getAttribute('rel')).toBe('noreferrer');
   });
 
   it('keeps the related-status button and no Set up for Off CardDAV and source rows', () => {
@@ -207,6 +208,17 @@ describe('OperationsWorkspace', () => {
     expect(screen.getByRole('button', { name: 'Open CardDAV settings' })).toBeDefined();
     expect(screen.getByRole('button', { name: 'Open Sources status' })).toBeDefined();
     expect(screen.queryByRole('button', { name: /^Set up/ })).toBeNull();
+  });
+
+  it('claims no runs only when history is available', () => {
+    renderKinds([
+      { ...off('message_embedding', 'messages'), configured: true, history_availability: 'unavailable' } as never,
+      { ...off('carddav_sync', 'contacts'), configured: true }
+    ]);
+    const unavailable = screen.getByRole('listitem', { name: 'Message embedding' });
+    expect(within(unavailable).getByText('History unavailable')).toBeDefined();
+    expect(within(unavailable).queryByText('No runs yet')).toBeNull();
+    expect(within(screen.getByRole('listitem', { name: 'CardDAV sync' })).getByText('No runs yet')).toBeDefined();
   });
 
   it('shows an active run instead of Off for a kind that is not configured', () => {
@@ -276,7 +288,9 @@ describe('OperationsWorkspace', () => {
     const panel = await screen.findByRole('region', { name: 'Document index status' });
     expect(within(panel).getByText('Off')).toBeDefined();
     expect(within(panel).getByText('Configured in config.toml on the daemon host.', { exact: false })).toBeDefined();
-    expect(within(panel).getByRole('link', { name: 'Document indexing setup' })).toBeDefined();
+    const link = within(panel).getByRole('link', { name: 'Document indexing setup' });
+    expect(link.getAttribute('target')).toBe('_blank');
+    expect(link.getAttribute('rel')).toBe('noreferrer');
     expect(within(panel).queryByRole('button', { name: 'Open document index settings' })).toBeNull();
     expect(fetchFn).not.toHaveBeenCalled();
   });

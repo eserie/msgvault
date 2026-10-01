@@ -85,7 +85,9 @@ describe('OperationRelatedStatus', () => {
 
     expect(await screen.findByText('Off')).toBeDefined();
     expect(screen.getByText(text, { exact: false })).toBeDefined();
-    expect(screen.getByRole('link', { name: linkName })).toBeDefined();
+    const link = screen.getByRole('link', { name: linkName });
+    expect(link.getAttribute('target')).toBe('_blank');
+    expect(link.getAttribute('rel')).toBe('noreferrer');
     expect(screen.queryByRole('button', { name: /settings/i })).toBeNull();
     expect(fetchFn).not.toHaveBeenCalled();
   });
@@ -107,6 +109,8 @@ describe('OperationRelatedStatus', () => {
 
     const link = await screen.findByRole('link', { name: linkName });
     expect(link.getAttribute('href')).toBe(href);
+    expect(link.getAttribute('target')).toBe('_blank');
+    expect(link.getAttribute('rel')).toBe('noreferrer');
     expect(screen.queryByRole('button', { name: /settings/i })).toBeNull();
   });
 

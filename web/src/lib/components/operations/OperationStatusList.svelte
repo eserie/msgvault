@@ -33,10 +33,11 @@
     onSetUp?: (target: OperationSettingsTarget) => void;
   } = $props();
 
-  function statusChip(kind: OperationLaneStatus): { label: string; tone: ChipTone } {
+  function statusChip(kind: OperationLaneStatus): { label: string; tone: ChipTone } | undefined {
     if (kind.active) return operationStateChip(kind.active.state);
     if (!kind.configured) return { label: 'Off', tone: 'muted' };
-    return kind.latest ? operationStateChip(kind.latest.state) : { label: 'No runs yet', tone: 'muted' };
+    if (kind.latest) return operationStateChip(kind.latest.state);
+    return kind.history_availability === 'available' ? { label: 'No runs yet', tone: 'muted' } : undefined;
   }
 </script>
 
@@ -57,7 +58,7 @@
             <li aria-labelledby={nameID}>
               <span class="name" id={nameID}>{OPERATION_KIND_LABELS[kind.kind]}</span>
               <span class="status">
-                <Chip size="sm" tone={chip.tone} uppercase={false}>{chip.label}</Chip>
+                {#if chip}<Chip size="sm" tone={chip.tone} uppercase={false}>{chip.label}</Chip>{/if}
                 {#if kind.history_availability !== 'available'}
                   <span class="history-note">History unavailable</span>
                 {/if}
