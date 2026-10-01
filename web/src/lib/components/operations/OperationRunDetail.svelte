@@ -1,18 +1,18 @@
 <script lang="ts">
-  import { Button, StatusDot } from '@kenn-io/kit-ui';
+  import { Button, Chip } from '@kenn-io/kit-ui';
 
   import {
     OPERATION_ACTION_LABELS,
     OPERATION_KIND_LABELS,
     RELATED_STATUS_LABELS,
+    counterLabel,
+    counterValue,
     operationDuration,
+    operationStateChip,
+    triggerLabel,
     type RelatedStatus
   } from '../../operations/labels';
-  import type {
-    OperationAction,
-    OperationRunDetail,
-    OperationRunSummary
-  } from '../../operations/models';
+  import type { OperationAction, OperationRunDetail } from '../../operations/models';
   import { formatDateTime } from '../../util/format';
 
   let {
@@ -31,18 +31,7 @@
     onAction?: (action: OperationAction) => void;
   } = $props();
 
-  function titleCase(value: string | undefined): string {
-    if (!value) return 'Unspecified';
-    return value.charAt(0).toUpperCase() + value.slice(1);
-  }
-
-  function dotStatus(run: OperationRunSummary) {
-    if (run.state === 'running') return 'working' as const;
-    if (run.state === 'queued') return 'waiting' as const;
-    if (run.state === 'succeeded') return 'idle' as const;
-    if (run.state === 'failed') return 'unclean' as const;
-    return 'stale' as const;
-  }
+  const stateChip = $derived(operationStateChip(detail.state));
 </script>
 
 <section class="detail" aria-label="Operation run detail">
@@ -55,8 +44,8 @@
   </header>
 
   <dl class="facts">
-    <div><dt>State</dt><dd><span aria-hidden="true"><StatusDot status={dotStatus(detail)} /></span> {titleCase(detail.state)}</dd></div>
-    <div><dt>Trigger</dt><dd>{titleCase(detail.trigger)}</dd></div>
+    <div><dt>State</dt><dd><Chip size="sm" tone={stateChip.tone} uppercase={false}>{stateChip.label}</Chip></dd></div>
+    <div><dt>Trigger</dt><dd>{triggerLabel(detail.trigger)}</dd></div>
     <div><dt>Started</dt><dd><time datetime={detail.started_at}>{formatDateTime(detail.started_at, 'long')}</time></dd></div>
     <div><dt>Finished</dt><dd>{#if detail.finished_at}<time datetime={detail.finished_at}>{formatDateTime(detail.finished_at, 'long')}</time>{:else}Not available{/if}</dd></div>
     <div><dt>Duration</dt><dd>{operationDuration(detail)}</dd></div>
@@ -69,7 +58,7 @@
     {:else}
       <dl class="counters">
         {#each detail.counters as counter (`${counter.name}:${counter.unit}`)}
-          <div><dt>{counter.name.replaceAll('_', ' ')}</dt><dd>{counter.value.toLocaleString()} {counter.unit}</dd></div>
+          <div><dt>{counterLabel(counter.name)}</dt><dd>{counterValue(counter)}</dd></div>
         {/each}
       </dl>
     {/if}
@@ -77,8 +66,8 @@
 
   {#if detail.error}
     <section class="error" role="alert" aria-label="Operation error">
-      <strong>{detail.error.code}</strong>
-      <span>{detail.error.message}</span>
+      <p>{detail.error.message}</p>
+      <code>Code: {detail.error.code}</code>
     </section>
   {/if}
 
@@ -114,7 +103,7 @@
   h3 { margin-bottom: var(--space-2); font-size: var(--font-size-sm); }
   .facts, .counters { display: grid; gap: var(--space-2); }
   .facts div, .counters div { display: grid; grid-template-columns: minmax(100px, .45fr) 1fr; gap: var(--space-3); }
-  dt { color: var(--text-muted); font-size: var(--font-size-xs); text-transform: capitalize; }
+  dt { color: var(--text-muted); font-size: var(--font-size-xs); }
   dd { display: flex; align-items: center; gap: var(--space-2); font-size: var(--font-size-sm); }
   .error { display: grid; gap: var(--space-1); padding: var(--space-3); border: 1px solid var(--status-error-ink); border-radius: var(--radius-md); background: var(--status-error-bg); color: var(--status-error-ink); }
   .actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }

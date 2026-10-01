@@ -34,6 +34,8 @@ export class OperationsController {
   private nextCursor = $state<string>();
   private statusReadable = $state(false);
   private historyReadable = $state(false);
+  private statusUpdatedAt = $state<number>();
+  private statusRefreshing = $state(false);
 
   private initialLoading = $state(false);
   private backgroundLoading = $state(false);
@@ -61,10 +63,12 @@ export class OperationsController {
   private detailGeneration = 0;
   private pageGeneration = 0;
   private actionGeneration = 0;
+  private statusGeneration = 0;
   private readAbort?: AbortController;
   private detailAbort?: AbortController;
   private pageAbort?: AbortController;
   private actionAbort?: AbortController;
+  private statusAbort?: AbortController;
 
   constructor(
     client: APIClient,
@@ -84,6 +88,8 @@ export class OperationsController {
       nextCursor: this.nextCursor ?? null,
       statusReadable: this.statusReadable,
       historyReadable: this.historyReadable,
+      statusUpdatedAt: this.statusUpdatedAt ?? null,
+      statusRefreshing: this.statusRefreshing,
       initialLoading: this.initialLoading,
       backgroundLoading: this.backgroundLoading,
       paging: this.paging,
@@ -146,6 +152,39 @@ export class OperationsController {
   async refresh(): Promise<boolean> {
     if (this.disposed) return false;
     return this.loadPageOne(this.loaded);
+  }
+
+  async refreshStatus(): Promise<boolean> {
+    if (this.disposed || !this.loaded || this.initialLoading || this.backgroundLoading ||
+      this.statusRefreshing) {
+      return false;
+    }
+    const request = new AbortController();
+    this.statusAbort = request;
+    const context = this.contextGeneration;
+    const generation = ++this.statusGeneration;
+    this.statusRefreshing = true;
+    try {
+      const result = await generatedGetOperationStatus({ ...this.client, signal: request.signal });
+      if (!this.ownsStatus(request, generation, context)) return false;
+      if (!result.data) {
+        this.statusError = 'Unable to load operation status.';
+        return false;
+      }
+      this.statusKinds = result.data.lanes;
+      this.statusReadable = true;
+      this.statusError = null;
+      this.statusUpdatedAt = Date.now();
+      return true;
+    } catch {
+      if (this.ownsStatus(request, generation, context)) this.statusError = 'Unable to load operation status.';
+      return false;
+    } finally {
+      if (this.ownsStatus(request, generation, context)) {
+        this.statusAbort = undefined;
+        this.statusRefreshing = false;
+      }
+    }
   }
 
   async loadMore(): Promise<void> {
@@ -280,12 +319,14 @@ export class OperationsController {
     this.readAbort?.abort();
     this.detailAbort?.abort();
     this.cancelPage();
+    this.cancelStatus();
     this.actionAbort?.abort();
   }
 
   private async loadPageOne(background: boolean): Promise<boolean> {
     this.readAbort?.abort();
     this.cancelPage();
+    this.cancelStatus();
     const request = new AbortController();
     this.readAbort = request;
     const context = this.contextGeneration;
@@ -311,6 +352,7 @@ export class OperationsController {
     if (statusResult.status === 'fulfilled' && statusResult.value.data) {
       this.statusKinds = statusResult.value.data.lanes;
       this.statusReadable = true;
+      this.statusUpdatedAt = Date.now();
       statusSucceeded = true;
     } else {
       this.statusError = 'Unable to load operation status.';
@@ -387,6 +429,7 @@ export class OperationsController {
     this.readAbort?.abort();
     this.detailAbort?.abort();
     this.cancelPage();
+    this.cancelStatus();
     this.actionAbort?.abort();
     this.initialLoading = false;
     this.backgroundLoading = false;
@@ -406,6 +449,13 @@ export class OperationsController {
     this.paging = false;
   }
 
+  private cancelStatus(): void {
+    this.statusAbort?.abort();
+    this.statusAbort = undefined;
+    this.statusGeneration += 1;
+    this.statusRefreshing = false;
+  }
+
   private advertisedActions(): Set<OperationAction> {
     return new Set([
       ...this.statusKinds.flatMap((item) => item.supported_actions),
@@ -422,6 +472,11 @@ export class OperationsController {
   private ownsRead(owner: AbortController, generation: number, context: number): boolean {
     return !this.disposed && !owner.signal.aborted && this.readAbort === owner &&
       this.readGeneration === generation && this.contextGeneration === context;
+  }
+
+  private ownsStatus(owner: AbortController, generation: number, context: number): boolean {
+    return !this.disposed && !owner.signal.aborted && this.statusAbort === owner &&
+      this.statusGeneration === generation && this.contextGeneration === context;
   }
 
   private ownsPage(owner: AbortController, generation: number, context: number): boolean {

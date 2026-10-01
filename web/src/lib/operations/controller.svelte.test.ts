@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { createAPIClient } from '../api/client';
 import type { Status as VisualStatus, SyncResult } from '../api/generated/models';
@@ -672,5 +672,109 @@ describe('OperationsController', () => {
     expect(requests.every((request) => request.method === 'GET')).toBe(true);
     expect(controller.snapshot.actionError).toBe('This operation is not currently available.');
     controller.destroy();
+  });
+});
+
+describe('OperationsController.refreshStatus', () => {
+  afterEach(() => vi.useRealTimers());
+
+  function pagedDaemon(status: () => Response | Promise<Response>) {
+    const paths: string[] = [];
+    const fetchFn = vi.fn<typeof fetch>(async (input) => {
+      const url = new URL(requestOf(input).url);
+      paths.push(url.pathname);
+      if (url.pathname.endsWith('/status')) return status();
+      if (url.pathname.endsWith('/runs')) {
+        return Response.json(url.searchParams.get('cursor') === 'cursor-two'
+          ? runsResponse([run(RUN_TWO)], { next_cursor: 'cursor-three' })
+          : runsResponse([run(RUN_ONE)], { next_cursor: 'cursor-two' }));
+      }
+      return Response.json(detail(RUN_TWO));
+    });
+    return { paths, controller: new OperationsController(createAPIClient(fetchFn)) };
+  }
+
+  it('reloads only status and leaves paged rows, cursor, and detail alone', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(Date.parse('2026-09-01T10:00:00Z'));
+    let statusReads = 0;
+    const { paths, controller } = pagedDaemon(() => {
+      statusReads += 1;
+      return Response.json(statusResponse(statusReads === 1 ? {} : { carddav_sync: { configured: false } }));
+    });
+    try {
+      await controller.applyURLState(operationState());
+      await controller.loadMore();
+      await controller.applyURLState(operationState({ operationRunID: RUN_TWO }));
+      const before = controller.snapshot;
+      expect(before.statusUpdatedAt).toBe(Date.parse('2026-09-01T10:00:00Z'));
+      vi.setSystemTime(Date.parse('2026-09-01T10:05:00Z'));
+      paths.length = 0;
+
+      const refreshed = await controller.refreshStatus();
+
+      const after = controller.snapshot;
+      expect(refreshed).toBe(true);
+      expect(paths).toEqual(['/api/v1/operations/status']);
+      expect(after.rows).toBe(before.rows);
+      expect(after.nextCursor).toBe('cursor-three');
+      expect(after.detail).toBe(before.detail);
+      expect(after.statusRefreshing).toBe(false);
+      expect(after.statusUpdatedAt).toBe(Date.parse('2026-09-01T10:05:00Z'));
+      const carddav = after.statusLanes.find((lane) => lane.lane === 'contacts')!.kinds[0]!;
+      expect(carddav.configured).toBe(false);
+    } finally {
+      controller.destroy();
+    }
+  });
+
+  it('keeps the previous lanes and reports a failed status refresh', async () => {
+    let statusReads = 0;
+    const { controller } = pagedDaemon(() => {
+      statusReads += 1;
+      return statusReads === 1
+        ? Response.json(statusResponse())
+        : Response.json({ error: 'internal', message: 'private server detail' }, { status: 500 });
+    });
+    try {
+      await controller.applyURLState(operationState());
+      const before = controller.snapshot;
+
+      const refreshed = await controller.refreshStatus();
+
+      const after = controller.snapshot;
+      expect(refreshed).toBe(false);
+      expect(after.statusError).toBe('Unable to load operation status.');
+      expect(after.statusLanes).toEqual(before.statusLanes);
+      expect(after.statusUpdatedAt).toBe(before.statusUpdatedAt);
+      expect(after.statusRefreshing).toBe(false);
+    } finally {
+      controller.destroy();
+    }
+  });
+
+  it('lets a page-one reload win over a status refresh in flight', async () => {
+    const slowStatus = deferredResponse();
+    let statusReads = 0;
+    const { controller } = pagedDaemon(() => {
+      statusReads += 1;
+      if (statusReads === 2) return slowStatus.promise;
+      return Response.json(statusResponse(statusReads === 1 ? {} : { carddav_sync: { configured: false } }));
+    });
+    try {
+      await controller.applyURLState(operationState());
+      const pending = controller.refreshStatus();
+      expect(controller.snapshot.statusRefreshing).toBe(true);
+
+      await controller.refresh();
+      slowStatus.resolve(Response.json(statusResponse()));
+
+      expect(await pending).toBe(false);
+      const carddav = controller.snapshot.statusLanes.find((lane) => lane.lane === 'contacts')!.kinds[0]!;
+      expect(carddav.configured).toBe(false);
+      expect(controller.snapshot.statusRefreshing).toBe(false);
+    } finally {
+      controller.destroy();
+    }
   });
 });

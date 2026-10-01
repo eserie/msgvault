@@ -2,6 +2,7 @@
   import {
     Button,
     DateRangePicker,
+    RefreshControl,
     SelectDropdown,
     resolveRange,
     type RangeSelection
@@ -30,7 +31,9 @@
   import OperationStatusList from './OperationStatusList.svelte';
   import PageHeader from '../shell/PageHeader.svelte';
 
-  type Controller = Pick<OperationsController, 'snapshot' | 'refresh' | 'loadMore' | 'restart' | 'runAction'>;
+  type Controller = Pick<
+    OperationsController, 'snapshot' | 'refresh' | 'refreshStatus' | 'loadMore' | 'restart' | 'runAction'
+  >;
 
   let {
     controller,
@@ -186,6 +189,16 @@
     });
   }
 
+  async function refreshStatus(): Promise<void> {
+    const control = root?.querySelector<HTMLElement>('.kit-refresh-control');
+    const hadFocus = Boolean(control?.contains(document.activeElement));
+    await controller.refreshStatus();
+    // Kit disables the button while busy, and a disabled button drops focus.
+    if (!hadFocus) return;
+    await tick();
+    control?.querySelector<HTMLButtonElement>('button')?.focus();
+  }
+
   async function runAction(action: OperationAction): Promise<void> {
     const outcome = await controller.runAction(action);
     if (outcome === 'discarded') return;
@@ -284,7 +297,12 @@
   {:else}
     <PageHeader title="Operations" description="Background work and its history.">
       {#snippet actions()}
-        <Button size="sm" surface="soft" label="Refresh operations" disabled={current.backgroundLoading} onclick={() => void controller.refresh()} />
+        <RefreshControl
+          label="Refresh operation status"
+          lastUpdatedAt={current.statusUpdatedAt}
+          busy={current.statusRefreshing}
+          onRefresh={() => void refreshStatus()}
+        />
       {/snippet}
     </PageHeader>
 
@@ -309,6 +327,7 @@
       {#if urlState.operationStartedFrom || urlState.operationStartedBefore}
         <Button size="sm" surface="soft" label="Clear operation dates" onclick={() => patchFilter({ operationStartedFrom: '', operationStartedBefore: '' })} />
       {/if}
+      <Button size="sm" surface="soft" label="Reload run history" disabled={current.backgroundLoading} onclick={() => void controller.refresh()} />
     </section>
 
     {@render operationNotices()}

@@ -105,6 +105,8 @@ function snapshot(overrides: Partial<OperationsSnapshot> = {}): OperationsSnapsh
     nextCursor: null,
     statusReadable: true,
     historyReadable: true,
+    statusUpdatedAt: null,
+    statusRefreshing: false,
     initialLoading: false,
     backgroundLoading: false,
     paging: false,
@@ -125,6 +127,7 @@ function controller(current: OperationsSnapshot = snapshot()) {
   return {
     snapshot: current,
     refresh: vi.fn(async () => undefined),
+    refreshStatus: vi.fn(async () => true),
     loadMore: vi.fn(async () => undefined),
     restart: vi.fn(async () => undefined),
     runAction: vi.fn(async () => 'succeeded' as const)
@@ -338,12 +341,45 @@ describe('OperationsWorkspace', () => {
     const rows = within(table).getAllByRole('row').slice(1);
     expect(rows[0]!.textContent).toContain('Document extraction');
     expect(rows[0]!.textContent).toContain('2 seconds');
-    expect(rows[0]!.textContent).toContain('2 failed writes');
+    expect(rows[0]!.textContent).toContain('2 writes failed');
     expect(rows[1]!.textContent).toContain('Source sync');
     expect(rows[1]!.textContent).toContain('1 minute 5 seconds');
 
     await fireEvent.click(within(rows[0]!).getByRole('button', { name: 'Open Document extraction run' }));
     expect(onStateChange).toHaveBeenCalledWith({ operationRunID: RUN_TWO });
+  });
+
+  it('shows triggers, counters, and failure sentences in the runs table', () => {
+    const failed = run({ id: RUN_TWO, state: 'failed', trigger: undefined,
+      counters: [
+        { name: 'processed', unit: 'messages', value: 20 }, { name: 'added', unit: 'messages', value: 20 },
+        { name: 'updated', unit: 'messages', value: 0 }, { name: 'item_errors', unit: 'messages', value: 0 }
+      ],
+      error: { code: 'source_sync_failed', message: 'Source sync failed.' } });
+    render(OperationsWorkspace, {
+      controller: controller(snapshot({ rows: [failed], unavailableKinds: [] })) as never,
+      state: urlState()
+    });
+    const row = within(screen.getByRole('table', { name: 'Operation history' })).getAllByRole('row')[1]!;
+    expect(row.textContent).toContain('—');
+    expect(row.textContent).toContain('20 messages processed · 20 added');
+    expect(row.textContent).not.toContain('item errors');
+    expect(row.textContent).toContain('Failed');
+    expect(row.textContent).toContain('Source sync failed.');
+  });
+
+  it('leads the run detail error with the server sentence and keeps every counter', () => {
+    const detail = { ...run({ state: 'failed', counters: [{ name: 'item_errors', unit: 'messages', value: 0 }],
+      error: { code: 'source_sync_failed', message: 'Source sync failed.' } }), supported_actions: [] };
+    render(OperationsWorkspace, {
+      controller: controller(snapshot({ detail })) as never,
+      state: urlState({ operationRunID: RUN_ONE })
+    });
+    const error = screen.getByRole('alert', { name: 'Operation error' });
+    expect(error.firstElementChild?.textContent).toBe('Source sync failed.');
+    expect(within(error).getByText('Code: source_sync_failed').tagName).toBe('CODE');
+    expect(screen.getByText('Item errors')).toBeDefined();
+    expect(screen.getByText('0 messages')).toBeDefined();
   });
 
   it('renders only allowlisted detail, fixed error, related authority and advertised actions', async () => {
@@ -365,7 +401,7 @@ describe('OperationsWorkspace', () => {
     });
 
     const detail = screen.getByRole('region', { name: 'Operation run detail' });
-    expect(within(detail).getByText('timeout')).toBeDefined();
+    expect(within(detail).getByText('Code: timeout')).toBeDefined();
     expect(within(detail).getByText('The operation timed out.')).toBeDefined();
     expect(within(detail).getByRole('button', { name: 'Open Sources status' })).toBeDefined();
     expect(within(detail).getByRole('button', { name: 'Start CardDAV sync' })).toBeDefined();

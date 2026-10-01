@@ -1,9 +1,15 @@
 <script lang="ts">
-  import { StatusDot, Table, TableHeaderCell } from '@kenn-io/kit-ui';
+  import { Chip, Table, TableHeaderCell } from '@kenn-io/kit-ui';
 
   import type { OperationRunSummary } from '../../operations/models';
   import { orderedOperationRows } from '../../operations/focus';
-  import { OPERATION_KIND_LABELS, operationDuration } from '../../operations/labels';
+  import {
+    OPERATION_KIND_LABELS,
+    counterSummary,
+    operationDuration,
+    operationStateChip,
+    triggerLabel
+  } from '../../operations/labels';
   import { formatDateTime } from '../../util/format';
 
   let {
@@ -19,27 +25,15 @@
   } = $props();
 
   const sortedRows = $derived(orderedOperationRows(rows));
-
-  function titleCase(value: string | undefined): string {
-    if (!value) return 'Unspecified';
-    return value.charAt(0).toUpperCase() + value.slice(1);
-  }
-
-  function dotStatus(run: OperationRunSummary) {
-    if (run.state === 'running') return 'working' as const;
-    if (run.state === 'queued') return 'waiting' as const;
-    if (run.state === 'succeeded') return 'idle' as const;
-    if (run.state === 'failed') return 'unclean' as const;
-    return 'stale' as const;
-  }
-
-  function counters(run: OperationRunSummary): string {
-    if (run.counters.length === 0) return 'No counters';
-    return run.counters.map((counter) =>
-      `${counter.value.toLocaleString()} ${counter.name.replaceAll('_', ' ')} ${counter.unit}`
-    ).join(' · ');
-  }
 </script>
+
+{#snippet runState(run: OperationRunSummary)}
+  {@const chip = operationStateChip(run.state)}
+  <span class="state">
+    <Chip size="sm" tone={chip.tone} uppercase={false}>{chip.label}</Chip>
+    {#if run.error && (run.state === 'failed' || run.state === 'partial')}<span class="error">{run.error.message}</span>{/if}
+  </span>
+{/snippet}
 
 {#if narrow}
   <div class="run-list" role="list" aria-label="Operation history">
@@ -53,9 +47,9 @@
           onclick={(event) => onSelect(run.id, event.currentTarget)}
         >
           <span class="row-title">{OPERATION_KIND_LABELS[run.kind]}</span>
-          <span><span aria-hidden="true"><StatusDot status={dotStatus(run)} /></span> {titleCase(run.state)}</span>
-          <span>{titleCase(run.trigger)} · <time datetime={run.started_at}>{formatDateTime(run.started_at)}</time></span>
-          <span>{operationDuration(run)} · {counters(run)}</span>
+          {@render runState(run)}
+          <span>{triggerLabel(run.trigger)} · <time datetime={run.started_at}>{formatDateTime(run.started_at)}</time></span>
+          <span>{operationDuration(run)} · {counterSummary(run.counters)}</span>
         </button>
       </div>
     {/each}
@@ -83,11 +77,11 @@
               onclick={(event) => onSelect(run.id, event.currentTarget)}
             >{OPERATION_KIND_LABELS[run.kind]}</button>
           </td>
-          <td>{titleCase(run.trigger)}</td>
-          <td><span class="state"><span aria-hidden="true"><StatusDot status={dotStatus(run)} /></span> {titleCase(run.state)}</span></td>
+          <td>{triggerLabel(run.trigger)}</td>
+          <td>{@render runState(run)}</td>
           <td><time datetime={run.started_at}>{formatDateTime(run.started_at)}</time></td>
           <td>{operationDuration(run)}</td>
-          <td>{counters(run)}</td>
+          <td>{counterSummary(run.counters)}</td>
         </tr>
       {/each}
     </Table>
@@ -110,7 +104,8 @@
     cursor: pointer;
   }
   .run-link:focus-visible { outline: var(--focus-ring); outline-offset: 2px; }
-  .state { display: inline-flex; align-items: center; gap: var(--space-2); white-space: nowrap; }
+  .state { display: grid; justify-items: start; gap: var(--space-1); }
+  .state .error { color: var(--status-error-ink); }
   .run-list { display: grid; gap: var(--space-2); }
   .run-list [role="listitem"] { border: 1px solid var(--border-default); border-radius: var(--radius-md); background: var(--bg-surface); }
   .run-list [role="listitem"].selected { border-color: var(--accent-blue); }
