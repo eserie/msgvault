@@ -21,7 +21,7 @@ export const COMMAND_DEFINITIONS = [
   command('open-filters', 'Open filters', ['F'], ['f'], 'Analyze'),
   command('open-grouping', 'Open grouping controls', ['G'], ['g'], 'Analyze'),
   command('change-sort', 'Change sort', ['S'], ['s'], 'Analyze'),
-  command('reverse-sort', 'Reverse sort direction', ['R'], ['r'], 'Analyze'),
+  command('reverse-sort', 'Show sort order', ['R'], ['r'], 'Analyze'),
   command('open-keyboard-help', 'Open searchable keyboard help', ['?'], ['shift+/'], 'Help'),
   command('open-command-palette', 'Open command palette', ['Mod', 'K'], ['mod+k'], 'Help')
 ] as const;

@@ -509,7 +509,7 @@ Tab keeps its normal browser meaning. Outside inputs and content viewers:
 | `f` | Open Filters |
 | `g` | Open Group by |
 | `s` | Open Sort |
-| `r` | Report the fixed sort order; in Files, point to the Sort menu |
+| `r` | Show sort order; in Files, point to the Sort menu |
 | `?` | Open the searchable Keyboard shortcuts dialog |
 | `Cmd/Ctrl+K` | Open the command palette |
 

@@ -45,6 +45,19 @@ describe('keyboard command registry', () => {
     expect(onclose).toHaveBeenCalledOnce();
   });
 
+  it('names r for what it does: showing the fixed sort order', async () => {
+    render(KeyboardHelp, {
+      commands: createCommandRegistry(handlersFor(COMMAND_DEFINITIONS.map(({ id }) => id))),
+      onclose: vi.fn()
+    });
+
+    await fireEvent.input(screen.getByRole('searchbox', { name: 'Search keyboard shortcuts' }), {
+      target: { value: 'sort' }
+    });
+    expect(screen.getByText('Show sort order')).toBeDefined();
+    expect(screen.queryByText(/Reverse sort/)).toBeNull();
+  });
+
   it('renders a modified shortcut as one chord instead of key alternatives', () => {
     render(KeyboardHelp, {
       commands: createCommandRegistry(handlersFor(COMMAND_DEFINITIONS.map(({ id }) => id))),
