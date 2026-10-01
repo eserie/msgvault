@@ -50,6 +50,7 @@ export type InstalledOperations = {
   driftNextPage(): void;
   failNextDocumentStatus(): void;
   failNextHistory(): void;
+  holdNextOperationStatus(): () => void;
   rotateReferencesOnNextRefresh(): void;
   setOperationConfigured(kind: 'document_extraction' | 'visual_embedding', configured: boolean): void;
 };
@@ -59,6 +60,7 @@ export async function installOperations(page: Page): Promise<InstalledOperations
   const listQueries: URLSearchParams[] = [];
   const statusRequests: string[] = [];
   let operationStatusReads = 0;
+  let statusGate: Promise<void> | undefined;
   let cardDAVConflict = false;
   let pageDrift = false;
   let documentStatusFailure = false;
@@ -125,8 +127,11 @@ export async function installOperations(page: Page): Promise<InstalledOperations
     } });
   });
 
-  await page.route('**/api/v1/operations/status', (route) => {
+  await page.route('**/api/v1/operations/status', async (route) => {
     operationStatusReads += 1;
+    const gate = statusGate;
+    statusGate = undefined;
+    await gate;
     return fulfillOperation(route, statusResponse(referencesRotated, documentConfigured, visualConfigured));
   });
   await page.route('**/api/v1/operations/runs**', async (route) => {
@@ -198,6 +203,11 @@ export async function installOperations(page: Page): Promise<InstalledOperations
     driftNextPage(): void { pageDrift = true; },
     failNextDocumentStatus(): void { documentStatusFailure = true; },
     failNextHistory(): void { historyFailure = true; },
+    holdNextOperationStatus(): () => void {
+      let release!: () => void;
+      statusGate = new Promise<void>((resolve) => { release = resolve; });
+      return release;
+    },
     rotateReferencesOnNextRefresh(): void { rotateOnNextRefresh = true; },
     setOperationConfigured(kind, configured): void {
       if (kind === 'document_extraction') documentConfigured = configured;

@@ -6,44 +6,48 @@ import { installDirectoryReviewArchive, installMixedArchive } from './fixtures/m
 import { installOperations, OPERATION_REFERENCES } from './fixtures/operations';
 
 async function assertNoViolations(page: Page, label: string) {
-  // Kit's muted Chip tone is below 4.5:1 in the light theme by design (documented in kit-ui's
-  // contrast baseline: 3.18 here). Only the kit can retune it, so only those chips are excluded.
-  const result = await new AxeBuilder({ page }).exclude('.kit-chip--tone-muted').analyze();
+  const result = await new AxeBuilder({ page }).analyze();
   expect(result.violations, `${label}: ${result.violations.map((v) => `${v.id}: ${v.help}`).join('; ')}`)
     .toEqual([]);
 }
 
-test('Operations workspace, detail, failure, and narrow states have no axe violations', async ({ page }) => {
-  test.slow();
-  const fixture = await installOperations(page);
-  await page.goto(`/?explore=${encodeURIComponent(JSON.stringify({ workspace: 'operations' }))}`);
-  await expect(page.getByRole('main', { name: 'Operations' })).toBeVisible();
-  await assertNoViolations(page, 'Operations workspace');
+for (const theme of ['light', 'dark'] as const) {
+  test(`${theme} Operations workspace, detail, failure, and narrow states have no axe violations`, async ({ page }) => {
+    test.slow();
+    const fixture = await installOperations(page);
+    const operations = `/?explore=${encodeURIComponent(JSON.stringify({ workspace: 'operations' }))}`;
+    await page.goto(operations);
+    await setKitTheme(page, theme);
+    await expect(page.getByRole('main', { name: 'Operations' })).toBeVisible();
+    await assertNoViolations(page, `Operations workspace ${theme}`);
 
-  await page.getByRole('button', { name: 'Open Document extraction run' }).click();
-  await expect(page.getByRole('region', { name: 'Operation run detail' })).toContainText('Operation archive input changed.');
-  await assertNoViolations(page, 'Operations detail with fixed failure');
+    await page.getByRole('button', { name: 'Open Document extraction run' }).click();
+    await expect(page.getByRole('region', { name: 'Operation run detail' })).toContainText('Operation archive input changed.');
+    await assertNoViolations(page, `Operations detail with fixed failure ${theme}`);
 
-  await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto(`/?explore=${encodeURIComponent(JSON.stringify({
-    workspace: 'operations', operationRunID: OPERATION_REFERENCES.document
-  }))}`);
-  await expect(page.getByRole('region', { name: 'Operation detail focused content' })).toBeVisible();
-  await assertNoViolations(page, 'Operations narrow detail');
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(`/?explore=${encodeURIComponent(JSON.stringify({
+      workspace: 'operations', operationRunID: OPERATION_REFERENCES.document
+    }))}`);
+    await setKitTheme(page, theme);
+    await expect(page.getByRole('region', { name: 'Operation detail focused content' })).toBeVisible();
+    await assertNoViolations(page, `Operations narrow detail ${theme}`);
 
-  await page.getByRole('button', { name: 'Back to operation history' }).click();
-  fixture.failNextHistory();
-  await page.getByRole('button', { name: 'Reload run history' }).click();
-  await expect(page.getByRole('alert', { name: 'Operation history failure' })).toBeVisible();
-  await assertNoViolations(page, 'Operations history failure');
+    await page.getByRole('button', { name: 'Back to operation history' }).click();
+    fixture.failNextHistory();
+    await page.getByRole('button', { name: 'Reload run history' }).click();
+    await expect(page.getByRole('alert', { name: 'Operation history failure' })).toBeVisible();
+    await assertNoViolations(page, `Operations history failure ${theme}`);
 
-  fixture.setOperationConfigured('document_extraction', false);
-  await page.setViewportSize({ width: 1280, height: 800 });
-  await page.goto(`/?explore=${encodeURIComponent(JSON.stringify({ workspace: 'operations' }))}`);
-  await page.getByRole('button', { name: 'Open Document index status' }).click();
-  await expect(page.getByRole('link', { name: 'Document indexing setup' })).toBeVisible();
-  await assertNoViolations(page, 'Operations document setup line');
-});
+    fixture.setOperationConfigured('document_extraction', false);
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto(operations);
+    await setKitTheme(page, theme);
+    await page.getByRole('button', { name: 'Open Document index status' }).click();
+    await expect(page.getByRole('link', { name: 'Document indexing setup' })).toBeVisible();
+    await assertNoViolations(page, `Operations document setup line ${theme}`);
+  });
+}
 
 for (const theme of ['light', 'dark'] as const) {
   test(`${theme} Manage pages and their states have no axe violations`, async ({ page }) => {
@@ -88,12 +92,34 @@ for (const theme of ['light', 'dark'] as const) {
     await expect(page.getByText('Nothing selected for deletion')).toBeVisible();
     await assertNoViolations(page, `Deletions empty ${theme}`);
 
+    await page.route('**/api/v1/deletions', (route) => route.fulfill({ json: { manifests: [
+      { id: 'batch-pending', status: 'pending', created_at: '2026-07-19T10:00:00Z', created_by: 'api',
+        description: 'Reviewed selection', message_count: 3 },
+      { id: 'batch-done', status: 'completed', created_at: '2026-07-18T10:00:00Z', created_by: 'api',
+        description: 'Older cleanup', message_count: 12 },
+      { id: 'batch-cancelled', status: 'cancelled', created_at: '2026-07-17T10:00:00Z', created_by: 'api',
+        description: 'Withdrawn selection', message_count: 1 }
+    ] } }));
+    await page.route('**/api/v1/deletions/batch-done', (route) => route.fulfill({ json: {
+      id: 'batch-done', status: 'completed', created_at: '2026-07-18T10:00:00Z', created_by: 'api',
+      description: 'Older cleanup', message_count: 12, account: 'archive@example.com',
+      execution: { succeeded: 11, failed: 1, failed_ids: ['msg-1'] }
+    } }));
+    await selectWorkspace(page, 'Everything');
+    await selectWorkspace(page, 'Deletions');
+    const manifests = page.getByRole('table', { name: 'Deletion manifests' });
+    await expect(manifests.getByText('Completed')).toBeVisible();
+    await assertNoViolations(page, `Deletions manifests table ${theme}`);
+    await page.getByRole('button', { name: 'Inspect batch-done' }).click();
+    await expect(page.getByText('archive@example.com')).toBeVisible();
+    await assertNoViolations(page, `Deletions manifest detail ${theme}`);
+
     await selectWorkspace(page, 'Everything');
     const grid = page.getByRole('grid', { name: 'Everything results' });
     await grid.focus();
     await page.keyboard.press('Space');
     await page.keyboard.press('d');
-    await page.getByRole('button', { name: 'Cancel' }).click();
+    await page.getByRole('button', { name: 'Cancel', exact: true }).click();
     await expect(page.getByRole('button', { name: 'Stage deletion…' })).toBeVisible();
     await assertNoViolations(page, `Deletions review ${theme}`);
 

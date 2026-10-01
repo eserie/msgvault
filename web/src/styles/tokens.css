@@ -85,6 +85,13 @@
   opacity: 1;
 }
 
+/* Kit mixes the muted chip text 25% toward its own background, which drops
+ * the label below AA contrast (3.18:1 in the light theme). The word is the
+ * whole status, so use the palette's muted text token as-is. */
+:root .kit-chip.kit-chip--tone-muted {
+  color: var(--text-muted);
+}
+
 :where([data-artifact]) {
   color: var(--artifact-ink);
 }

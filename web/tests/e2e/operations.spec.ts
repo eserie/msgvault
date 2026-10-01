@@ -86,6 +86,10 @@ test('operations sends confirmed unconfigured document and visual status links t
   const guide = page.getByRole('link', { name: 'Document indexing setup' });
   await expect(guide).toBeVisible();
   await expect(guide).toHaveAttribute('target', '_blank');
+  await expect(guide).toHaveAttribute(
+    'href',
+    'https://msgvault.io/docs/usage/document-indexing/#configure-the-policy'
+  );
   await expect(page.getByText('Configured in config.toml on the daemon host.').first()).toBeVisible();
   await expect(page.getByRole('button', { name: /document index settings/i })).toHaveCount(0);
   expect(fixture.statusRequests).not.toContain('/api/v1/documents/status/current');
@@ -136,12 +140,18 @@ test('the refresh control reloads status only and keeps paged history, detail, a
   await expect(sourceRow).toBeFocused();
 
   const refresh = page.getByRole('button', { name: 'Refresh operation status' });
+  const releaseStatus = fixture.holdNextOperationStatus();
+  await refresh.focus();
   await refresh.click();
   await expect.poll(() => fixture.operationStatusReads).toBe(reads + 2);
+  await expect(refresh).toBeDisabled();
   expect(fixture.listQueries.length).toBe(listed);
+  releaseStatus();
+  await expect(refresh).toBeEnabled();
   await expect(refresh).toBeFocused();
 
   await page.getByRole('button', { name: 'Reload run history' }).click();
+  await expect.poll(() => fixture.operationStatusReads).toBe(reads + 3);
   await expect.poll(() => fixture.listQueries.length).toBe(listed + 1);
   expect(fixture.listQueries.at(-1)?.get('cursor')).toBeNull();
   await expect(page.getByRole('button', { name: 'Open Person fact sweep run' })).toHaveCount(0);
