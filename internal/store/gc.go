@@ -22,6 +22,58 @@ const managedDraftRetainedMessageSQL = `EXISTS (
 		   OR draft_owner.pending_original_message_id = messages.id
 	)`
 
+// matrixPendingRetainedMessageSQL identifies Matrix placeholder rows that a
+// pending encrypted event still owns. A placeholder retired after a device
+// renewal is source-deleted, yet the retry that applies the event once its key
+// arrives finds it through that row and discards the pending entry without it.
+const matrixPendingRetainedMessageSQL = `EXISTS (
+		SELECT 1 FROM matrix_undecryptable_events pending_owner
+		WHERE pending_owner.source_id = messages.source_id
+		  AND pending_owner.event_id = messages.source_message_id
+	)`
+
+// gcRetainedMessageSQL identifies source-deleted rows archive GC keeps.
+const gcRetainedMessageSQL = managedDraftRetainedMessageSQL + ` OR ` + matrixPendingRetainedMessageSQL
+
+// gcPurgedMessageSQL selects the rows archive GC removes, for a messages
+// table aliased as alias.
+func gcPurgedMessageSQL(alias string) string {
+	return `SELECT ` + alias + `.source_id, ` + alias + `.source_message_id
+		FROM messages ` + alias + `
+		WHERE ` + alias + `.deleted_from_source_at IS NOT NULL
+		  AND NOT (` + strings.ReplaceAll(gcRetainedMessageSQL, "messages.", alias+".") + `)`
+}
+
+// matrixRelationTargetSQL extracts the related event ID that an encrypted
+// Matrix event names in its cleartext m.relates_to.
+const matrixRelationTargetSQL = `json_extract(CAST(encrypted.raw_event AS TEXT), '$.content."m.relates_to".event_id')`
+
+// deleteMatrixCiphertextSQL removes the retained ciphertext of purged Matrix
+// events, and of events related to a purged message. A purged edit
+// placeholder keeps its ciphertext while a retained message still shows that
+// edit (the importer records it as matrix_edit_event_id): the ciphertext is
+// the encrypted source of the retained text. A superseded or redacted edit
+// loses it; if the homeserver lists it again, it is archived like an edit
+// never seen before. Pending events keep theirs for the retry.
+var deleteMatrixCiphertextSQL = `
+	DELETE FROM matrix_encrypted_events AS encrypted
+	WHERE NOT EXISTS (
+		SELECT 1 FROM matrix_undecryptable_events pending
+		WHERE pending.source_id = encrypted.source_id
+		  AND pending.event_id = encrypted.event_id
+	) AND (
+		(
+			(encrypted.source_id, encrypted.event_id) IN (` + gcPurgedMessageSQL("purged") + `)
+			AND NOT EXISTS (
+				SELECT 1 FROM messages edited
+				WHERE edited.source_id = encrypted.source_id
+				  AND json_extract(edited.metadata, '$.matrix_edit_event_id') = encrypted.event_id
+				  AND (edited.source_id, edited.source_message_id) NOT IN (` + gcPurgedMessageSQL("purged_edited") + `)
+			)
+		)
+		OR (encrypted.source_id, ` + matrixRelationTargetSQL + `) IN (` + gcPurgedMessageSQL("purged_target") + `)
+	)`
+
 // ErrGCUnsupported is returned before mutation when archive GC is requested
 // against PostgreSQL. PostgreSQL retention and compaction require an
 // operator-managed backup and VACUUM policy outside this SQLite command.
@@ -49,7 +101,7 @@ func planGCWith(q querier) (GCPlan, error) {
 	var plan GCPlan
 	if err := q.QueryRow(`
 		SELECT
-			COUNT(*) FILTER (WHERE deleted_from_source_at IS NOT NULL AND NOT (`+managedDraftRetainedMessageSQL+`)),
+			COUNT(*) FILTER (WHERE deleted_from_source_at IS NOT NULL AND NOT (`+gcRetainedMessageSQL+`)),
 			COUNT(*) FILTER (
 				WHERE deleted_at IS NOT NULL
 				  AND deleted_from_source_at IS NULL
@@ -63,7 +115,7 @@ func planGCWith(q querier) (GCPlan, error) {
 		FROM (
 			SELECT id FROM messages
 			WHERE deleted_from_source_at IS NOT NULL
-			  AND NOT (`+managedDraftRetainedMessageSQL+`)
+			  AND NOT (`+gcRetainedMessageSQL+`)
 			ORDER BY id
 		)
 	`)
@@ -131,7 +183,7 @@ func (s *Store) ExecuteGCContext(
 				SELECT DISTINCT conversation_id AS id
 				FROM messages
 				WHERE deleted_from_source_at IS NOT NULL
-				  AND NOT (`+managedDraftRetainedMessageSQL+`)
+				  AND NOT (`+gcRetainedMessageSQL+`)
 				  AND conversation_id IS NOT NULL
 				ORDER BY conversation_id
 			)
@@ -146,11 +198,15 @@ func (s *Store) ExecuteGCContext(
 				WHERE rowid IN (
 					SELECT id FROM messages
 					WHERE deleted_from_source_at IS NOT NULL
-					  AND NOT (` + managedDraftRetainedMessageSQL + `)
+					  AND NOT (` + gcRetainedMessageSQL + `)
 				)
 			`); err != nil {
 				return fmt.Errorf("delete source-deleted FTS rows: %w", err)
 			}
+		}
+
+		if _, err := q.Exec(deleteMatrixCiphertextSQL); err != nil {
+			return fmt.Errorf("delete ciphertext of source-deleted Matrix events: %w", err)
 		}
 
 		if _, err := q.Exec(`
@@ -159,7 +215,7 @@ func (s *Store) ExecuteGCContext(
 				WHERE reply_to_message_id IN (
 				SELECT id FROM messages
 				WHERE deleted_from_source_at IS NOT NULL
-				  AND NOT (` + managedDraftRetainedMessageSQL + `)
+				  AND NOT (` + gcRetainedMessageSQL + `)
 			)
 		`); err != nil {
 			return fmt.Errorf("clear replies to source-deleted messages: %w", err)
@@ -168,7 +224,7 @@ func (s *Store) ExecuteGCContext(
 		result, err := q.Exec(`
 		DELETE FROM messages
 		WHERE deleted_from_source_at IS NOT NULL
-		  AND NOT (` + managedDraftRetainedMessageSQL + `)
+		  AND NOT (` + gcRetainedMessageSQL + `)
 		`)
 		if err != nil {
 			return fmt.Errorf("delete source-deleted messages: %w", err)

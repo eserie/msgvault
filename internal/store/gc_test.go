@@ -222,3 +222,73 @@ func remainingGCMessageIDs(t *testing.T, st *store.Store) []int64 {
 	require.NoError(t, rows.Err(), "iterate remaining messages")
 	return ids
 }
+
+func TestGCKeepsPlaceholdersOwnedByPendingMatrixEvents(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+	f := newSQLiteGCFixture(t)
+	pendingPlaceholder := f.NewMessage().WithSourceMessageID("$pending-edit").Create(t, f.Store)
+	retired := f.NewMessage().WithSourceMessageID("$retired-edit").Create(t, f.Store)
+	for _, eventID := range []string{"$pending-edit", "$retired-edit"} {
+		require.NoError(f.Store.MarkMessageDeleted(f.Source.ID, eventID), "retire %s", eventID)
+	}
+	require.NoError(f.Store.PutMatrixUndecryptableEvents(f.Source.ID, []store.MatrixUndecryptableEvent{
+		{EventID: "$pending-edit", RoomID: "!room", RawEvent: []byte(`{}`)},
+	}), "keep the edit pending")
+
+	plan, err := f.Store.PlanGCContext(t.Context())
+	require.NoError(err, "PlanGCContext")
+	assert.Equal([]int64{retired}, plan.SourceDeletedIDs)
+	deleted, err := f.Store.ExecuteGCContext(t.Context(), plan)
+	require.NoError(err, "ExecuteGCContext")
+	assert.Equal(int64(1), deleted)
+	assert.Equal([]int64{pendingPlaceholder}, remainingGCMessageIDs(t, f.Store),
+		"the retry finds a pending event through its placeholder")
+}
+
+func TestGCDeletesCiphertextOfPurgedMatrixEvents(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+	f := newSQLiteGCFixture(t)
+	relatedTo := func(target string) []byte {
+		return []byte(`{"type":"m.room.encrypted","content":{"m.relates_to":{"rel_type":"m.replace","event_id":"` + target + `"}}}`)
+	}
+	ciphertext := map[string][]byte{
+		"$kept":            []byte(`{"type":"m.room.encrypted","content":{}}`),
+		"$applied-edit":    relatedTo("$kept"),
+		"$superseded-edit": relatedTo("$kept"),
+		"$redacted":        []byte(`{"type":"m.room.encrypted","content":{}}`),
+		"$redacted-edit":   relatedTo("$redacted"),
+		"$collected-edit":  relatedTo("$redacted"),
+	}
+	kept := f.NewMessage().WithSourceMessageID("$kept").Create(t, f.Store)
+	for _, eventID := range []string{"$applied-edit", "$superseded-edit", "$redacted", "$redacted-edit"} {
+		f.NewMessage().WithSourceMessageID(eventID).Create(t, f.Store)
+		require.NoError(f.Store.MarkMessageDeleted(f.Source.ID, eventID), "retire %s", eventID)
+	}
+	require.NoError(f.Store.SetMessageMetadata(kept, sql.NullString{
+		String: `{"matrix_edit_event_id":"$applied-edit","matrix_edit_ts":2000}`, Valid: true,
+	}), "record the applied edit")
+	for eventID, raw := range ciphertext {
+		require.NoError(f.Store.StoreMatrixEncryptedEvent(f.Source.ID, eventID, "!room", raw),
+			"retain ciphertext of %s", eventID)
+	}
+
+	plan, err := f.Store.PlanGCContext(t.Context())
+	require.NoError(err, "PlanGCContext")
+	_, err = f.Store.ExecuteGCContext(t.Context(), plan)
+	require.NoError(err, "ExecuteGCContext")
+
+	rows, err := f.Store.DB().Query(`SELECT event_id FROM matrix_encrypted_events ORDER BY event_id`)
+	require.NoError(err, "list retained ciphertext")
+	defer func() { _ = rows.Close() }()
+	var retained []string
+	for rows.Next() {
+		var eventID string
+		require.NoError(rows.Scan(&eventID), "scan retained ciphertext")
+		retained = append(retained, eventID)
+	}
+	require.NoError(rows.Err(), "iterate retained ciphertext")
+	assert.Equal([]string{"$applied-edit", "$kept"}, retained,
+		"purged events lose their ciphertext; the edit a kept message shows keeps it")
+}
