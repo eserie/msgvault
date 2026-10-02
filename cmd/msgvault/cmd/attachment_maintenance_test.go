@@ -619,6 +619,7 @@ func TestAttachmentProducingCommandExactAllowlist(t *testing.T) {
 		"import-whatsapp",
 		"sync-beeper",
 		"sync-discord",
+		"sync-matrix",
 		"sync-slack",
 		"sync-synctech-sms",
 		"sync-teams",

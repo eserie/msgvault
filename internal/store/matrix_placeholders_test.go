@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/msgvault/internal/attachmentpolicy"
 	"go.kenn.io/msgvault/internal/store"
 	"go.kenn.io/msgvault/internal/testutil"
 )
@@ -55,7 +56,7 @@ func TestMatrixUnsupportedPlaceholderRetainsRawAndInvalidatesIndexes(t *testing.
 		req.NoError(s.DB().QueryRow(`SELECT count(*) FROM messages_fts WHERE rowid = ?`, messageID).Scan(&indexed))
 		check.Zero(indexed)
 	}
-	rooms, err := s.MatrixPlaceholderRooms(t.Context(), source.ID, nil, nil)
+	rooms, err := s.MatrixPlaceholderRooms(t.Context(), source.ID, nil, nil, attachmentpolicy.Policy{})
 	req.NoError(err)
 	check.Empty(rooms)
 	claims, err := s.MatrixRecoveredEvents(t.Context(), convID)
@@ -92,7 +93,7 @@ func TestMatrixPlaceholderDiscoveryBackfillPagingAndRetirement(t *testing.T) {
 		ids = append(ids, messageID)
 	}
 	req.NoError(s.MarkMessageDeleted(source.ID, "$second"))
-	rooms, err := s.MatrixPlaceholderRooms(t.Context(), source.ID, nil, nil)
+	rooms, err := s.MatrixPlaceholderRooms(t.Context(), source.ID, nil, nil, attachmentpolicy.Policy{})
 	req.NoError(err)
 	req.Len(rooms, 1)
 	check.Equal(int64(4), rooms[0].Count)
@@ -105,15 +106,15 @@ func TestMatrixPlaceholderDiscoveryBackfillPagingAndRetirement(t *testing.T) {
 	}
 	_, err = s.DB().Exec(s.Rebind(`UPDATE message_raw SET raw_data = ? WHERE message_id = ?`), []byte("invalid JSON"), ids[0])
 	req.NoError(err)
-	rooms, err = s.MatrixPlaceholderRooms(t.Context(), source.ID, nil, nil)
+	rooms, err = s.MatrixPlaceholderRooms(t.Context(), source.ID, nil, nil, attachmentpolicy.Policy{})
 	req.NoError(err)
 	req.Len(rooms, 1)
 	check.Equal(int64(4), rooms[0].Count)
 	check.Equal("!room:example.org", rooms[0].RoomID)
-	rooms, err = s.MatrixPlaceholderRooms(t.Context(), source.ID, []string{"!other:example.org"}, nil)
+	rooms, err = s.MatrixPlaceholderRooms(t.Context(), source.ID, []string{"!other:example.org"}, nil, attachmentpolicy.Policy{})
 	req.NoError(err)
 	check.Empty(rooms)
-	rooms, err = s.MatrixPlaceholderRooms(t.Context(), source.ID, nil, []string{"!room:example.org"})
+	rooms, err = s.MatrixPlaceholderRooms(t.Context(), source.ID, nil, []string{"!room:example.org"}, attachmentpolicy.Policy{})
 	req.NoError(err)
 	check.Empty(rooms)
 	page, scanned, err := s.MatrixPlaceholders(t.Context(), convID, ids[0], 1)
@@ -149,7 +150,7 @@ func TestMatrixPlaceholderDiscoveryBackfillPagingAndRetirement(t *testing.T) {
 	_, err = s.DB().Exec(s.Rebind(`UPDATE message_raw SET raw_data = ?, compression = 'zlib' WHERE message_id = ?`), []byte("invalid compressed data"), ids[4])
 	req.NoError(err)
 	req.NoError(s.SetMessageMetadataContext(t.Context(), ids[4], sql.NullString{String: `{"matrix_event_type":"m.room.encrypted"}`, Valid: true}))
-	rooms, err = s.MatrixPlaceholderRooms(t.Context(), source.ID, nil, nil)
+	rooms, err = s.MatrixPlaceholderRooms(t.Context(), source.ID, nil, nil, attachmentpolicy.Policy{})
 	req.NoError(err)
 	req.Len(rooms, 1)
 	check.Equal(int64(5), rooms[0].Count)
@@ -231,4 +232,28 @@ func TestMatrixRecoveryTransactionKeepsStoreConfigurationAndScope(t *testing.T) 
 	metadata, err := s.GetMessageMetadata(messageID)
 	req.NoError(err)
 	check.JSONEq(`{"saved":true}`, metadata.String)
+}
+
+func TestMatrixPlaceholderRoomsUsesPolicyParticipantCount(t *testing.T) {
+	req, check := require.New(t), assert.New(t)
+	s := testutil.NewTestStore(t)
+	source, err := s.GetOrCreateSource("matrix", "@archive:example.org")
+	req.NoError(err)
+	room, err := s.EnsureConversationWithType(source.ID, "!room:example.org", "group_chat", "Room")
+	req.NoError(err)
+	_, err = s.PersistMessageContext(t.Context(), &store.MessagePersistData{
+		Message: &store.Message{SourceID: source.ID, ConversationID: room, SourceMessageID: "$encrypted", MessageType: "matrix", Snippet: sql.NullString{String: store.MatrixEncryptedPlaceholder, Valid: true}},
+		RawMIME: []byte(`{"type":"m.room.encrypted"}`), RawFormat: "matrix_json",
+	})
+	req.NoError(err)
+	policy := attachmentpolicy.Policy{MaxParticipants: 20}
+	for _, roster := range []string{"missing", "unknown"} {
+		if roster == "unknown" {
+			req.NoError(s.MarkConversationMemberCountUnknown(room))
+		}
+		rooms, err := s.MatrixPlaceholderRooms(t.Context(), source.ID, nil, nil, policy)
+		req.NoError(err)
+		req.Len(rooms, 1)
+		check.Equal(21, rooms[0].ParticipantCount, roster)
+	}
 }
