@@ -14,11 +14,14 @@ import (
 )
 
 // Credentials are the durable credentials for one dedicated Matrix device.
+// PickleKey protects the local Olm store and is generated independently for
+// every account. Recovery keys and passphrases are deliberately absent.
 type Credentials struct {
 	Homeserver  string `json:"homeserver"`
 	UserID      string `json:"user_id"`
 	DeviceID    string `json:"device_id"`
 	AccessToken string `json:"access_token"`
+	PickleKey   string `json:"pickle_key"`
 }
 
 var secureReplaceCredentials = fileutil.SecureReplaceFile
@@ -86,6 +89,15 @@ func LoadCredentials(tokensDir, userID string) (Credentials, error) {
 	if creds.UserID != userID || creds.Homeserver == "" || creds.DeviceID == "" || creds.AccessToken == "" {
 		return Credentials{}, fmt.Errorf("matrix credential file for %s is incomplete or belongs to %s", userID, creds.UserID)
 	}
+	if creds.PickleKey == "" {
+		creds.PickleKey, err = generatePickleKey()
+		if err != nil {
+			return Credentials{}, err
+		}
+		if err := SaveCredentials(tokensDir, creds); err != nil {
+			return Credentials{}, fmt.Errorf("upgrade Matrix credentials with crypto key: %w", err)
+		}
+	}
 	return creds, nil
 }
 
@@ -108,4 +120,29 @@ func CredentialsExist(tokensDir, userID string) (bool, error) {
 		return false, nil
 	}
 	return false, fmt.Errorf("check Matrix credentials: %w", err)
+}
+
+// CryptoStorePath returns the per-device persistent crypto database path.
+// Device scoping lets a failed or intentional re-login start with a clean Olm
+// identity without colliding with the previous dedicated device.
+func CryptoStorePath(dataDir, userID, deviceID string) string {
+	return filepath.Join(dataDir, "matrix", accountKey(userID), accountKey(deviceID), "crypto.db")
+}
+
+// DeleteCryptoStore removes local crypto state for one dedicated device.
+func DeleteCryptoStore(dataDir, userID, deviceID string) error {
+	path := filepath.Dir(CryptoStorePath(dataDir, userID, deviceID))
+	if err := os.RemoveAll(path); err != nil {
+		return fmt.Errorf("remove Matrix crypto store: %w", err)
+	}
+	return nil
+}
+
+// DeleteAccountCryptoStores removes all local crypto state for an account.
+func DeleteAccountCryptoStores(dataDir, userID string) error {
+	path := filepath.Join(dataDir, "matrix", accountKey(userID))
+	if err := os.RemoveAll(path); err != nil {
+		return fmt.Errorf("remove Matrix account crypto stores: %w", err)
+	}
+	return nil
 }

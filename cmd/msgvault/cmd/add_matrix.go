@@ -16,11 +16,14 @@ import (
 )
 
 var (
-	addMatrixHomeserver        string
-	addMatrixUserID            string
-	addMatrixPasswordFile      string
-	addMatrixLoginTokenFile    string
-	noDefaultIdentityAddMatrix bool
+	addMatrixHomeserver           string
+	addMatrixUserID               string
+	addMatrixPasswordFile         string
+	addMatrixLoginTokenFile       string
+	addMatrixRecoveryFile         string
+	addMatrixRecoveryIsPassphrase bool
+	addMatrixSkipKeyBackup        bool
+	noDefaultIdentityAddMatrix    bool
 )
 
 func newAddMatrixCmd() *cobra.Command {
@@ -30,7 +33,11 @@ func newAddMatrixCmd() *cobra.Command {
 		Long: `Add a Matrix account using a dedicated read-only msgvault device.
 
 Password login is the default. For SSO accounts, obtain a single-use
-m.login.token from the homeserver login flow and pass --login-token-file.`,
+m.login.token from the homeserver login flow and pass --login-token-file.
+The recovery key or passphrase is used once to restore server-side key backup;
+it is never written to config or the credential file. The backup decryption key
+it unlocks is kept in the device's encrypted crypto store so later syncs can
+fetch room keys that other devices add to the backup.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			state := invocationFromCommand(cmd)
@@ -48,14 +55,24 @@ m.login.token from the homeserver login flow and pass --login-token-file.`,
 				if err != nil {
 					return err
 				}
+				recoverySecret, err := readMatrixRecoverySecret(cmd)
+				if err != nil {
+					return err
+				}
 				return runDaemonCLICommandHTTPFromCobraWithEnv(cmd, args, map[string]string{
-					clirun.EnvMatrixLoginSecret: loginSecret,
+					clirun.EnvMatrixLoginSecret: loginSecret, clirun.EnvMatrixRecoverySecret: recoverySecret,
 				})
 			}
 
 			loginSecret := os.Getenv(clirun.EnvMatrixLoginSecret)
 			if loginSecret == "" {
 				return errors.New("missing Matrix login secret in daemon subprocess")
+			}
+			// /cli/run can reach this subprocess without the client-side prompt,
+			// so enforce the recovery-secret requirement before any login.
+			recoverySecret := os.Getenv(clirun.EnvMatrixRecoverySecret)
+			if recoverySecret == "" && !addMatrixSkipKeyBackup {
+				return errors.New("missing Matrix recovery secret: pass --recovery-file (or explicitly --skip-key-backup)")
 			}
 			return matrixsource.WithCredentialLifecycleLock(state.cfg.TokensDir(), func() error {
 				creds, err := matrixsource.Login(cmd.Context(), addMatrixHomeserver, addMatrixUserID, loginSecret, addMatrixLoginTokenFile != "")
@@ -70,7 +87,18 @@ m.login.token from the homeserver login flow and pass --login-token-file.`,
 					cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(cmd.Context()), 10*time.Second)
 					defer cancel()
 					_ = matrixsource.Logout(cleanupCtx, creds)
+					_ = matrixsource.DeleteCryptoStore(state.cfg.Data.DataDir, creds.UserID, creds.DeviceID)
 				}()
+				runtime, err := matrixsource.Open(cmd.Context(), creds, matrixsource.CryptoStorePath(state.cfg.Data.DataDir, creds.UserID, creds.DeviceID))
+				if err != nil {
+					return err
+				}
+				defer func() { _ = runtime.Close() }()
+				if !addMatrixSkipKeyBackup {
+					if err := runtime.RestoreKeyBackup(cmd.Context(), recoverySecret, addMatrixRecoveryIsPassphrase); err != nil {
+						return err
+					}
+				}
 				s, cleanup, err := openWritableStoreAndInitForIngestInvocation(state)
 				if err != nil {
 					return err
@@ -120,6 +148,7 @@ m.login.token from the homeserver login flow and pass --login-token-file.`,
 				keepDevice = true
 				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Added Matrix account %s with device %s\n", creds.UserID, creds.DeviceID)
 				_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Run: msgvault sync-matrix")
+				_, _ = fmt.Fprintln(cmd.OutOrStdout(), "The dedicated archive device remains unverified; interactive SAS/QR verification is not supported.")
 				return nil
 			})
 		},
@@ -129,6 +158,9 @@ m.login.token from the homeserver login flow and pass --login-token-file.`,
 	flags.StringVar(&addMatrixUserID, "user-id", "", "full Matrix user ID (for example @archive:example.org)")
 	flags.StringVar(&addMatrixPasswordFile, "password-file", "", "read the Matrix password from a file")
 	flags.StringVar(&addMatrixLoginTokenFile, "login-token-file", "", "read a single-use m.login.token from a file")
+	flags.StringVar(&addMatrixRecoveryFile, "recovery-file", "", "read the recovery key or passphrase from a file")
+	flags.BoolVar(&addMatrixRecoveryIsPassphrase, "recovery-passphrase", false, "interpret the recovery secret as a passphrase")
+	flags.BoolVar(&addMatrixSkipKeyBackup, "skip-key-backup", false, "skip server-side key-backup restore")
 	flags.BoolVar(&noDefaultIdentityAddMatrix, "no-default-identity", false, noDefaultIdentityHelp)
 	return cmd
 }
@@ -154,6 +186,23 @@ func readMatrixLoginSecret() (string, error) {
 	default:
 		return "", errors.New("cannot read Matrix password: use --password-file or --login-token-file")
 	}
+}
+
+func readMatrixRecoverySecret(cmd *cobra.Command) (string, error) {
+	if addMatrixSkipKeyBackup {
+		return "", nil
+	}
+	if addMatrixRecoveryFile != "" {
+		return readMatrixSecretFile(addMatrixRecoveryFile, !addMatrixRecoveryIsPassphrase)
+	}
+	if !isatty.IsTerminal(os.Stdin.Fd()) && !isatty.IsCygwinTerminal(os.Stdin.Fd()) {
+		return "", errors.New("key-backup restore needs --recovery-file (or explicitly --skip-key-backup)")
+	}
+	prompt := "Matrix recovery key:"
+	if addMatrixRecoveryIsPassphrase {
+		prompt = "Matrix recovery passphrase:"
+	}
+	return readPasswordInteractive(prompt, cmd.ErrOrStderr())
 }
 
 func readMatrixSecretFile(path string, normalize bool) (string, error) {
