@@ -8,16 +8,20 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/msgvault/internal/attachmentpolicy"
 	"go.kenn.io/msgvault/internal/store"
 	"go.kenn.io/msgvault/internal/testutil"
 	"maunium.net/go/mautrix"
 	"maunium.net/go/mautrix/crypto"
+	matrixattachment "maunium.net/go/mautrix/crypto/attachment"
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
 )
@@ -68,11 +72,15 @@ func TestImporterBackfillsJoinedRoomAndPersistsCheckpoint(t *testing.T) {
 	st := testutil.NewTestStore(t)
 	source, err := st.GetOrCreateSource(SourceType, "@archive:example.org")
 	require.NoError(err)
-	sum, err := NewImporter(st, &Runtime{Client: client}).Import(t.Context(), ImportOptions{UserID: "@archive:example.org"})
+	sum, err := NewImporter(st, &Runtime{Client: client}).Import(t.Context(), ImportOptions{
+		UserID: "@archive:example.org", NoMedia: true,
+		MediaPolicy: attachmentpolicy.Policy{Scope: attachmentpolicy.ScopeAll},
+	})
 	require.NoError(err)
 	assert.Equal(int64(6), sum.MessagesAdded)
 	assert.Equal(int64(1), sum.Undecryptable)
 	assert.Equal(int64(1), sum.EventsSkipped)
+	assert.Equal(int64(1), sum.AttachmentsPending)
 	count, err := st.CountMessagesForSource(source.ID)
 	require.NoError(err)
 	assert.Equal(int64(5), count)
@@ -111,6 +119,9 @@ func TestImporterBackfillsJoinedRoomAndPersistsCheckpoint(t *testing.T) {
 	var deletedAtValid bool
 	require.NoError(st.DB().QueryRow(st.Rebind(`SELECT deleted_from_source_at IS NOT NULL FROM messages WHERE id = ?`), messageIDs["$delete-me"]).Scan(&deletedAtValid))
 	assert.True(deletedAtValid)
+	attachments, err := st.MessageMatrixAttachments(messageIDs["$image"])
+	require.NoError(err)
+	assert.Equal(attachmentpolicy.StatePending, attachments["matrix:mxc://example.org/image"].State)
 	var reactions int
 	require.NoError(st.DB().QueryRow(st.Rebind(`SELECT COUNT(*) FROM reactions WHERE message_id = ?`), messageIDs["$one"]).Scan(&reactions))
 	assert.Equal(1, reactions)
@@ -137,7 +148,8 @@ func TestImporterBackfillsJoinedRoomAndPersistsCheckpoint(t *testing.T) {
 	assert.Equal("!room:example.org", pendingEvent.RoomID)
 
 	fullSummary, err := NewImporter(st, &Runtime{Client: client}).Import(t.Context(), ImportOptions{
-		UserID: "@archive:example.org", Full: true,
+		UserID: "@archive:example.org", Full: true, NoMedia: true,
+		MediaPolicy: attachmentpolicy.Policy{Scope: attachmentpolicy.ScopeAll},
 	})
 	require.NoError(err)
 	assert.Equal(int64(0), fullSummary.MessagesAdded)
@@ -227,7 +239,8 @@ func TestImporterDecryptsRealMegolmEvent(t *testing.T) {
 	require.NoError(err)
 	encryptedEvent.ID = "$encrypted-2"
 	encryptedEvent.Content = event.Content{Parsed: encryptedContent}
-	require.NoError(NewImporter(st, runtime).persistEvent(ctx, source.ID, conversationID, encryptedEvent, &ImportSummary{}))
+	require.NoError(NewImporter(st, runtime).persistEvent(ctx, source.ID, conversationID, encryptedEvent,
+		attachmentpolicy.Conversation{}, ImportOptions{}, &ImportSummary{}))
 	messageIDs, err := st.MessageExistsBatch(source.ID, []string{"$encrypted-2"})
 	require.NoError(err)
 	body, err := st.GetMessageBodyText(messageIDs["$encrypted-2"])
@@ -257,12 +270,14 @@ func TestImporterDecryptFailurePreservesArchivedPlaintext(t *testing.T) {
 	success := NewImporter(st, &Runtime{Client: client, decryptEvent: func(context.Context, *event.Event) (*event.Event, error) {
 		return decrypted, nil
 	}})
-	require.NoError(success.persistEvent(t.Context(), source.ID, conversationID, encrypted, &ImportSummary{}))
+	require.NoError(success.persistEvent(t.Context(), source.ID, conversationID, encrypted,
+		attachmentpolicy.Conversation{}, ImportOptions{}, &ImportSummary{}))
 	failing := NewImporter(st, &Runtime{Client: client, decryptEvent: func(context.Context, *event.Event) (*event.Event, error) {
 		return nil, errors.New("synthetic missing session")
 	}})
 	sum := &ImportSummary{}
-	require.NoError(failing.persistEvent(t.Context(), source.ID, conversationID, encrypted, sum))
+	require.NoError(failing.persistEvent(t.Context(), source.ID, conversationID, encrypted,
+		attachmentpolicy.Conversation{}, ImportOptions{}, sum))
 	messageIDs, err := st.MessageExistsBatch(source.ID, []string{encrypted.ID.String()})
 	require.NoError(err)
 	body, err := st.GetMessageBodyText(messageIDs[encrypted.ID.String()])
@@ -295,7 +310,8 @@ func TestLegacyPendingCiphertextCheckpointPrecedesFullReplay(t *testing.T) {
 		}},
 	}
 	require.NoError(NewImporter(st, &Runtime{Client: client}).persistEvent(
-		t.Context(), source.ID, conversationID, encrypted, &ImportSummary{}))
+		t.Context(), source.ID, conversationID, encrypted,
+		attachmentpolicy.Conversation{}, ImportOptions{}, &ImportSummary{}))
 	messageIDs, err := st.MessageExistsBatch(source.ID, []string{encrypted.ID.String()})
 	require.NoError(err)
 	messageID := messageIDs[encrypted.ID.String()]
@@ -363,7 +379,9 @@ func TestFullSyncRetriesArchivedCiphertextOmittedByHomeserver(t *testing.T) {
 		}},
 	}
 	require.NoError(NewImporter(st, &Runtime{Client: client}).persistEvent(
-		t.Context(), source.ID, conversationID, encrypted, &ImportSummary{}))
+		t.Context(), source.ID, conversationID, encrypted,
+		attachmentpolicy.Conversation{Type: "group_chat", ParticipantCount: 2},
+		ImportOptions{NoMedia: true}, &ImportSummary{}))
 	decrypted := matrixTestEvent(t, `{"type":"m.room.message","event_id":"$retained-ciphertext","sender":"@member:example.org","origin_server_ts":1000,"content":{"msgtype":"m.text","body":"recovered after full sync"}}`)
 	decrypted.RoomID = roomID
 	runtime := &Runtime{Client: client, decryptEvent: func(context.Context, *event.Event) (*event.Event, error) {
@@ -400,7 +418,8 @@ func TestUndecryptableRecoveryHonorsRoomFilters(t *testing.T) {
 			Algorithm: id.AlgorithmMegolmV1,
 		}},
 	}
-	require.NoError(initial.persistEvent(t.Context(), source.ID, conversationID, encrypted, &ImportSummary{}))
+	require.NoError(initial.persistEvent(t.Context(), source.ID, conversationID, encrypted,
+		attachmentpolicy.Conversation{Type: "group_chat", ParticipantCount: 2}, ImportOptions{NoMedia: true}, &ImportSummary{}))
 	pending, ok := pendingUndecryptable(t, st, source.ID, encrypted.ID.String())
 	require.True(ok)
 	assert.NotEmpty(pending.RawEvent)
@@ -417,6 +436,285 @@ func TestUndecryptableRecoveryHonorsRoomFilters(t *testing.T) {
 	assert.Zero(decryptCalls)
 	_, retained := pendingUndecryptable(t, st, source.ID, encrypted.ID.String())
 	assert.True(retained)
+}
+
+func TestImporterDownloadsAndDecryptsEncryptedMedia(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+	plaintext := []byte("synthetic encrypted image bytes")
+	ciphertext := append([]byte(nil), plaintext...)
+	encryptedFile := matrixattachment.NewEncryptedFile()
+	encryptedFile.EncryptInPlace(ciphertext)
+	content := &event.MessageEventContent{
+		MsgType: event.MsgImage,
+		Body:    "fixture.jpg",
+		File: &event.EncryptedFileInfo{
+			EncryptedFile: *encryptedFile,
+			URL:           "mxc://example.org/encrypted-image",
+		},
+		Info: &event.FileInfo{MimeType: "image/jpeg", Size: len(ciphertext)},
+	}
+	syncBody, err := json.Marshal(map[string]any{
+		"next_batch": "next-1",
+		"rooms": map[string]any{"join": map[string]any{"!room:example.org": map[string]any{
+			"state": map[string]any{"events": []any{}},
+			"timeline": map[string]any{"events": []any{map[string]any{
+				"type": "m.room.message", "event_id": "$encrypted-image", "sender": "@member:example.org",
+				"origin_server_ts": 1000, "content": content,
+			}}},
+		}}},
+	})
+	require.NoError(err)
+	downloaded := false
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /_matrix/client/v3/sync", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(syncBody)
+	})
+	mux.HandleFunc("GET /_matrix/client/v3/user/@archive:example.org/account_data/m.direct", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{}`))
+	})
+	mux.HandleFunc("GET /_matrix/client/v3/rooms/!room:example.org/joined_members", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"joined":{"@archive:example.org":{"display_name":"Archive"},"@member:example.org":{"display_name":"Member"}}}`))
+	})
+	mux.HandleFunc("GET /_matrix/client/v1/media/download/example.org/encrypted-image", func(w http.ResponseWriter, _ *http.Request) {
+		downloaded = true
+		_, _ = w.Write(ciphertext)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	client, err := mautrix.NewClient(server.URL, id.UserID("@archive:example.org"), "token")
+	require.NoError(err)
+
+	st := testutil.NewTestStore(t)
+	source, err := st.GetOrCreateSource(SourceType, "@archive:example.org")
+	require.NoError(err)
+	attachmentsDir := t.TempDir()
+	mediaMutations := 0
+	sum, err := NewImporter(st, &Runtime{Client: client}).Import(t.Context(), ImportOptions{
+		UserID: "@archive:example.org", AttachmentsDir: attachmentsDir,
+		MediaPolicy: attachmentpolicy.Policy{Scope: attachmentpolicy.ScopeAll, MaxBytes: 1 << 20},
+		MediaMutation: func(_ context.Context, write func() error) error {
+			assert.True(downloaded, "the media download must finish before acquiring the mutation lease")
+			mediaMutations++
+			return write()
+		},
+	})
+	require.NoError(err)
+	assert.Equal(1, mediaMutations)
+	assert.Equal(int64(1), sum.AttachmentsDownloaded)
+	messages, err := st.MessageExistsBatch(source.ID, []string{"$encrypted-image"})
+	require.NoError(err)
+	attachments, err := st.MessageMatrixAttachments(messages["$encrypted-image"])
+	require.NoError(err)
+	archived := attachments["matrix:mxc://example.org/encrypted-image"]
+	assert.Equal(attachmentpolicy.StateStored, archived.State)
+	var sizeEstimate int64
+	require.NoError(st.DB().QueryRow(st.Rebind(`SELECT size_estimate FROM messages WHERE id = ?`), messages["$encrypted-image"]).Scan(&sizeEstimate))
+	assert.Equal(int64(len("[image]")+len(plaintext)), sizeEstimate)
+	stored, err := os.ReadFile(filepath.Join(attachmentsDir, archived.StoragePath))
+	require.NoError(err)
+	assert.Equal(plaintext, stored)
+}
+
+func TestImporterArchivesStickerAsImageAttachment(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /_matrix/client/v1/media/download/example.org/sticker", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("sticker bytes"))
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	client, err := mautrix.NewClient(server.URL, "@archive:example.org", "token")
+	require.NoError(err)
+	st := testutil.NewTestStore(t)
+	source, err := st.GetOrCreateSource(SourceType, "@archive:example.org")
+	require.NoError(err)
+	conversationID, err := st.EnsureConversationWithType(source.ID, "!room:example.org", "group_chat", "Stickers")
+	require.NoError(err)
+	imp := NewImporter(st, &Runtime{Client: client})
+	opts := ImportOptions{AttachmentsDir: t.TempDir(), MediaPolicy: attachmentpolicy.Policy{Scope: attachmentpolicy.ScopeAll}}
+	conversation := attachmentpolicy.Conversation{Type: "group_chat", ParticipantCount: 2}
+	evt := matrixTestEvent(t, `{"type":"m.sticker","event_id":"$sticker","sender":"@member:example.org","origin_server_ts":1000,"content":{"body":"wave","url":"mxc://example.org/sticker","info":{"mimetype":"image/png","size":13}}}`)
+
+	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, evt, conversation, opts, &ImportSummary{}))
+	messageIDs, err := st.MessageExistsBatch(source.ID, []string{"$sticker"})
+	require.NoError(err)
+	attachments, err := st.MessageMatrixAttachments(messageIDs["$sticker"])
+	require.NoError(err)
+	require.Contains(attachments, "matrix:mxc://example.org/sticker")
+	assert.Equal(attachmentpolicy.StateStored, attachments["matrix:mxc://example.org/sticker"].State)
+}
+
+func TestImporterRetriesFailedMediaWithoutReplacingMessage(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	requests := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /_matrix/client/v1/media/download/example.org/retry", func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		if requests == 1 {
+			http.Error(w, "synthetic failure", http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte("recovered media"))
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	client, err := mautrix.NewClient(server.URL, "@archive:example.org", "token")
+	require.NoError(err)
+	st := testutil.NewTestStore(t)
+	source, err := st.GetOrCreateSource(SourceType, "@archive:example.org")
+	require.NoError(err)
+	conversationID, err := st.EnsureConversationWithType(source.ID, "!room:example.org", "group_chat", "Media")
+	require.NoError(err)
+	imp := NewImporter(st, &Runtime{Client: client})
+	opts := ImportOptions{AttachmentsDir: t.TempDir(), MediaPolicy: attachmentpolicy.Policy{Scope: attachmentpolicy.ScopeAll}}
+	conversation := attachmentpolicy.Conversation{Type: "group_chat", ParticipantCount: 2}
+	evt := matrixTestEvent(t, `{"type":"m.room.message","event_id":"$retry-media","sender":"@member:example.org","origin_server_ts":1000,"content":{"msgtype":"m.file","body":"retry.txt","url":"mxc://example.org/retry","info":{"mimetype":"text/plain","size":15}}}`)
+
+	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, evt, conversation, opts, &ImportSummary{}))
+	messageIDs, err := st.MessageExistsBatch(source.ID, []string{"$retry-media"})
+	require.NoError(err)
+	messageID := messageIDs["$retry-media"]
+	require.NotZero(messageID)
+	firstRaw, err := st.GetMessageRaw(messageID)
+	require.NoError(err)
+	attachments, err := st.MessageMatrixAttachments(messageID)
+	require.NoError(err)
+	assert.Equal(attachmentpolicy.StateFailed, attachments["matrix:mxc://example.org/retry"].State)
+
+	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, evt, conversation, opts, &ImportSummary{}))
+	replayedIDs, err := st.MessageExistsBatch(source.ID, []string{"$retry-media"})
+	require.NoError(err)
+	assert.Equal(messageID, replayedIDs["$retry-media"])
+	secondRaw, err := st.GetMessageRaw(messageID)
+	require.NoError(err)
+	assert.Equal(firstRaw, secondRaw)
+	attachments, err = st.MessageMatrixAttachments(messageID)
+	require.NoError(err)
+	assert.Equal(attachmentpolicy.StateStored, attachments["matrix:mxc://example.org/retry"].State)
+	assert.Equal(2, requests)
+}
+
+func TestImporterMediaEditReplacesAttachmentAndStoresEmptyFiles(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /_matrix/client/v1/media/download/example.org/original", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("original bytes"))
+	})
+	mux.HandleFunc("GET /_matrix/client/v1/media/download/example.org/replacement", func(http.ResponseWriter, *http.Request) {})
+	// No edit survives each redaction, so the original is shown again.
+	mux.HandleFunc("GET /_matrix/client/v1/rooms/{room}/relations/{event}/m.replace", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"chunk":[]}`))
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	client, err := mautrix.NewClient(server.URL, "@archive:example.org", "token")
+	require.NoError(err)
+	st := testutil.NewTestStore(t)
+	source, err := st.GetOrCreateSource(SourceType, "@archive:example.org")
+	require.NoError(err)
+	conversationID, err := st.EnsureConversationWithType(source.ID, "!room:example.org", "group_chat", "Media")
+	require.NoError(err)
+	imp := NewImporter(st, &Runtime{Client: client})
+	opts := ImportOptions{AttachmentsDir: t.TempDir(), MediaPolicy: attachmentpolicy.Policy{Scope: attachmentpolicy.ScopeAll}}
+	conversation := attachmentpolicy.Conversation{Type: "group_chat", ParticipantCount: 2}
+	sum := &ImportSummary{}
+	original := matrixTestEvent(t, `{"type":"m.room.message","event_id":"$media","sender":"@member:example.org","origin_server_ts":1000,"content":{"msgtype":"m.file","body":"original.txt","filename":"original.txt","url":"mxc://example.org/original","info":{"mimetype":"text/plain","size":14}}}`)
+	edit := matrixTestEvent(t, `{"type":"m.room.message","event_id":"$media-edit","sender":"@member:example.org","origin_server_ts":2000,"content":{"msgtype":"m.file","body":"* replacement.txt","m.new_content":{"msgtype":"m.file","body":"replacement.txt","filename":"replacement.txt","url":"mxc://example.org/replacement","info":{"mimetype":"text/plain","size":0}},"m.relates_to":{"rel_type":"m.replace","event_id":"$media"}}}`)
+	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, original, conversation, opts, sum))
+	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, edit, conversation, opts, sum))
+	messageIDs, err := st.MessageExistsBatch(source.ID, []string{"$media"})
+	require.NoError(err)
+	attachments, err := st.MessageMatrixAttachments(messageIDs["$media"])
+	require.NoError(err)
+	require.Len(attachments, 1)
+	replacement := attachments["matrix:mxc://example.org/replacement"]
+	assert.Equal("replacement.txt", replacement.Filename)
+	assert.Equal(attachmentpolicy.StateStored, replacement.State)
+	assert.NotEmpty(replacement.StoragePath, "a present zero-byte response retains a blob and occurrence")
+	stored, err := os.ReadFile(filepath.Join(opts.AttachmentsDir, replacement.StoragePath))
+	require.NoError(err)
+	assert.Empty(stored)
+	redaction := matrixTestEvent(t, `{"type":"m.room.redaction","event_id":"$redact-media-edit","sender":"@member:example.org","origin_server_ts":3000,"redacts":"$media-edit","content":{}}`)
+	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, redaction, conversation,
+		ImportOptions{NoMedia: true}, sum))
+	attachments, err = st.MessageMatrixAttachments(messageIDs["$media"])
+	require.NoError(err)
+	restored := attachments["matrix:mxc://example.org/original"]
+	assert.Equal(attachmentpolicy.StateStored, restored.State)
+	assert.NotEmpty(restored.StoragePath, "redacting a media edit reuses the archived original blob")
+	_, err = st.DB().Exec(st.Rebind(`DELETE FROM matrix_media_cache WHERE message_id = ?`), messageIDs["$media"])
+	require.NoError(err, "simulate legacy media before a text replacement")
+	textEdit := matrixTestEvent(t, `{"type":"m.room.message","event_id":"$media-text","sender":"@member:example.org","origin_server_ts":3200,"content":{"msgtype":"m.text","body":"* now text","m.new_content":{"msgtype":"m.text","body":"now text"},"m.relates_to":{"rel_type":"m.replace","event_id":"$media"}}}`)
+	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, textEdit, conversation, opts, sum))
+	attachments, err = st.MessageMatrixAttachments(messageIDs["$media"])
+	require.NoError(err)
+	assert.Empty(attachments, "a selected text replacement clears the media occurrence")
+	redactText := matrixTestEvent(t, `{"type":"m.room.redaction","event_id":"$redact-media-text","sender":"@member:example.org","origin_server_ts":3300,"redacts":"$media-text","content":{}}`)
+	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, redactText, conversation,
+		ImportOptions{NoMedia: true}, sum))
+	attachments, err = st.MessageMatrixAttachments(messageIDs["$media"])
+	require.NoError(err)
+	restored = attachments["matrix:mxc://example.org/original"]
+	assert.Equal(attachmentpolicy.StateStored, restored.State)
+	assert.NotEmpty(restored.StoragePath, "a text replacement caches legacy media before clearing it")
+
+	renamed := matrixTestEvent(t, `{"type":"m.room.message","event_id":"$media-renamed","sender":"@member:example.org","origin_server_ts":3500,"content":{"msgtype":"m.file","body":"* renamed.bin","m.new_content":{"msgtype":"m.file","body":"renamed.bin","filename":"renamed.bin","url":"mxc://example.org/original","info":{"mimetype":"application/octet-stream","size":999}} ,"m.relates_to":{"rel_type":"m.replace","event_id":"$media"}}}`)
+	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, renamed, conversation,
+		ImportOptions{NoMedia: true}, sum))
+	attachments, err = st.MessageMatrixAttachments(messageIDs["$media"])
+	require.NoError(err)
+	restored = attachments["matrix:mxc://example.org/original"]
+	assert.Equal("renamed.bin", restored.Filename, "cache hits retain the selected version's filename")
+	assert.Equal("application/octet-stream", restored.MimeType, "cache hits retain the selected version's MIME type")
+	assert.Equal(14, restored.Size, "cache hits retain the observed stored size")
+	_, err = st.DB().Exec(st.Rebind(`DELETE FROM matrix_media_cache WHERE message_id = ?`), messageIDs["$media"])
+	require.NoError(err, "simulate an archive created before the media cache existed")
+
+	noURL := matrixTestEvent(t, `{"type":"m.room.message","event_id":"$media-no-url","sender":"@member:example.org","origin_server_ts":4000,"content":{"msgtype":"m.file","body":"* unavailable.txt","m.new_content":{"msgtype":"m.file","body":"unavailable.txt","filename":"unavailable.txt"},"m.relates_to":{"rel_type":"m.replace","event_id":"$media"}}}`)
+	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, noURL, conversation, opts, sum))
+	attachments, err = st.MessageMatrixAttachments(messageIDs["$media"])
+	require.NoError(err)
+	assert.Empty(attachments, "a selected media version without a URL clears the previous attachment")
+	redactNoURL := matrixTestEvent(t, `{"type":"m.room.redaction","event_id":"$redact-no-url","sender":"@member:example.org","origin_server_ts":5000,"redacts":"$media-no-url","content":{}}`)
+	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, redactNoURL, conversation,
+		ImportOptions{NoMedia: true}, sum))
+	attachments, err = st.MessageMatrixAttachments(messageIDs["$media"])
+	require.NoError(err)
+	restored = attachments["matrix:mxc://example.org/original"]
+	assert.Equal(attachmentpolicy.StateStored, restored.State)
+	assert.NotEmpty(restored.StoragePath, "a URL-less edit caches a legacy stored mapping before clearing it")
+}
+
+func TestImporterMediaReplayUsesObservedOversize(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	var downloads int
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /_matrix/client/v1/media/download/example.org/large", func(w http.ResponseWriter, _ *http.Request) {
+		downloads++
+		_, _ = w.Write([]byte("larger than the cap"))
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	client, err := mautrix.NewClient(server.URL, "@archive:example.org", "token")
+	require.NoError(err)
+	st := testutil.NewTestStore(t)
+	source, err := st.GetOrCreateSource(SourceType, "@archive:example.org")
+	require.NoError(err)
+	conversationID, err := st.EnsureConversationWithType(source.ID, "!room:example.org", "group_chat", "Media")
+	require.NoError(err)
+	imp := NewImporter(st, &Runtime{Client: client})
+	opts := ImportOptions{AttachmentsDir: t.TempDir(), MediaPolicy: attachmentpolicy.Policy{Scope: attachmentpolicy.ScopeAll, MaxBytes: 4}}
+	conversation := attachmentpolicy.Conversation{Type: "group_chat", ParticipantCount: 2}
+	evt := matrixTestEvent(t, `{"type":"m.room.message","event_id":"$large","sender":"@member:example.org","origin_server_ts":1000,"content":{"msgtype":"m.file","body":"large.bin","url":"mxc://example.org/large","info":{"mimetype":"application/octet-stream","size":0}}}`)
+
+	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, evt, conversation, opts, &ImportSummary{}))
+	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, evt, conversation, opts, &ImportSummary{}))
+	assert.Equal(1, downloads)
 }
 
 func TestImporterDoesNotRecreateRemovedSource(t *testing.T) {
@@ -470,6 +768,36 @@ func TestRoomTitleUsesLatestTimelineRename(t *testing.T) {
 	empty, present := roomTitle([]*event.Event{matrixTestEvent(t, `{"type":"m.room.name","event_id":"$name-3","state_key":"","content":{"name":""}}`)})
 	assert.True(present)
 	assert.Empty(empty)
+}
+
+func TestImporterPlaintextSyncDoesNotAcquireMediaMutation(t *testing.T) {
+	require := require.New(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /_matrix/client/v3/sync", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"next_batch":"next-1","rooms":{"join":{"!room:example.org":{"state":{"events":[]},"timeline":{"events":[{"type":"m.room.message","event_id":"$plaintext","sender":"@member:example.org","origin_server_ts":1000,"content":{"msgtype":"m.text","body":"plain"}}]}}}}}`))
+	})
+	mux.HandleFunc("GET /_matrix/client/v3/user/@archive:example.org/account_data/m.direct", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{}`))
+	})
+	mux.HandleFunc("GET /_matrix/client/v3/rooms/!room:example.org/joined_members", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"joined":{"@archive:example.org":{"display_name":"Archive"},"@member:example.org":{"display_name":"Member"}}}`))
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	client, err := mautrix.NewClient(server.URL, id.UserID("@archive:example.org"), "token")
+	require.NoError(err)
+
+	st := testutil.NewTestStore(t)
+	_, err = st.GetOrCreateSource(SourceType, "@archive:example.org")
+	require.NoError(err)
+	_, err = NewImporter(st, &Runtime{Client: client}).Import(t.Context(), ImportOptions{
+		UserID: "@archive:example.org",
+		MediaMutation: func(context.Context, func() error) error {
+			require.FailNow("plaintext sync must not acquire the attachment mutation lease")
+			return nil
+		},
+	})
+	require.NoError(err)
 }
 
 func TestImporterDecryptsEachTimelineEventOnce(t *testing.T) {
@@ -599,9 +927,11 @@ func TestLatestEditWinsOriginalAtEqualTimestamp(t *testing.T) {
 	imp := NewImporter(st, &Runtime{Client: client})
 	sum := &ImportSummary{}
 	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID,
-		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$z-original","sender":"@member:example.org","origin_server_ts":1000,"content":{"msgtype":"m.text","body":"original"}}`), sum))
+		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$z-original","sender":"@member:example.org","origin_server_ts":1000,"content":{"msgtype":"m.text","body":"original"}}`),
+		attachmentpolicy.Conversation{}, ImportOptions{}, sum))
 	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID,
-		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$a-edit","sender":"@member:example.org","origin_server_ts":1000,"content":{"msgtype":"m.text","body":"* edited","m.new_content":{"msgtype":"m.text","body":"edited"},"m.relates_to":{"rel_type":"m.replace","event_id":"$z-original"}}}`), sum))
+		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$a-edit","sender":"@member:example.org","origin_server_ts":1000,"content":{"msgtype":"m.text","body":"* edited","m.new_content":{"msgtype":"m.text","body":"edited"},"m.relates_to":{"rel_type":"m.replace","event_id":"$z-original"}}}`),
+		attachmentpolicy.Conversation{}, ImportOptions{}, sum))
 	messageIDs, err := st.MessageExistsBatch(source.ID, []string{"$z-original"})
 	require.NoError(err)
 	body, err := st.GetMessageBodyText(messageIDs["$z-original"])
@@ -621,7 +951,8 @@ func TestImporterSkipsFirstSeenStrippedMessage(t *testing.T) {
 	require.NoError(err)
 	imp := NewImporter(st, &Runtime{Client: client})
 	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID,
-		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$already-redacted","sender":"@member:example.org","origin_server_ts":1000,"content":{},"unsigned":{"redacted_because":{"type":"m.room.redaction","event_id":"$redaction","sender":"@member:example.org","content":{}}}}`), &ImportSummary{}))
+		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$already-redacted","sender":"@member:example.org","origin_server_ts":1000,"content":{},"unsigned":{"redacted_because":{"type":"m.room.redaction","event_id":"$redaction","sender":"@member:example.org","content":{}}}}`),
+		attachmentpolicy.Conversation{}, ImportOptions{}, &ImportSummary{}))
 	messageIDs, err := st.MessageExistsBatch(source.ID, []string{"$already-redacted"})
 	require.NoError(err)
 	assert.Zero(messageIDs["$already-redacted"])
@@ -645,7 +976,8 @@ func TestImporterKeepsNewestEditAndRecomputesAfterRedaction(t *testing.T) {
 	older := matrixTestEvent(t, `{"type":"m.room.message","event_id":"$older","sender":"@member:example.org","origin_server_ts":2000,"content":{"msgtype":"m.text","body":"* old","m.new_content":{"msgtype":"m.text","body":"old"},"m.relates_to":{"rel_type":"m.replace","event_id":"$original"}}}`)
 	redaction := matrixTestEvent(t, `{"type":"m.room.redaction","event_id":"$redact","sender":"@member:example.org","origin_server_ts":4000,"redacts":"$newer","content":{}}`)
 	for _, evt := range []*event.Event{original, newer, older} {
-		require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, evt, sum))
+		require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, evt,
+			attachmentpolicy.Conversation{}, ImportOptions{}, sum))
 	}
 	messageIDs, err := st.MessageExistsBatch(source.ID, []string{"$original"})
 	require.NoError(err)
@@ -660,14 +992,16 @@ func TestImporterKeepsNewestEditAndRecomputesAfterRedaction(t *testing.T) {
 	require.NoError(st.AddMessageLabels(messageIDs["$original"], []int64{labelID}))
 	_, err = st.DB().Exec(st.Rebind(`UPDATE messages SET embed_gen = 7 WHERE id = ?`), messageIDs["$original"])
 	require.NoError(err)
-	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, original, sum))
+	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, original,
+		attachmentpolicy.Conversation{}, ImportOptions{}, sum))
 	var embedGen int64
 	require.NoError(st.DB().QueryRow(st.Rebind(`SELECT embed_gen FROM messages WHERE id = ?`), messageIDs["$original"]).Scan(&embedGen))
 	assert.Equal(int64(7), embedGen, "unchanged full replay must preserve the selected edit's embedding generation")
 	labelIDs, err := st.MessageLabelIDsContext(t.Context(), messageIDs["$original"])
 	require.NoError(err)
 	assert.Equal([]int64{labelID}, labelIDs, "provider replay must preserve locally assigned labels")
-	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, redaction, sum))
+	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, redaction,
+		attachmentpolicy.Conversation{}, ImportOptions{}, sum))
 	body, err = st.GetMessageBodyText(messageIDs["$original"])
 	require.NoError(err)
 	assert.Equal("old", body, "redacting the winning edit selects the latest survivor")
@@ -693,13 +1027,15 @@ func TestImporterRejectsCrossRoomRelations(t *testing.T) {
 	edit := matrixTestEvent(t, `{"type":"m.room.message","event_id":"$room-a-edit","sender":"@member:example.org","origin_server_ts":2000,"content":{"msgtype":"m.text","body":"* edited","m.new_content":{"msgtype":"m.text","body":"edited"},"m.relates_to":{"rel_type":"m.replace","event_id":"$room-a-message"}}}`)
 	reaction := matrixTestEvent(t, `{"type":"m.reaction","event_id":"$room-a-reaction","sender":"@member:example.org","origin_server_ts":3000,"content":{"m.relates_to":{"rel_type":"m.annotation","event_id":"$room-a-message","key":"ok"}}}`)
 	for _, evt := range []*event.Event{original, edit, reaction} {
-		require.NoError(imp.persistEvent(t.Context(), source.ID, roomA, evt, sum))
+		require.NoError(imp.persistEvent(t.Context(), source.ID, roomA, evt,
+			attachmentpolicy.Conversation{}, ImportOptions{}, sum))
 	}
 	crossRoomReaction := matrixTestEvent(t, `{"type":"m.reaction","event_id":"$room-b-reaction","sender":"@member:example.org","origin_server_ts":4000,"content":{"m.relates_to":{"rel_type":"m.annotation","event_id":"$room-a-message","key":"no"}}}`)
-	require.NoError(imp.persistEvent(t.Context(), source.ID, roomB, crossRoomReaction, sum))
+	require.NoError(imp.persistEvent(t.Context(), source.ID, roomB, crossRoomReaction,
+		attachmentpolicy.Conversation{}, ImportOptions{}, sum))
 	for i, target := range []string{"$room-a-message", "$room-a-edit", "$room-a-reaction"} {
 		redaction := matrixTestEvent(t, fmt.Sprintf(`{"type":"m.room.redaction","event_id":"$room-b-redaction-%d","sender":"@member:example.org","origin_server_ts":%d,"redacts":%q,"content":{}}`, i, 5000+i, target))
-		if err := imp.persistEvent(t.Context(), source.ID, roomB, redaction, sum); err != nil {
+		if err := imp.persistEvent(t.Context(), source.ID, roomB, redaction, attachmentpolicy.Conversation{}, ImportOptions{}, sum); err != nil {
 			require.ErrorIs(err, errRelationTargetMissing)
 		}
 	}
@@ -727,20 +1063,22 @@ func TestImporterDoesNotRestoreRedactedRelationPayloads(t *testing.T) {
 	require.NoError(err)
 	imp := NewImporter(st, &Runtime{Client: relationsClient(t, nil)})
 	sum := &ImportSummary{}
+	conversation := attachmentpolicy.Conversation{Type: "group_chat", ParticipantCount: 2}
+	opts := ImportOptions{NoMedia: true}
 	original := matrixTestEvent(t, `{"type":"m.room.message","event_id":"$original","sender":"@member:example.org","origin_server_ts":1000,"content":{"msgtype":"m.text","body":"original"}}`)
 	reaction := matrixTestEvent(t, `{"type":"m.reaction","event_id":"$reaction","sender":"@member:example.org","origin_server_ts":2000,"content":{"m.relates_to":{"rel_type":"m.annotation","event_id":"$original","key":"ok"}}}`)
 	edit := matrixTestEvent(t, `{"type":"m.room.message","event_id":"$edit","sender":"@member:example.org","origin_server_ts":3000,"content":{"msgtype":"m.text","body":"* edited","m.new_content":{"msgtype":"m.text","body":"edited"},"m.relates_to":{"rel_type":"m.replace","event_id":"$original"}}}`)
 	for _, evt := range []*event.Event{original, reaction, edit} {
-		require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, evt, sum))
+		require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, evt, conversation, opts, sum))
 	}
 	for _, target := range []string{"$reaction", "$edit"} {
 		redaction := matrixTestEvent(t, `{"type":"m.room.redaction","event_id":"$redact","sender":"@member:example.org","origin_server_ts":4000,"redacts":"`+target+`","content":{}}`)
-		require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, redaction, sum))
+		require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, redaction, conversation, opts, sum))
 	}
 	// The homeserver serves redacted events stripped, with the redaction attached.
 	for _, eventID := range []string{"$reaction", "$edit"} {
 		stripped := matrixTestEvent(t, `{"type":"m.room.message","event_id":"`+eventID+`","sender":"@member:example.org","origin_server_ts":2000,"content":{},"unsigned":{"redacted_because":{"type":"m.room.redaction","event_id":"$redact","sender":"@member:example.org","content":{}}}}`)
-		require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, stripped, sum))
+		require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, stripped, attachmentpolicy.Conversation{}, ImportOptions{}, sum))
 	}
 	var reactions int
 	require.NoError(st.DB().QueryRow(`SELECT COUNT(*) FROM reactions`).Scan(&reactions))
@@ -765,9 +1103,11 @@ func TestImporterFullReplayPreservesRedactedMessageContent(t *testing.T) {
 	imp := NewImporter(st, &Runtime{Client: client})
 	sum := &ImportSummary{}
 	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID,
-		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$one","sender":"@member:example.org","origin_server_ts":1000,"content":{"msgtype":"m.text","body":"retained"}}`), sum))
+		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$one","sender":"@member:example.org","origin_server_ts":1000,"content":{"msgtype":"m.text","body":"retained"}}`),
+		attachmentpolicy.Conversation{}, ImportOptions{}, sum))
 	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID,
-		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$one","sender":"@member:example.org","origin_server_ts":1000,"content":{},"unsigned":{"redacted_because":{"type":"m.room.redaction","event_id":"$redaction","sender":"@member:example.org","content":{}}}}`), sum))
+		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$one","sender":"@member:example.org","origin_server_ts":1000,"content":{},"unsigned":{"redacted_because":{"type":"m.room.redaction","event_id":"$redaction","sender":"@member:example.org","content":{}}}}`),
+		attachmentpolicy.Conversation{}, ImportOptions{}, sum))
 	messageIDs, err := st.MessageExistsBatch(source.ID, []string{"$one"})
 	require.NoError(err)
 	body, err := st.GetMessageBodyText(messageIDs["$one"])
@@ -790,10 +1130,12 @@ func TestImporterAppliesTargetOfStrippedRedaction(t *testing.T) {
 	require.NoError(err)
 	imp := NewImporter(st, &Runtime{Client: client})
 	sum := &ImportSummary{}
+	conversation := attachmentpolicy.Conversation{Type: "group_chat", ParticipantCount: 2}
+	opts := ImportOptions{NoMedia: true}
 	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID,
-		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$message","sender":"@member:example.org","origin_server_ts":1000,"content":{"msgtype":"m.text","body":"retained"}}`), sum))
+		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$message","sender":"@member:example.org","origin_server_ts":1000,"content":{"msgtype":"m.text","body":"retained"}}`), conversation, opts, sum))
 	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID,
-		matrixTestEvent(t, `{"type":"m.room.redaction","event_id":"$redaction","sender":"@member:example.org","origin_server_ts":2000,"content":{"redacts":"$message"},"unsigned":{"redacted_because":{"type":"m.room.redaction","event_id":"$redact-redaction","sender":"@member:example.org","content":{}}}}`), sum))
+		matrixTestEvent(t, `{"type":"m.room.redaction","event_id":"$redaction","sender":"@member:example.org","origin_server_ts":2000,"content":{"redacts":"$message"},"unsigned":{"redacted_because":{"type":"m.room.redaction","event_id":"$redact-redaction","sender":"@member:example.org","content":{}}}}`), conversation, opts, sum))
 	messageIDs, err := st.MessageExistsBatch(source.ID, []string{"$message"})
 	require.NoError(err)
 	var deleted bool
@@ -812,11 +1154,14 @@ func TestImporterFullReplayRedactedEditDoesNotCreateMessage(t *testing.T) {
 	imp := NewImporter(st, &Runtime{Client: relationsClient(t, nil)})
 	sum := &ImportSummary{}
 	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID,
-		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$original-edit-target","sender":"@member:example.org","origin_server_ts":1000,"content":{"msgtype":"m.text","body":"original"}}`), sum))
+		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$original-edit-target","sender":"@member:example.org","origin_server_ts":1000,"content":{"msgtype":"m.text","body":"original"}}`),
+		attachmentpolicy.Conversation{}, ImportOptions{}, sum))
 	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID,
-		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$stripped-edit","sender":"@member:example.org","origin_server_ts":2000,"content":{"msgtype":"m.text","body":"* edited","m.new_content":{"msgtype":"m.text","body":"edited"},"m.relates_to":{"rel_type":"m.replace","event_id":"$original-edit-target"}}}`), sum))
+		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$stripped-edit","sender":"@member:example.org","origin_server_ts":2000,"content":{"msgtype":"m.text","body":"* edited","m.new_content":{"msgtype":"m.text","body":"edited"},"m.relates_to":{"rel_type":"m.replace","event_id":"$original-edit-target"}}}`),
+		attachmentpolicy.Conversation{}, ImportOptions{}, sum))
 	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID,
-		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$stripped-edit","sender":"@member:example.org","origin_server_ts":2000,"content":{},"unsigned":{"redacted_because":{"type":"m.room.redaction","event_id":"$redaction","sender":"@member:example.org","content":{}}}}`), sum))
+		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$stripped-edit","sender":"@member:example.org","origin_server_ts":2000,"content":{},"unsigned":{"redacted_because":{"type":"m.room.redaction","event_id":"$redaction","sender":"@member:example.org","content":{}}}}`),
+		attachmentpolicy.Conversation{}, ImportOptions{}, sum))
 	messageIDs, err := st.MessageExistsBatch(source.ID, []string{"$original-edit-target", "$stripped-edit"})
 	require.NoError(err)
 	assert.Zero(messageIDs["$stripped-edit"])
@@ -838,11 +1183,11 @@ func TestStrippedEncryptedReactionRemovesRetainedReaction(t *testing.T) {
 	imp := NewImporter(st, &Runtime{Client: client})
 	sum := &ImportSummary{}
 	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID,
-		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$reaction-target","sender":"@member:example.org","origin_server_ts":1000,"content":{"msgtype":"m.text","body":"target"}}`), sum))
+		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$reaction-target","sender":"@member:example.org","origin_server_ts":1000,"content":{"msgtype":"m.text","body":"target"}}`), attachmentpolicy.Conversation{}, ImportOptions{}, sum))
 	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID,
-		matrixTestEvent(t, `{"type":"m.reaction","event_id":"$encrypted-reaction","sender":"@archive:example.org","origin_server_ts":2000,"content":{"m.relates_to":{"rel_type":"m.annotation","event_id":"$reaction-target","key":"ok"}}}`), sum))
+		matrixTestEvent(t, `{"type":"m.reaction","event_id":"$encrypted-reaction","sender":"@archive:example.org","origin_server_ts":2000,"content":{"m.relates_to":{"rel_type":"m.annotation","event_id":"$reaction-target","key":"ok"}}}`), attachmentpolicy.Conversation{}, ImportOptions{}, sum))
 	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID,
-		matrixTestEvent(t, `{"type":"m.room.encrypted","event_id":"$encrypted-reaction","sender":"@archive:example.org","origin_server_ts":2000,"content":{},"unsigned":{"redacted_because":{"type":"m.room.redaction","event_id":"$redaction","sender":"@archive:example.org","content":{}}}}`), sum))
+		matrixTestEvent(t, `{"type":"m.room.encrypted","event_id":"$encrypted-reaction","sender":"@archive:example.org","origin_server_ts":2000,"content":{},"unsigned":{"redacted_because":{"type":"m.room.redaction","event_id":"$redaction","sender":"@archive:example.org","content":{}}}}`), attachmentpolicy.Conversation{}, ImportOptions{}, sum))
 	var reactions int
 	require.NoError(st.DB().QueryRow(st.Rebind(`SELECT COUNT(*) FROM reaction_source_events
 		WHERE source_id = ? AND source_reaction_id = ?`), source.ID, "$encrypted-reaction").Scan(&reactions))
@@ -929,7 +1274,7 @@ func TestDeferredReplyResolutionDoesNotOverwriteEditedBody(t *testing.T) {
 	assert.Nil(restoredReply.Content.Parsed)
 
 	require.NoError(NewImporter(st, nil).replayDeferredRelation(
-		t.Context(), source.ID, conversationID, &restoredReply, &ImportSummary{},
+		t.Context(), source.ID, conversationID, &restoredReply, attachmentpolicy.Conversation{}, ImportOptions{}, &ImportSummary{},
 	))
 	body, err := st.GetMessageBodyText(replyID)
 	require.NoError(err)
@@ -961,7 +1306,8 @@ func TestEncryptedReplyDeferredUntilBackfilledTargetRemainsVisible(t *testing.T)
 		return decrypted, nil
 	}})
 	sum := &ImportSummary{}
-	err = imp.persistEvent(t.Context(), source.ID, conversationID, encrypted, sum)
+	err = imp.persistEvent(t.Context(), source.ID, conversationID, encrypted,
+		attachmentpolicy.Conversation{}, ImportOptions{}, sum)
 	require.ErrorIs(err, errRelationTargetMissing)
 	deferred, err := imp.deferredRelationAfterPersist(source.ID, encrypted)
 	require.NoError(err)
@@ -972,7 +1318,8 @@ func TestEncryptedReplyDeferredUntilBackfilledTargetRemainsVisible(t *testing.T)
 		SourceMessageID: "$backfilled-target", MessageType: SourceType,
 	})
 	require.NoError(err)
-	require.NoError(imp.replayDeferredRelation(t.Context(), source.ID, conversationID, deferred, sum))
+	require.NoError(imp.replayDeferredRelation(t.Context(), source.ID, conversationID, deferred,
+		attachmentpolicy.Conversation{}, ImportOptions{}, sum))
 	require.NoError(imp.finalizeDeferredRecovery(source.ID, deferred, sum))
 
 	found, err := st.MessageExistsBatch(source.ID, []string{encrypted.ID.String()})
@@ -1000,7 +1347,7 @@ func TestFailedReplayCannotReplaceRecoveredEncryptedEdit(t *testing.T) {
 	require.NoError(err)
 	base := NewImporter(st, &Runtime{Client: client})
 	require.NoError(base.persistEvent(t.Context(), source.ID, conversationID,
-		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$edit-target","sender":"@member:example.org","origin_server_ts":1000,"content":{"msgtype":"m.text","body":"original"}}`), &ImportSummary{}))
+		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$edit-target","sender":"@member:example.org","origin_server_ts":1000,"content":{"msgtype":"m.text","body":"original"}}`), attachmentpolicy.Conversation{}, ImportOptions{}, &ImportSummary{}))
 	encrypted := &event.Event{
 		ID: "$encrypted-edit", RoomID: roomID, Sender: "@member:example.org", Timestamp: 2000,
 		Type: event.EventEncrypted, Content: event.Content{Parsed: &event.EncryptedEventContent{
@@ -1011,13 +1358,13 @@ func TestFailedReplayCannotReplaceRecoveredEncryptedEdit(t *testing.T) {
 	recovered := NewImporter(st, &Runtime{Client: client, decryptEvent: func(context.Context, *event.Event) (*event.Event, error) {
 		return decrypted, nil
 	}})
-	require.NoError(recovered.persistEvent(t.Context(), source.ID, conversationID, encrypted, &ImportSummary{}))
+	require.NoError(recovered.persistEvent(t.Context(), source.ID, conversationID, encrypted, attachmentpolicy.Conversation{}, ImportOptions{}, &ImportSummary{}))
 	failing := NewImporter(st, &Runtime{Client: client, decryptEvent: func(context.Context, *event.Event) (*event.Event, error) {
 		return nil, errors.New("synthetic missing session")
 	}})
-	require.NoError(failing.persistEvent(t.Context(), source.ID, conversationID, encrypted, &ImportSummary{}))
+	require.NoError(failing.persistEvent(t.Context(), source.ID, conversationID, encrypted, attachmentpolicy.Conversation{}, ImportOptions{}, &ImportSummary{}))
 	require.NoError(base.persistEvent(t.Context(), source.ID, conversationID,
-		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$edit-target","sender":"@member:example.org","origin_server_ts":1000,"content":{"msgtype":"m.text","body":"original"}}`), &ImportSummary{}))
+		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$edit-target","sender":"@member:example.org","origin_server_ts":1000,"content":{"msgtype":"m.text","body":"original"}}`), attachmentpolicy.Conversation{}, ImportOptions{}, &ImportSummary{}))
 	found, err := st.MessageExistsBatch(source.ID, []string{"$edit-target"})
 	require.NoError(err)
 	body, err := st.GetMessageBodyText(found["$edit-target"])
@@ -1052,14 +1399,17 @@ func TestRecoveredEncryptedRelationsRetirePlaceholders(t *testing.T) {
 			require.NoError(err)
 			baseline := NewImporter(st, &Runtime{Client: client})
 			require.NoError(baseline.persistEvent(t.Context(), source.ID, conversationID,
-				matrixTestEvent(t, `{"type":"m.room.message","event_id":"$target","sender":"@member:example.org","origin_server_ts":1000,"content":{"msgtype":"m.text","body":"original"}}`), &ImportSummary{}))
+				matrixTestEvent(t, `{"type":"m.room.message","event_id":"$target","sender":"@member:example.org","origin_server_ts":1000,"content":{"msgtype":"m.text","body":"original"}}`),
+				attachmentpolicy.Conversation{}, ImportOptions{}, &ImportSummary{}))
 			encrypted := &event.Event{ID: "$encrypted-relation", RoomID: roomID, Sender: "@member:example.org", Timestamp: 2000,
 				Type: event.EventEncrypted, Content: event.Content{Parsed: &event.EncryptedEventContent{Algorithm: id.AlgorithmMegolmV1}}}
-			require.NoError(baseline.persistEvent(t.Context(), source.ID, conversationID, encrypted, &ImportSummary{}))
+			require.NoError(baseline.persistEvent(t.Context(), source.ID, conversationID, encrypted,
+				attachmentpolicy.Conversation{}, ImportOptions{}, &ImportSummary{}))
 			recovered := NewImporter(st, &Runtime{Client: client, decryptEvent: func(context.Context, *event.Event) (*event.Event, error) {
 				return matrixTestEvent(t, tt.decrypted), nil
 			}})
-			require.NoError(recovered.persistEvent(t.Context(), source.ID, conversationID, encrypted, &ImportSummary{}))
+			require.NoError(recovered.persistEvent(t.Context(), source.ID, conversationID, encrypted,
+				attachmentpolicy.Conversation{}, ImportOptions{}, &ImportSummary{}))
 
 			messageIDs, err := st.MessageExistsBatch(source.ID, []string{encrypted.ID.String()})
 			require.NoError(err)
@@ -1083,7 +1433,7 @@ func TestRecoveredRelationWithoutTargetKeepsPendingRowUntilCursorStored(t *testi
 	require.NoError(err)
 	encrypted := &event.Event{ID: "$encrypted-reaction", RoomID: roomID, Sender: "@member:example.org", Timestamp: 2000,
 		Type: event.EventEncrypted, Content: event.Content{Parsed: &event.EncryptedEventContent{Algorithm: id.AlgorithmMegolmV1}}}
-	require.NoError(NewImporter(st, &Runtime{Client: client}).persistEvent(t.Context(), source.ID, conversationID, encrypted, &ImportSummary{}))
+	require.NoError(NewImporter(st, &Runtime{Client: client}).persistEvent(t.Context(), source.ID, conversationID, encrypted, attachmentpolicy.Conversation{}, ImportOptions{}, &ImportSummary{}))
 	imp := NewImporter(st, &Runtime{Client: client, decryptEvent: func(context.Context, *event.Event) (*event.Event, error) {
 		return matrixTestEvent(t, `{"type":"m.reaction","event_id":"$encrypted-reaction","sender":"@member:example.org","origin_server_ts":2000,"content":{"m.relates_to":{"rel_type":"m.annotation","event_id":"$not-archived","key":"ok"}}}`), nil
 	}})
@@ -1133,14 +1483,14 @@ func TestCiphertextIsNotProofOfArchiveWhenPlaintextPersistFails(t *testing.T) {
 		cancel()
 		return matrixTestEvent(t, `{"type":"m.room.message","event_id":"$encrypted-message","sender":"@member:example.org","origin_server_ts":2000,"content":{"msgtype":"m.text","body":"secret"}}`), nil
 	}})
-	require.Error(failing.persistEvent(ctx, source.ID, conversationID, encrypted, &ImportSummary{}))
+	require.Error(failing.persistEvent(ctx, source.ID, conversationID, encrypted, attachmentpolicy.Conversation{}, ImportOptions{}, &ImportSummary{}))
 	_, _, err = st.MatrixEncryptedEvent(source.ID, encrypted.ID.String())
 	require.ErrorIs(err, sql.ErrNoRows, "ciphertext is retained only once the plaintext is stored")
 
 	// The next sync cannot decrypt, so the event must be kept as a placeholder
 	// instead of being taken as already archived.
 	sum := &ImportSummary{}
-	require.NoError(NewImporter(st, &Runtime{Client: client}).persistEvent(t.Context(), source.ID, conversationID, encrypted, sum))
+	require.NoError(NewImporter(st, &Runtime{Client: client}).persistEvent(t.Context(), source.ID, conversationID, encrypted, attachmentpolicy.Conversation{}, ImportOptions{}, sum))
 	assert.Equal(int64(1), sum.Undecryptable)
 	_, pending := pendingUndecryptable(t, st, source.ID, encrypted.ID.String())
 	assert.True(pending)
@@ -1160,12 +1510,12 @@ func TestKeylessReplayKeepsPlaintextStoredBeforeItsCiphertext(t *testing.T) {
 	// An earlier run stored the decrypted message and stopped before it
 	// retained the ciphertext.
 	require.NoError(NewImporter(st, &Runtime{Client: client}).persistEvent(t.Context(), source.ID, conversationID,
-		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$encrypted-message","sender":"@member:example.org","origin_server_ts":2000,"content":{"msgtype":"m.text","body":"secret"}}`), &ImportSummary{}))
+		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$encrypted-message","sender":"@member:example.org","origin_server_ts":2000,"content":{"msgtype":"m.text","body":"secret"}}`), attachmentpolicy.Conversation{}, ImportOptions{}, &ImportSummary{}))
 	encrypted := &event.Event{ID: "$encrypted-message", RoomID: roomID, Sender: "@member:example.org", Timestamp: 2000,
 		Type: event.EventEncrypted, Content: event.Content{Parsed: &event.EncryptedEventContent{Algorithm: id.AlgorithmMegolmV1}}}
 
 	sum := &ImportSummary{}
-	require.NoError(NewImporter(st, &Runtime{Client: client}).persistEvent(t.Context(), source.ID, conversationID, encrypted, sum))
+	require.NoError(NewImporter(st, &Runtime{Client: client}).persistEvent(t.Context(), source.ID, conversationID, encrypted, attachmentpolicy.Conversation{}, ImportOptions{}, sum))
 	assert.Zero(sum.Undecryptable)
 	_, pending := pendingUndecryptable(t, st, source.ID, encrypted.ID.String())
 	assert.False(pending)
@@ -1190,7 +1540,7 @@ func TestFailedReplayCannotCreatePlaceholderForRecoveredReaction(t *testing.T) {
 	require.NoError(err)
 	imp := NewImporter(st, &Runtime{Client: client})
 	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID,
-		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$reaction-target-replay","sender":"@member:example.org","origin_server_ts":1000,"content":{"msgtype":"m.text","body":"target"}}`), &ImportSummary{}))
+		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$reaction-target-replay","sender":"@member:example.org","origin_server_ts":1000,"content":{"msgtype":"m.text","body":"target"}}`), attachmentpolicy.Conversation{}, ImportOptions{}, &ImportSummary{}))
 	encrypted := &event.Event{
 		ID: "$recovered-reaction", RoomID: "!room:example.org", Sender: "@archive:example.org",
 		Type: event.EventEncrypted, Content: event.Content{Parsed: &event.EncryptedEventContent{Algorithm: id.AlgorithmMegolmV1}},
@@ -1198,11 +1548,11 @@ func TestFailedReplayCannotCreatePlaceholderForRecoveredReaction(t *testing.T) {
 	decrypting := NewImporter(st, &Runtime{Client: client, decryptEvent: func(context.Context, *event.Event) (*event.Event, error) {
 		return matrixTestEvent(t, `{"type":"m.reaction","event_id":"$recovered-reaction","sender":"@archive:example.org","origin_server_ts":2000,"content":{"m.relates_to":{"rel_type":"m.annotation","event_id":"$reaction-target-replay","key":"ok"}}}`), nil
 	}})
-	require.NoError(decrypting.persistEvent(t.Context(), source.ID, conversationID, encrypted, &ImportSummary{}))
+	require.NoError(decrypting.persistEvent(t.Context(), source.ID, conversationID, encrypted, attachmentpolicy.Conversation{}, ImportOptions{}, &ImportSummary{}))
 	failing := NewImporter(st, &Runtime{Client: client, decryptEvent: func(context.Context, *event.Event) (*event.Event, error) {
 		return nil, errors.New("synthetic missing session")
 	}})
-	require.NoError(failing.persistEvent(t.Context(), source.ID, conversationID, encrypted, &ImportSummary{}))
+	require.NoError(failing.persistEvent(t.Context(), source.ID, conversationID, encrypted, attachmentpolicy.Conversation{}, ImportOptions{}, &ImportSummary{}))
 	found, err := st.MessageExistsBatch(source.ID, []string{encrypted.ID.String()})
 	require.NoError(err)
 	assert.Zero(found[encrypted.ID.String()])
@@ -1223,7 +1573,7 @@ func TestLegacyCursorSeedsArchivedEncryptedPlaceholders(t *testing.T) {
 		Type: event.EventEncrypted, Content: event.Content{Parsed: &event.EncryptedEventContent{Algorithm: id.AlgorithmMegolmV1}},
 	}
 	require.NoError(NewImporter(st, &Runtime{Client: client}).persistEvent(
-		t.Context(), source.ID, conversationID, encrypted, &ImportSummary{}))
+		t.Context(), source.ID, conversationID, encrypted, attachmentpolicy.Conversation{}, ImportOptions{}, &ImportSummary{}))
 	require.NoError(NewImporter(st, nil).seedLegacyUndecryptable(t.Context(), source.ID))
 	pending, ok := pendingUndecryptable(t, st, source.ID, encrypted.ID.String())
 	assert.True(ok)
@@ -1298,7 +1648,8 @@ func TestImmediatelyDecryptedUnsupportedEventRetiresOrphanedPlaceholder(t *testi
 	imp := NewImporter(st, &Runtime{Client: client, decryptEvent: func(context.Context, *event.Event) (*event.Event, error) {
 		return unsupported, nil
 	}})
-	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, encrypted, &ImportSummary{}))
+	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, encrypted,
+		attachmentpolicy.Conversation{}, ImportOptions{}, &ImportSummary{}))
 	var deleted bool
 	require.NoError(st.DB().QueryRow(
 		st.Rebind(`SELECT deleted_from_source_at IS NOT NULL FROM messages WHERE id = ?`), messageID,
@@ -1335,7 +1686,8 @@ func TestDecryptedReplacementWithoutNewContentRetiresPlaceholder(t *testing.T) {
 	imp := NewImporter(st, &Runtime{Client: client, decryptEvent: func(context.Context, *event.Event) (*event.Event, error) {
 		return replacement, nil
 	}})
-	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, encrypted, &ImportSummary{}))
+	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, encrypted,
+		attachmentpolicy.Conversation{}, ImportOptions{}, &ImportSummary{}))
 
 	_, pendingLeft := pendingUndecryptable(t, st, source.ID, "$bare-replacement")
 	assert.False(pendingLeft)
@@ -1449,7 +1801,8 @@ func TestImporterResumesFailedRoomBackfillCheckpoint(t *testing.T) {
 	st := testutil.NewTestStore(t)
 	source, err := st.GetOrCreateSource(SourceType, "@archive:example.org")
 	require.NoError(err)
-	options := ImportOptions{UserID: "@archive:example.org"}
+	options := ImportOptions{UserID: "@archive:example.org", NoMedia: true,
+		MediaPolicy: attachmentpolicy.Policy{Scope: attachmentpolicy.ScopeAll}}
 	_, err = NewImporter(st, &Runtime{Client: client}).Import(t.Context(), options)
 	require.Error(err)
 	_, err = NewImporter(st, &Runtime{Client: client}).Import(t.Context(), options)
@@ -1551,7 +1904,8 @@ func TestImporterFillsLimitedIncrementalTimelineGap(t *testing.T) {
 	st := testutil.NewTestStore(t)
 	source, err := st.GetOrCreateSource(SourceType, "@archive:example.org")
 	require.NoError(err)
-	opts := ImportOptions{UserID: "@archive:example.org"}
+	opts := ImportOptions{UserID: "@archive:example.org", NoMedia: true,
+		MediaPolicy: attachmentpolicy.Policy{Scope: attachmentpolicy.ScopeAll}}
 	_, err = NewImporter(st, &Runtime{Client: client}).Import(t.Context(), opts)
 	require.NoError(err)
 	second, err := NewImporter(st, &Runtime{Client: client}).Import(t.Context(), opts)
@@ -1694,9 +2048,9 @@ func TestImporterEditMustKeepEventType(t *testing.T) {
 	imp := NewImporter(st, &Runtime{Client: relationsClient(t, nil)})
 	sum := &ImportSummary{}
 	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID,
-		matrixTestEvent(t, `{"type":"m.sticker","event_id":"$sticker","sender":"@member:example.org","origin_server_ts":1000,"content":{"body":"party parrot","url":"mxc://example.org/parrot"}}`), sum))
+		matrixTestEvent(t, `{"type":"m.sticker","event_id":"$sticker","sender":"@member:example.org","origin_server_ts":1000,"content":{"body":"party parrot","url":"mxc://example.org/parrot"}}`), attachmentpolicy.Conversation{}, ImportOptions{}, sum))
 	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID,
-		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$text-edit","sender":"@member:example.org","origin_server_ts":2000,"content":{"msgtype":"m.text","body":"* replaced","m.new_content":{"msgtype":"m.text","body":"replaced"},"m.relates_to":{"rel_type":"m.replace","event_id":"$sticker"}}}`), sum))
+		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$text-edit","sender":"@member:example.org","origin_server_ts":2000,"content":{"msgtype":"m.text","body":"* replaced","m.new_content":{"msgtype":"m.text","body":"replaced"},"m.relates_to":{"rel_type":"m.replace","event_id":"$sticker"}}}`), attachmentpolicy.Conversation{}, ImportOptions{}, sum))
 	messageIDs, err := st.MessageExistsBatch(source.ID, []string{"$sticker"})
 	require.NoError(err)
 	body, err := st.GetMessageBodyText(messageIDs["$sticker"])
@@ -1706,9 +2060,9 @@ func TestImporterEditMustKeepEventType(t *testing.T) {
 	require.NoError(st.DB().QueryRow(st.Rebind(`SELECT is_edited FROM messages WHERE id = ?`), messageIDs["$sticker"]).Scan(&edited))
 	assert.False(edited)
 	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID,
-		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$file","sender":"@member:example.org","origin_server_ts":3000,"content":{"msgtype":"m.file","body":"report.pdf","url":"mxc://example.org/report"}}`), sum))
+		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$file","sender":"@member:example.org","origin_server_ts":3000,"content":{"msgtype":"m.file","body":"report.pdf","url":"mxc://example.org/report"}}`), attachmentpolicy.Conversation{}, ImportOptions{}, sum))
 	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID,
-		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$file-edit","sender":"@member:example.org","origin_server_ts":4000,"content":{"msgtype":"m.text","body":"* gone","m.new_content":{"msgtype":"m.text","body":"gone"},"m.relates_to":{"rel_type":"m.replace","event_id":"$file"}}}`), sum))
+		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$file-edit","sender":"@member:example.org","origin_server_ts":4000,"content":{"msgtype":"m.text","body":"* gone","m.new_content":{"msgtype":"m.text","body":"gone"},"m.relates_to":{"rel_type":"m.replace","event_id":"$file"}}}`), attachmentpolicy.Conversation{}, ImportOptions{}, sum))
 	messageIDs, err = st.MessageExistsBatch(source.ID, []string{"$file"})
 	require.NoError(err)
 	body, err = st.GetMessageBodyText(messageIDs["$file"])
@@ -1771,7 +2125,7 @@ func TestImporterReappliesEditWhosePointerWasNotSaved(t *testing.T) {
 	imp := NewImporter(st, &Runtime{Client: relationsClient(t, nil)})
 	sum := &ImportSummary{}
 	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID,
-		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$original","sender":"@member:example.org","origin_server_ts":1000,"content":{"msgtype":"m.text","body":"original"}}`), sum))
+		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$original","sender":"@member:example.org","origin_server_ts":1000,"content":{"msgtype":"m.text","body":"original"}}`), attachmentpolicy.Conversation{}, ImportOptions{}, sum))
 	messageIDs, err := st.MessageExistsBatch(source.ID, []string{"$original"})
 	require.NoError(err)
 	messageID := messageIDs["$original"]
@@ -1780,12 +2134,12 @@ func TestImporterReappliesEditWhosePointerWasNotSaved(t *testing.T) {
 	require.NoError(st.SetMessageEdited(messageID))
 
 	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID,
-		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$edit","sender":"@member:example.org","origin_server_ts":2000,"content":{"msgtype":"m.text","body":"* edited","m.new_content":{"msgtype":"m.text","body":"edited"},"m.relates_to":{"rel_type":"m.replace","event_id":"$original"}}}`), sum))
+		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$edit","sender":"@member:example.org","origin_server_ts":2000,"content":{"msgtype":"m.text","body":"* edited","m.new_content":{"msgtype":"m.text","body":"edited"},"m.relates_to":{"rel_type":"m.replace","event_id":"$original"}}}`), attachmentpolicy.Conversation{}, ImportOptions{}, sum))
 	edit, err := imp.appliedEdit(messageID)
 	require.NoError(err)
 	assert.Equal(appliedEdit{EventID: "$edit", TS: 2000}, edit)
 	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID,
-		matrixTestEvent(t, `{"type":"m.room.redaction","event_id":"$redact","sender":"@member:example.org","origin_server_ts":3000,"redacts":"$edit","content":{}}`), sum))
+		matrixTestEvent(t, `{"type":"m.room.redaction","event_id":"$redact","sender":"@member:example.org","origin_server_ts":3000,"redacts":"$edit","content":{}}`), attachmentpolicy.Conversation{}, ImportOptions{}, sum))
 	body, err := st.GetMessageBodyText(messageID)
 	require.NoError(err)
 	assert.Equal("original", body)
@@ -1806,7 +2160,7 @@ func TestImporterIgnoresInvalidReplacements(t *testing.T) {
 		`{"type":"m.room.message","event_id":"$bare-edit","sender":"@member:example.org","origin_server_ts":2000,"content":{"msgtype":"m.text","body":"* bare","m.relates_to":{"rel_type":"m.replace","event_id":"$original"}}}`,
 		`{"type":"m.room.message","event_id":"$state-edit","state_key":"","sender":"@member:example.org","origin_server_ts":3000,"content":{"msgtype":"m.text","body":"* state","m.new_content":{"msgtype":"m.text","body":"state"},"m.relates_to":{"rel_type":"m.replace","event_id":"$original"}}}`,
 	} {
-		require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, matrixTestEvent(t, raw), sum))
+		require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, matrixTestEvent(t, raw), attachmentpolicy.Conversation{}, ImportOptions{}, sum))
 	}
 	messageIDs, err := st.MessageExistsBatch(source.ID, []string{"$original", "$bare-edit"})
 	require.NoError(err)
@@ -1828,10 +2182,10 @@ func TestImporterReplayRecoversReplyLinkLostBeforeCheckpoint(t *testing.T) {
 	sum := &ImportSummary{}
 	reply := `{"type":"m.room.message","event_id":"$reply","sender":"@member:example.org","origin_server_ts":2000,"content":{"msgtype":"m.text","body":"reply","m.relates_to":{"m.in_reply_to":{"event_id":"$target"}}}}`
 	// The reply was saved, but the run stopped before its deferral was checkpointed.
-	require.ErrorIs(imp.persistEvent(t.Context(), source.ID, conversationID, matrixTestEvent(t, reply), sum), errRelationTargetMissing)
+	require.ErrorIs(imp.persistEvent(t.Context(), source.ID, conversationID, matrixTestEvent(t, reply), attachmentpolicy.Conversation{}, ImportOptions{}, sum), errRelationTargetMissing)
 	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID,
-		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$target","sender":"@member:example.org","origin_server_ts":1000,"content":{"msgtype":"m.text","body":"target"}}`), sum))
-	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, matrixTestEvent(t, reply), sum))
+		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$target","sender":"@member:example.org","origin_server_ts":1000,"content":{"msgtype":"m.text","body":"target"}}`), attachmentpolicy.Conversation{}, ImportOptions{}, sum))
+	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, matrixTestEvent(t, reply), attachmentpolicy.Conversation{}, ImportOptions{}, sum))
 	ids, err := st.MessageExistsBatch(source.ID, []string{"$reply", "$target"})
 	require.NoError(err)
 	var replyTo int64
@@ -1851,9 +2205,9 @@ func TestImporterSkipsMalformedEventAndKeepsGoing(t *testing.T) {
 	sum := &ImportSummary{}
 	malformed := matrixTestEvent(t, `{"type":"m.room.message","event_id":"$bad","sender":"@member:example.org","origin_server_ts":1000,"content":{"msgtype":"m.text","body":42}}`)
 	assert.False(shouldDeferRelation(malformed))
-	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, malformed, sum))
+	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, malformed, attachmentpolicy.Conversation{}, ImportOptions{}, sum))
 	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID,
-		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$good","sender":"@member:example.org","origin_server_ts":2000,"content":{"msgtype":"m.text","body":"good"}}`), sum))
+		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$good","sender":"@member:example.org","origin_server_ts":2000,"content":{"msgtype":"m.text","body":"good"}}`), attachmentpolicy.Conversation{}, ImportOptions{}, sum))
 	assert.Equal(int64(1), sum.EventsSkipped)
 	ids, err := st.MessageExistsBatch(source.ID, []string{"$bad", "$good"})
 	require.NoError(err)
@@ -1891,10 +2245,10 @@ func TestImporterEditedReplyKeepsQuotedFallbackOut(t *testing.T) {
 	sum := &ImportSummary{}
 	reply := `{"type":"m.room.message","event_id":"$reply","sender":"@member:example.org","origin_server_ts":1000,"content":{"msgtype":"m.text","body":"answer","m.relates_to":{"m.in_reply_to":{"event_id":"$quoted"}}}}`
 	edit := `{"type":"m.room.message","event_id":"$edit","sender":"@member:example.org","origin_server_ts":2000,"content":{"msgtype":"m.text","body":"* fixed","m.new_content":{"msgtype":"m.text","body":"> <@other:example.org> their words\n\nfixed answer"},"m.relates_to":{"rel_type":"m.replace","event_id":"$reply"}}}`
-	if err := imp.persistEvent(t.Context(), source.ID, conversationID, matrixTestEvent(t, reply), sum); err != nil {
+	if err := imp.persistEvent(t.Context(), source.ID, conversationID, matrixTestEvent(t, reply), attachmentpolicy.Conversation{}, ImportOptions{}, sum); err != nil {
 		require.ErrorIs(err, errRelationTargetMissing)
 	}
-	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, matrixTestEvent(t, edit), sum))
+	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, matrixTestEvent(t, edit), attachmentpolicy.Conversation{}, ImportOptions{}, sum))
 	ids, err := st.MessageExistsBatch(source.ID, []string{"$reply"})
 	require.NoError(err)
 	body, err := st.GetMessageBodyText(ids["$reply"])
@@ -2054,7 +2408,7 @@ func TestLegacyCheckpointUndecryptableEntriesMigrateToStore(t *testing.T) {
 		}},
 	}
 	require.NoError(NewImporter(st, &Runtime{Client: client}).persistEvent(
-		t.Context(), source.ID, conversationID, encrypted, &ImportSummary{}))
+		t.Context(), source.ID, conversationID, encrypted, attachmentpolicy.Conversation{}, ImportOptions{}, &ImportSummary{}))
 	require.NoError(st.DeleteMatrixUndecryptableEvent(source.ID, encrypted.ID.String()))
 	encryptedRaw, err := json.Marshal(encrypted, json.Deterministic(true))
 	require.NoError(err)
@@ -2182,8 +2536,8 @@ func TestRecoveredPlaceholderTakesEditFromRelations(t *testing.T) {
 	require.NoError(err)
 
 	// The edit decrypts while its original is still a placeholder.
-	require.NoError(NewImporter(st, runtimeWithKeys()).persistEvent(t.Context(), source.ID, conversationID, original, &ImportSummary{}))
-	require.NoError(NewImporter(st, runtimeWithKeys("$edit")).persistEvent(t.Context(), source.ID, conversationID, edit, &ImportSummary{}))
+	require.NoError(NewImporter(st, runtimeWithKeys()).persistEvent(t.Context(), source.ID, conversationID, original, attachmentpolicy.Conversation{}, ImportOptions{}, &ImportSummary{}))
+	require.NoError(NewImporter(st, runtimeWithKeys("$edit")).persistEvent(t.Context(), source.ID, conversationID, edit, attachmentpolicy.Conversation{}, ImportOptions{}, &ImportSummary{}))
 	messageIDs, err := st.MessageExistsBatch(source.ID, []string{"$original"})
 	require.NoError(err)
 	body, err := st.GetMessageBodyText(messageIDs["$original"])
@@ -2216,10 +2570,10 @@ func TestRedactedPlaceholderIsNotRestoredByLaterKeys(t *testing.T) {
 		Type: event.EventEncrypted, Content: event.Content{Parsed: &event.EncryptedEventContent{Algorithm: id.AlgorithmMegolmV1}},
 	}
 	imp := NewImporter(st, &Runtime{Client: client})
-	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, encrypted, &ImportSummary{}))
+	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, encrypted, attachmentpolicy.Conversation{}, ImportOptions{}, &ImportSummary{}))
 	redaction := matrixTestEvent(t, `{"type":"m.room.redaction","event_id":"$redaction","sender":"@member:example.org","origin_server_ts":2000,"redacts":"$secret","content":{}}`)
 	redaction.RoomID = roomID
-	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, redaction, &ImportSummary{}))
+	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, redaction, attachmentpolicy.Conversation{}, ImportOptions{}, &ImportSummary{}))
 	_, pending := pendingUndecryptable(t, st, source.ID, "$secret")
 	assert.False(pending, "a redacted event leaves the pending set")
 
@@ -2236,6 +2590,37 @@ func TestRedactedPlaceholderIsNotRestoredByLaterKeys(t *testing.T) {
 	assert.Equal(encryptedPlaceholder, body)
 }
 
+func TestRedactionFromAnotherRoomKeepsPendingEncryptedEvent(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	roomID, otherRoomID := id.RoomID("!room:example.org"), id.RoomID("!other:example.org")
+	client := emptySyncServer(t, nil)
+	st := testutil.NewTestStore(t)
+	source, err := st.GetOrCreateSource(SourceType, "@archive:example.org")
+	require.NoError(err)
+	conversationID, err := st.EnsureConversation(source.ID, roomID.String(), "Example room")
+	require.NoError(err)
+	otherConversationID, err := st.EnsureConversation(source.ID, otherRoomID.String(), "Other room")
+	require.NoError(err)
+	encrypted := &event.Event{
+		ID: "$secret", RoomID: roomID, Sender: "@member:example.org", Timestamp: 1000,
+		Type: event.EventEncrypted, Content: event.Content{Parsed: &event.EncryptedEventContent{Algorithm: id.AlgorithmMegolmV1}},
+	}
+	imp := NewImporter(st, &Runtime{Client: client})
+	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, encrypted, attachmentpolicy.Conversation{}, ImportOptions{}, &ImportSummary{}))
+	redaction := matrixTestEvent(t, `{"type":"m.room.redaction","event_id":"$redaction","sender":"@member:example.org","origin_server_ts":2000,"redacts":"$secret","content":{}}`)
+	redaction.RoomID = otherRoomID
+
+	require.NoError(imp.persistEvent(t.Context(), source.ID, otherConversationID, redaction, attachmentpolicy.Conversation{}, ImportOptions{}, &ImportSummary{}))
+	_, pending := pendingUndecryptable(t, st, source.ID, "$secret")
+	assert.True(pending, "a redaction from another room cannot retire the pending event")
+
+	redaction.RoomID = roomID
+	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, redaction, attachmentpolicy.Conversation{}, ImportOptions{}, &ImportSummary{}))
+	_, pending = pendingUndecryptable(t, st, source.ID, "$secret")
+	assert.False(pending, "a redaction from the event's own room retires it")
+}
+
 func TestFirstSyncRecoversPlaceholdersWithoutPendingRows(t *testing.T) {
 	require := require.New(t)
 	assert := assert.New(t)
@@ -2250,7 +2635,7 @@ func TestFirstSyncRecoversPlaceholdersWithoutPendingRows(t *testing.T) {
 		ID: "$copied", RoomID: roomID, Sender: "@member:example.org", Timestamp: 1000,
 		Type: event.EventEncrypted, Content: event.Content{Parsed: &event.EncryptedEventContent{Algorithm: id.AlgorithmMegolmV1}},
 	}
-	require.NoError(NewImporter(st, &Runtime{Client: client}).persistEvent(t.Context(), source.ID, conversationID, encrypted, &ImportSummary{}))
+	require.NoError(NewImporter(st, &Runtime{Client: client}).persistEvent(t.Context(), source.ID, conversationID, encrypted, attachmentpolicy.Conversation{}, ImportOptions{}, &ImportSummary{}))
 	// A subset export copies the placeholder but neither the pending row nor
 	// the Matrix cursor.
 	require.NoError(st.DeleteMatrixUndecryptableEvent(source.ID, "$copied"))
@@ -2266,6 +2651,53 @@ func TestFirstSyncRecoversPlaceholdersWithoutPendingRows(t *testing.T) {
 	body, err := st.GetMessageBodyText(messageIDs["$copied"])
 	require.NoError(err)
 	assert.Equal("recovered", body)
+}
+
+func TestRecoveredPlaceholderDownloadsItsMedia(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /_matrix/client/v1/media/download/example.org/photo", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("photo bytes"))
+	})
+	mux.HandleFunc("GET /_matrix/client/v1/rooms/{room}/relations/{event}/m.replace", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"chunk":[]}`))
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	client, err := mautrix.NewClient(server.URL, "@archive:example.org", "token")
+	require.NoError(err)
+	st := testutil.NewTestStore(t)
+	source, err := st.GetOrCreateSource(SourceType, "@archive:example.org")
+	require.NoError(err)
+	roomID := id.RoomID("!room:example.org")
+	conversationID, err := st.EnsureConversationWithType(source.ID, roomID.String(), "group_chat", "Media")
+	require.NoError(err)
+	opts := ImportOptions{AttachmentsDir: t.TempDir(), MediaPolicy: attachmentpolicy.Policy{Scope: attachmentpolicy.ScopeAll}}
+	conversation := attachmentpolicy.Conversation{Type: "group_chat", ParticipantCount: 2}
+	encrypted := &event.Event{
+		ID: "$photo", RoomID: roomID, Sender: "@member:example.org", Timestamp: 1000,
+		Type: event.EventEncrypted, Content: event.Content{Parsed: &event.EncryptedEventContent{Algorithm: id.AlgorithmMegolmV1}},
+	}
+	require.NoError(NewImporter(st, &Runtime{Client: client}).persistEvent(t.Context(), source.ID, conversationID, encrypted, conversation, opts, &ImportSummary{}))
+
+	withKeys := NewImporter(st, &Runtime{Client: client, decryptEvent: func(context.Context, *event.Event) (*event.Event, error) {
+		return matrixTestEvent(t, `{"type":"m.room.message","event_id":"$photo","sender":"@member:example.org","origin_server_ts":1000,"content":{"msgtype":"m.image","body":"photo.jpg","url":"mxc://example.org/photo","info":{"mimetype":"image/jpeg","size":11}}}`), nil
+	}})
+	sum := &ImportSummary{}
+	_, err = withKeys.retryUndecryptable(t.Context(), source.ID, newSyncState(), opts, sum)
+	require.NoError(err)
+	assert.Equal(int64(1), sum.UndecryptableRecovered)
+	assert.Equal(int64(1), sum.AttachmentsDownloaded)
+	messageIDs, err := st.MessageExistsBatch(source.ID, []string{"$photo"})
+	require.NoError(err)
+	attachments, err := st.MessageMatrixAttachments(messageIDs["$photo"])
+	require.NoError(err)
+	photo := attachments["matrix:mxc://example.org/photo"]
+	assert.Equal(attachmentpolicy.StateStored, photo.State)
+	stored, err := os.ReadFile(filepath.Join(opts.AttachmentsDir, photo.StoragePath))
+	require.NoError(err)
+	assert.Equal([]byte("photo bytes"), stored)
 }
 
 func TestSyncedCiphertextIsNotProofOfArchiveWhenPersistFails(t *testing.T) {
@@ -2346,7 +2778,7 @@ func TestRecoveryPersistsEachPageBeforeReadingTheNext(t *testing.T) {
 	archive := func(eventID string, ts int64, plaintext string) {
 		encrypted := &event.Event{ID: id.EventID(eventID), RoomID: roomID, Sender: "@member:example.org", Timestamp: ts,
 			Type: event.EventEncrypted, Content: event.Content{Parsed: &event.EncryptedEventContent{Algorithm: id.AlgorithmMegolmV1}}}
-		require.NoError(placeholders.persistEvent(t.Context(), source.ID, conversationID, encrypted, &ImportSummary{}))
+		require.NoError(placeholders.persistEvent(t.Context(), source.ID, conversationID, encrypted, attachmentpolicy.Conversation{}, ImportOptions{}, &ImportSummary{}))
 		decryptedByID[eventID] = plaintext
 	}
 	// "$a-edit" sorts before "$z-original", and more than one page lies between them.

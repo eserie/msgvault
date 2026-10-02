@@ -70,7 +70,7 @@ func TestRunConfiguredMatrixSyncRefreshesCacheAfterFailedAttempt(t *testing.T) {
 		return refreshErr
 	}
 
-	err := runConfiguredMatrixSync(ctx, st)
+	err := runConfiguredMatrixSync(ctx, st, nil)
 	require.ErrorContains(err, "no Matrix accounts registered")
 	require.ErrorIs(err, refreshErr)
 	assert.Equal(t, 1, calls)
@@ -292,7 +292,7 @@ func TestRunMatrixSyncReleasesCryptoRuntimeOnEveryPath(t *testing.T) {
 
 	for _, fail := range []bool{false, true, false} {
 		failSync.Store(fail)
-		err := runMatrixSync(t.Context(), st, cfg, "", false, nil, io.Discard)
+		err := runMatrixSync(t.Context(), st, cfg, "", false, true, nil, nil, io.Discard)
 		if fail {
 			require.Error(err)
 		} else {
@@ -304,4 +304,26 @@ func TestRunMatrixSyncReleasesCryptoRuntimeOnEveryPath(t *testing.T) {
 		_, err := rt.Crypto.Machine().CryptoStore.GetDevices(t.Context(), userID)
 		assert.Errorf(t, err, "runtime %d still open after sync", i)
 	}
+}
+
+func TestParseMatrixSyncCLIArgs(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	account, full, noMedia, err := parseMatrixSyncCLIArgs([]string{
+		"sync-matrix", "--account=@archive:example.org", "--full", "--no-media",
+		"--log-level=debug", "--log-sql", "--log-sql-slow-ms=25", "--verbose",
+	})
+	require.NoError(err)
+	assert.Equal("@archive:example.org", account)
+	assert.True(full)
+	assert.True(noMedia)
+
+	account, full, noMedia, err = parseMatrixSyncCLIArgs([]string{"sync-matrix", "unexpected"})
+	require.ErrorContains(err, "no positional arguments")
+	assert.Empty(account)
+	assert.False(full || noMedia)
+	account, full, noMedia, err = parseMatrixSyncCLIArgs([]string{"sync-matrix", "--build-cache", "--no-build-cache"})
+	require.ErrorContains(err, "mutually exclusive")
+	assert.Empty(account)
+	assert.False(full || noMedia)
 }
