@@ -367,7 +367,8 @@ func copyData(tx *sql.Tx, rowCount int, options CopySubsetOptions) (*CopyResult,
 			 last_sync_at, sync_cursor, sync_config, oauth_app,
 			 created_at, updated_at)
 		SELECT id, source_type, identifier, display_name, google_user_id,
-		       last_sync_at, sync_cursor, sync_config, oauth_app,
+		       last_sync_at, CASE WHEN source_type = 'matrix' THEN NULL ELSE sync_cursor END,
+		       sync_config, oauth_app,
 		       created_at, updated_at
 		FROM src.sources
 		WHERE id IN (SELECT source_id FROM selected_message_sources)`)
@@ -378,7 +379,8 @@ func copyData(tx *sql.Tx, rowCount int, options CopySubsetOptions) (*CopyResult,
 				 last_sync_at, sync_cursor, sync_config, oauth_app,
 				 created_at, updated_at)
 			SELECT id, source_type, identifier, display_name, google_user_id,
-			       last_sync_at, sync_cursor, sync_config, NULL,
+			       last_sync_at, CASE WHEN source_type = 'matrix' THEN NULL ELSE sync_cursor END,
+			       sync_config, NULL,
 			       created_at, updated_at
 			FROM src.sources
 			WHERE id IN (SELECT source_id FROM selected_message_sources)`)
@@ -832,10 +834,36 @@ func copyData(tx *sql.Tx, rowCount int, options CopySubsetOptions) (*CopyResult,
 		return nil, fmt.Errorf("copy message_recipients: %w", err)
 	}
 
-	if _, err := tx.Exec(`
-		INSERT INTO reactions SELECT * FROM src.reactions
-		WHERE message_id IN (SELECT id FROM selected_messages)`); err != nil {
+	if _, err := copyByName(tx, "reactions",
+		`message_id IN (SELECT id FROM selected_messages)`); err != nil {
 		return nil, fmt.Errorf("copy reactions: %w", err)
+	}
+	if present, err := sourceTableExists(tx, "reaction_source_events"); err != nil {
+		return nil, fmt.Errorf("check reaction_source_events: %w", err)
+	} else if present {
+		if _, err := copyByName(tx, "reaction_source_events",
+			`reaction_id IN (SELECT id FROM reactions)`); err != nil {
+			return nil, fmt.Errorf("copy reaction_source_events: %w", err)
+		}
+	}
+	if present, err := sourceTableExists(tx, "matrix_message_versions"); err != nil {
+		return nil, fmt.Errorf("check matrix_message_versions: %w", err)
+	} else if present {
+		if _, err := copyByName(tx, "matrix_message_versions",
+			`message_id IN (SELECT id FROM messages)`); err != nil {
+			return nil, fmt.Errorf("copy matrix_message_versions: %w", err)
+		}
+	}
+	if present, err := sourceTableExists(tx, "matrix_redacted_events"); err != nil {
+		return nil, fmt.Errorf("check matrix_redacted_events: %w", err)
+	} else if present {
+		if _, err := copyByName(tx, "matrix_redacted_events",
+			`source_id IN (SELECT id FROM sources)
+			 AND (event_id IN (SELECT source_message_id FROM messages)
+			   OR event_id IN (SELECT event_id FROM matrix_message_versions)
+			   OR event_id IN (SELECT source_reaction_id FROM reaction_source_events))`); err != nil {
+			return nil, fmt.Errorf("copy matrix_redacted_events: %w", err)
+		}
 	}
 
 	if _, err := copyByName(tx, "attachments",
@@ -860,6 +888,9 @@ func copyData(tx *sql.Tx, rowCount int, options CopySubsetOptions) (*CopyResult,
 		WHERE message_id IN (SELECT id FROM selected_messages)
 		  AND label_id IN (SELECT id FROM labels)`); err != nil {
 		return nil, fmt.Errorf("copy message_labels: %w", err)
+	}
+	if _, err := tx.Exec(`UPDATE sources SET sync_cursor = NULL WHERE source_type = 'matrix'`); err != nil {
+		return nil, fmt.Errorf("clear Matrix subset cursors: %w", err)
 	}
 
 	if _, err := tx.Exec(

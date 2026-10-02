@@ -1448,11 +1448,41 @@ CREATE TABLE IF NOT EXISTS reactions (
 
     reaction_type TEXT NOT NULL,
     reaction_value TEXT NOT NULL,
+    source_reaction_id TEXT,
 
     created_at TIMESTAMPTZ,
     removed_at TIMESTAMPTZ,
 
     UNIQUE(message_id, participant_id, reaction_type, reaction_value)
+);
+
+CREATE TABLE IF NOT EXISTS reaction_source_events (
+    source_id BIGINT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+    source_reaction_id TEXT NOT NULL,
+    reaction_id BIGINT NOT NULL REFERENCES reactions(id) ON DELETE CASCADE,
+    PRIMARY KEY(source_id, source_reaction_id)
+);
+CREATE INDEX IF NOT EXISTS idx_reaction_source_events_reaction
+    ON reaction_source_events(reaction_id);
+
+CREATE TABLE IF NOT EXISTS matrix_message_versions (
+    source_id BIGINT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+    message_id BIGINT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    event_id TEXT NOT NULL,
+    event_ts BIGINT NOT NULL,
+    body TEXT,
+    raw_event BYTEA,
+    is_original BOOLEAN NOT NULL DEFAULT FALSE,
+    redacted BOOLEAN NOT NULL DEFAULT FALSE,
+    PRIMARY KEY(source_id, event_id)
+);
+CREATE INDEX IF NOT EXISTS idx_matrix_message_versions_message
+    ON matrix_message_versions(message_id, redacted, event_ts, event_id);
+
+CREATE TABLE IF NOT EXISTS matrix_redacted_events (
+    source_id BIGINT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+    event_id TEXT NOT NULL,
+    PRIMARY KEY(source_id, event_id)
 );
 
 -- ============================================================================

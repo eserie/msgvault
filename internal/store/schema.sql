@@ -1554,6 +1554,7 @@ CREATE TABLE IF NOT EXISTS reactions (
     -- Reaction type and value
     reaction_type TEXT NOT NULL,  -- 'tapback', 'emoji', 'like'
     reaction_value TEXT NOT NULL, -- 'heart', 'thumbsup', etc. or emoji
+    source_reaction_id TEXT,
 
     -- Apple tapback types: 'love', 'like', 'dislike', 'laugh', 'emphasis', 'question'
 
@@ -1561,6 +1562,40 @@ CREATE TABLE IF NOT EXISTS reactions (
     removed_at DATETIME,
 
     UNIQUE(message_id, participant_id, reaction_type, reaction_value)
+);
+
+-- Provider event identities are separate from the visible reaction so two
+-- equivalent events remain independently redactable without rendering the
+-- same emoji twice.
+CREATE TABLE IF NOT EXISTS reaction_source_events (
+    source_id INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+    source_reaction_id TEXT NOT NULL,
+    reaction_id INTEGER NOT NULL REFERENCES reactions(id) ON DELETE CASCADE,
+    PRIMARY KEY(source_id, source_reaction_id)
+);
+CREATE INDEX IF NOT EXISTS idx_reaction_source_events_reaction
+    ON reaction_source_events(reaction_id);
+
+-- Durable Matrix message versions let the importer order edits across sync
+-- runs and recompute displayed content when an edit is redacted.
+CREATE TABLE IF NOT EXISTS matrix_message_versions (
+    source_id INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+    message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    event_id TEXT NOT NULL,
+    event_ts BIGINT NOT NULL,
+    body TEXT,
+    raw_event BLOB,
+    is_original BOOLEAN NOT NULL DEFAULT FALSE,
+    redacted BOOLEAN NOT NULL DEFAULT FALSE,
+    PRIMARY KEY(source_id, event_id)
+);
+CREATE INDEX IF NOT EXISTS idx_matrix_message_versions_message
+    ON matrix_message_versions(message_id, redacted, event_ts, event_id);
+
+CREATE TABLE IF NOT EXISTS matrix_redacted_events (
+    source_id INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+    event_id TEXT NOT NULL,
+    PRIMARY KEY(source_id, event_id)
 );
 
 -- ============================================================================

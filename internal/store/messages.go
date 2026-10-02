@@ -449,6 +449,27 @@ type MessageWithRawMetadata struct {
 	RFC822MessageID sql.NullString
 }
 
+// MessageRelationTarget is the identity needed to authorize a provider-side
+// relation such as an edit without loading the target body.
+type MessageRelationTarget struct {
+	ConversationID int64
+	SenderID       sql.NullInt64
+}
+
+// GetMessageRelationTarget reads relation authorization fields by primary key.
+func (s *Store) GetMessageRelationTarget(messageID int64) (MessageRelationTarget, error) {
+	var target MessageRelationTarget
+	err := s.db.QueryRow(`
+		SELECT conversation_id, sender_id
+		FROM messages
+		WHERE id = ?
+	`, messageID).Scan(&target.ConversationID, &target.SenderID)
+	if err != nil {
+		return MessageRelationTarget{}, fmt.Errorf("get message relation target %d: %w", messageID, err)
+	}
+	return target, nil
+}
+
 // UnresolvedMessageReply is a message whose provider metadata may contain a
 // durable source reply reference but whose generic reply link is still NULL.
 // Importers decode their own metadata shape and call SetReplyTo once the
@@ -2985,8 +3006,14 @@ func (s *Store) SetReplyTo(sourceID int64, childSourceMessageID, parentSourceMes
 // does not write is_edited, so importers that observe an edit flag call this
 // after upserting.
 func (s *Store) SetMessageEdited(messageID int64) error {
+	return s.SetMessageEditedState(messageID, true)
+}
+
+// SetMessageEditedState records whether the source's currently selected
+// message version is an edit.
+func (s *Store) SetMessageEditedState(messageID int64, edited bool) error {
 	return s.withSyncMessageWriteContext(context.Background(), messageID, func(q querier) error {
-		_, err := q.Exec(`UPDATE messages SET is_edited = TRUE WHERE id = ?`, messageID)
+		_, err := q.Exec(`UPDATE messages SET is_edited = ? WHERE id = ?`, edited, messageID)
 		return err
 	})
 }
@@ -3989,6 +4016,23 @@ func (s *Store) EnsureConversationWithType(sourceID int64, sourceConversationID,
 		return id, err
 	}
 	return ensureConversationWithType(s.db, s.dialect, sourceID, sourceConversationID, conversationType, title)
+}
+
+// SetConversationTitle applies an explicit provider title, including removal.
+func (s *Store) SetConversationTitle(sourceID, conversationID int64, title string) error {
+	if err := s.requireSyncSource(sourceID); err != nil {
+		return err
+	}
+	write := func(q querier) error {
+		_, err := q.Exec(fmt.Sprintf(`UPDATE conversations SET title = ?, updated_at = %s
+			WHERE id = ? AND source_id = ? AND COALESCE(title, '') <> ?`, s.dialect.Now()),
+			title, conversationID, sourceID, title)
+		return err
+	}
+	if s.syncGeneration != nil {
+		return s.withTx(func(tx *loggedTx) error { return write(tx) })
+	}
+	return write(s.db)
 }
 
 func ensureConversationWithType(q querier, dialect Dialect, sourceID int64, sourceConversationID, conversationType, title string) (int64, error) {
@@ -5487,6 +5531,94 @@ func (s *Store) UpsertReaction(messageID, participantID int64, reactionType, rea
 	return write(s.db)
 }
 
+// UpsertReactionWithSourceID archives a provider reaction identity so a later
+// provider redaction can remove the exact reaction without scanning messages.
+func (s *Store) UpsertReactionWithSourceID(messageID, participantID int64, reactionType, reactionValue, sourceReactionID string, createdAt time.Time) error {
+	write := func(q querier) error {
+		if err := s.requireSyncMessageSourceTx(q, messageID); err != nil {
+			return err
+		}
+		if _, err := q.Exec(s.dialect.InsertOrIgnore(`INSERT OR IGNORE INTO reactions
+			(message_id, participant_id, reaction_type, reaction_value, source_reaction_id, created_at)
+			VALUES (?, ?, ?, ?, ?, ?)`), messageID, participantID, reactionType, reactionValue, sourceReactionID, createdAt); err != nil {
+			return err
+		}
+		_, err := q.Exec(s.dialect.InsertOrIgnore(`INSERT OR IGNORE INTO reaction_source_events
+			(source_id, source_reaction_id, reaction_id)
+			SELECT m.source_id, ?, r.id
+			FROM reactions r
+			JOIN messages m ON m.id = r.message_id
+			WHERE r.message_id = ? AND r.participant_id = ?
+			  AND r.reaction_type = ? AND r.reaction_value = ?`),
+			sourceReactionID, messageID, participantID, reactionType, reactionValue)
+		if err != nil {
+			return err
+		}
+		_, err = q.Exec(`UPDATE reactions SET source_reaction_id = NULL
+			WHERE message_id = ? AND participant_id = ?
+			  AND reaction_type = ? AND reaction_value = ?`,
+			messageID, participantID, reactionType, reactionValue)
+		return err
+	}
+	if s.syncGeneration != nil {
+		return s.withTx(func(tx *loggedTx) error { return write(tx) })
+	}
+	return write(s.db)
+}
+
+// DeleteReactionBySourceID removes a provider reaction scoped to one source.
+func (s *Store) DeleteReactionBySourceID(sourceID int64, sourceReactionID string) (bool, error) {
+	deleted := false
+	err := s.withSyncSourceWriteContext(context.Background(), sourceID, func(q querier) error {
+		var reactionID int64
+		err := q.QueryRow(`SELECT reaction_id FROM reaction_source_events
+			WHERE source_id = ? AND source_reaction_id = ?`, sourceID, sourceReactionID).Scan(&reactionID)
+		if err == nil {
+			result, deleteErr := q.Exec(`DELETE FROM reaction_source_events
+				WHERE source_id = ? AND source_reaction_id = ?`, sourceID, sourceReactionID)
+			if deleteErr != nil {
+				return deleteErr
+			}
+			rows, rowsErr := result.RowsAffected()
+			if rowsErr != nil {
+				return rowsErr
+			}
+			deleted = rows > 0
+			if _, deleteErr = q.Exec(`DELETE FROM reactions
+				WHERE id = ? AND NOT EXISTS (
+					SELECT 1 FROM reaction_source_events WHERE reaction_id = ?
+				)`, reactionID, reactionID); deleteErr != nil {
+				return deleteErr
+			}
+			return nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+
+		// Legacy rows are retained for archives created before the identity map.
+		// The explicit predicate matches the partial legacy index on SQLite.
+		result, err := q.Exec(`DELETE FROM reactions
+			WHERE source_reaction_id = ?
+			  AND source_reaction_id IS NOT NULL AND source_reaction_id != ''
+			  AND NOT EXISTS (
+				SELECT 1 FROM reaction_source_events rse
+				WHERE rse.reaction_id = reactions.id
+			  )
+			  AND EXISTS (
+				SELECT 1 FROM messages m
+				WHERE m.id = reactions.message_id AND m.source_id = ?
+			  )`, sourceReactionID, sourceID)
+		if err != nil {
+			return err
+		}
+		rows, err := result.RowsAffected()
+		deleted = rows > 0
+		return err
+	})
+	return deleted, err
+}
+
 type ReactionRef struct {
 	ParticipantID int64
 	Type          string
@@ -6004,12 +6136,32 @@ func (s *Store) ScanArchivedRawMessagesForConversation(
 func (s *Store) UpdateMessageDerivedText(
 	messageID int64, bodyText, bodyHTML, snippet sql.NullString, fts FTSDoc,
 ) error {
+	return s.updateMessageDerivedText(messageID, bodyText, bodyHTML, snippet, fts, nil)
+}
+
+// UpdateMessageDerivedTextAndSize also replaces the provider-derived payload
+// size in the same transaction as the displayed text and search document.
+func (s *Store) UpdateMessageDerivedTextAndSize(
+	messageID int64, bodyText, bodyHTML, snippet sql.NullString, fts FTSDoc, sizeEstimate int64,
+) error {
+	return s.updateMessageDerivedText(messageID, bodyText, bodyHTML, snippet, fts, &sizeEstimate)
+}
+
+func (s *Store) updateMessageDerivedText(
+	messageID int64, bodyText, bodyHTML, snippet sql.NullString, fts FTSDoc, sizeEstimate *int64,
+) error {
 	fts.MessageID = messageID
 	return s.withTx(func(tx *loggedTx) error {
 		if err := upsertMessageBody(tx, s.dialect, s.fts5Available, messageID, bodyText, bodyHTML); err != nil {
 			return fmt.Errorf("update derived message body: %w", err)
 		}
-		if _, err := tx.Exec(`UPDATE messages SET snippet = ? WHERE id = ?`, snippet, messageID); err != nil {
+		query := `UPDATE messages SET snippet = ? WHERE id = ?`
+		args := []any{snippet, messageID}
+		if sizeEstimate != nil {
+			query = `UPDATE messages SET snippet = ?, size_estimate = ? WHERE id = ?`
+			args = []any{snippet, *sizeEstimate, messageID}
+		}
+		if _, err := tx.Exec(query, args...); err != nil {
 			return fmt.Errorf("update derived message snippet: %w", err)
 		}
 		if s.fts5Available {
