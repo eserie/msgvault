@@ -65,7 +65,7 @@ func TestAddMatrixFailedStagingHonorsSkipWithExistingBackupKey(t *testing.T) {
 	source, err := s.GetSourceByTypeAndIdentifier(sourceTypeMatrix, old.UserID)
 	req.NoError(err)
 	check.JSONEq(`{"skip_key_backup":true}`, source.SyncConfig.String)
-	req.NoError(runMatrixSync(t.Context(), s, cfg, old.UserID, false, nil, io.Discard))
+	req.NoError(runMatrixSync(t.Context(), s, cfg, old.UserID, false, false, nil, nil, io.Discard))
 	ids, err := s.MessageExistsBatch(source.ID, []string{"$encrypted"})
 	req.NoError(err)
 	req.NotZero(ids["$encrypted"])

@@ -54,7 +54,7 @@ func TestRunConfiguredMatrixSyncRefreshesCacheAfterFailedAttempt(t *testing.T) {
 		return refreshErr
 	}
 
-	err := runConfiguredMatrixSync(ctx, st)
+	err := runConfiguredMatrixSync(ctx, st, nil)
 	require.ErrorContains(err, "no Matrix accounts registered")
 	require.ErrorIs(err, refreshErr)
 	assert.Equal(t, 1, calls)

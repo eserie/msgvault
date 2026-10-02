@@ -7,6 +7,8 @@ import (
 	"errors"
 	"log/slog"
 	"strings"
+
+	"go.kenn.io/msgvault/internal/attachmentpolicy"
 )
 
 const MatrixEncryptedPlaceholder = "[encrypted message — keys unavailable]"
@@ -131,11 +133,13 @@ func (s *Store) MatrixRecoveryTransaction(ctx context.Context, fn func(*Store) e
 }
 
 type MatrixPlaceholderRoom struct {
-	ConversationID int64
-	RoomID         string
-	Count          int64
-	MaxMessageID   int64
-	MaxEventID     string
+	ConversationType string
+	ParticipantCount int
+	ConversationID   int64
+	RoomID           string
+	Count            int64
+	MaxMessageID     int64
+	MaxEventID       string
 }
 
 type MatrixPlaceholder struct {
@@ -207,6 +211,11 @@ func (s *Store) matrixPlaceholderCandidatesQuery(sourceID int64, include, exclud
 	field := s.matrixEventTypeField()
 	query.WriteString(" AND COALESCE(" + field + ", 'm.room.encrypted') = 'm.room.encrypted'")
 	args := []any{sourceID, MatrixEncryptedPlaceholder}
+	appendMatrixRoomFilters(&query, &args, include, exclude)
+	return query.String(), args
+}
+
+func appendMatrixRoomFilters(query *strings.Builder, args *[]any, include, exclude []string) {
 	for _, filter := range []struct {
 		rooms    []string
 		operator string
@@ -214,15 +223,14 @@ func (s *Store) matrixPlaceholderCandidatesQuery(sourceID int64, include, exclud
 		if len(filter.rooms) != 0 {
 			query.WriteString(" AND c.source_conversation_id " + filter.operator + " (" + strings.TrimSuffix(strings.Repeat("?,", len(filter.rooms)), ",") + ")")
 			for _, room := range filter.rooms {
-				args = append(args, room)
+				*args = append(*args, room)
 			}
 		}
 	}
-	return query.String(), args
 }
 
 // MatrixPlaceholderRooms persists legacy event types before counting metadata.
-func (s *Store) MatrixPlaceholderRooms(ctx context.Context, sourceID int64, include, exclude []string) ([]MatrixPlaceholderRoom, error) {
+func (s *Store) MatrixPlaceholderRooms(ctx context.Context, sourceID int64, include, exclude []string, policy attachmentpolicy.Policy) ([]MatrixPlaceholderRoom, error) {
 	query, args := s.matrixPlaceholderCandidatesQuery(sourceID, include, exclude)
 	var pending bool
 	if err := s.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1`+query+`)`, args...).Scan(&pending); err != nil || !pending {
@@ -231,10 +239,10 @@ func (s *Store) MatrixPlaceholderRooms(ctx context.Context, sourceID int64, incl
 	if err := s.classifyMatrixPlaceholders(ctx, query, args); err != nil {
 		return nil, err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT pending.*, newest.source_message_id FROM (
+	rows, err := s.db.QueryContext(ctx, `SELECT pending.*, newest.source_message_id, c.conversation_type, COALESCE(c.participant_count, 0), COALESCE(CAST(c.metadata AS TEXT), '') FROM (
 		SELECT m.conversation_id, c.source_conversation_id, COUNT(*) AS count, MAX(m.id) AS max_message_id`+query+`
 		GROUP BY m.conversation_id, c.source_conversation_id
-	) pending JOIN messages newest ON newest.id = pending.max_message_id ORDER BY pending.conversation_id`, args...)
+	) pending JOIN messages newest ON newest.id = pending.max_message_id JOIN conversations c ON c.id = pending.conversation_id ORDER BY pending.conversation_id`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -242,9 +250,11 @@ func (s *Store) MatrixPlaceholderRooms(ctx context.Context, sourceID int64, incl
 	var rooms []MatrixPlaceholderRoom
 	for rows.Next() {
 		var room MatrixPlaceholderRoom
-		if err := rows.Scan(&room.ConversationID, &room.RoomID, &room.Count, &room.MaxMessageID, &room.MaxEventID); err != nil {
+		var metadata string
+		if err := rows.Scan(&room.ConversationID, &room.RoomID, &room.Count, &room.MaxMessageID, &room.MaxEventID, &room.ConversationType, &room.ParticipantCount, &metadata); err != nil {
 			return nil, err
 		}
+		room.ParticipantCount = policyParticipantCount(sourceTypeMatrix, room.ParticipantCount, metadata, policy)
 		rooms = append(rooms, room)
 	}
 	return rooms, rows.Err()

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -14,6 +16,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/msgvault/internal/attachmentpolicy"
 	"go.kenn.io/msgvault/internal/operations"
 	"go.kenn.io/msgvault/internal/store"
 	"go.kenn.io/msgvault/internal/testutil"
@@ -21,6 +24,70 @@ import (
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
 )
+
+func TestImportRecoveryMediaSurvivesCancellation(t *testing.T) {
+	req, check := require.New(t), assert.New(t)
+	f := newRecoveryFixture(t)
+	f.timeline = []*event.Event{f.backup.encrypted(t, "$photo", 10, event.EventMessage, map[string]any{"msgtype": "m.image", "body": "photo.jpg", "url": "mxc://example.org/photo"})}
+	_, err := f.run(t, false, false)
+	req.NoError(err)
+	f.quiet, f.left = true, true
+	mux, ok := f.server.Config.Handler.(*http.ServeMux)
+	req.True(ok)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	interrupt := true
+	observed := make(chan struct {
+		body string
+		err  error
+	}, 1)
+	mux.HandleFunc("GET /_matrix/client/v1/media/download/example.org/photo", func(w http.ResponseWriter, r *http.Request) {
+		if interrupt {
+			probe, done := context.WithTimeout(t.Context(), 5*time.Second)
+			defer done()
+			var body string
+			err := f.store.DB().QueryRowContext(probe, f.store.Rebind(`SELECT snippet FROM messages WHERE source_id = ? AND source_message_id = ?`), f.sourceID, "$photo").Scan(&body)
+			observed <- struct {
+				body string
+				err  error
+			}{body, err}
+			w.WriteHeader(http.StatusOK)
+			_ = http.NewResponseController(w).Flush()
+			cancel()
+			<-r.Context().Done()
+			return
+		}
+		_, _ = w.Write([]byte("photo bytes"))
+	})
+	opts := ImportOptions{UserID: "@archive:example.org", AttachmentsDir: t.TempDir(), MediaPolicy: attachmentpolicy.Policy{Scope: attachmentpolicy.ScopeAll}}
+	leased := false
+	opts.MediaMutation = func(_ context.Context, write func() error) error {
+		check.False(leased, "recovered media must share the recovery transaction's lease")
+		leased = true
+		defer func() { leased = false }()
+		if err := write(); err != nil {
+			return err
+		}
+		probe, done := context.WithTimeout(t.Context(), 5*time.Second)
+		defer done()
+		var body string
+		err := f.store.DB().QueryRowContext(probe, f.store.Rebind(`SELECT snippet FROM messages WHERE source_id = ? AND source_message_id = ?`), f.sourceID, "$photo").Scan(&body)
+		check.Equal("[image]", body, "recovery must commit before releasing the mutation lease")
+		return err
+	}
+	sum, err := NewImporter(f.store, backupRuntime(t, f.server.URL, f.backup)).Import(ctx, opts)
+	req.ErrorIs(err, context.Canceled)
+	result := <-observed
+	req.NoError(result.err)
+	check.Equal("[image]", result.body, "recovery must commit before media download")
+	check.Equal(int64(1), sum.Recovered)
+	check.Equal("[image]", f.body(t, "$photo"))
+	interrupt = false
+	sum, err = NewImporter(f.store, backupRuntime(t, f.server.URL, f.backup)).Import(t.Context(), opts)
+	req.NoError(err)
+	check.Zero(sum.Recovered)
+	check.Equal(int64(1), sum.AttachmentsDownloaded)
+}
 
 type recoveryFixture struct {
 	backup       *backupFixture
@@ -75,11 +142,11 @@ func TestImportRecoveryDecryptsBeforeTakingWriteLock(t *testing.T) {
 		_, ingestErr = f.store.PersistMessageContext(ctx, &store.MessagePersistData{Message: &store.Message{SourceID: f.sourceID, ConversationID: otherRoom, SourceMessageID: "$other-ingest", MessageType: SourceType}})
 		return ingestErr
 	}}
-	rooms, err := f.store.MatrixPlaceholderRooms(t.Context(), f.sourceID, nil, nil)
+	rooms, err := f.store.MatrixPlaceholderRooms(t.Context(), f.sourceID, nil, nil, attachmentpolicy.Policy{})
 	req.NoError(err)
 	req.Len(rooms, 1)
 	sum := &ImportSummary{PendingEncrypted: 1}
-	retired, err := NewImporter(f.store, r).recoverRoom(t.Context(), f.sourceID, rooms[0], 0, sum)
+	retired, err := NewImporter(f.store, r).recoverRoom(t.Context(), f.sourceID, rooms[0], 0, ImportOptions{}, sum)
 	req.NoError(err)
 	check.NoError(ingestErr)
 	check.Equal(int64(1), retired)
@@ -99,7 +166,7 @@ func TestImportRecoveryWithoutDecryptedItemsAvoidsWriteLock(t *testing.T) {
 	f.timeline = []*event.Event{missing}
 	_, err := f.run(t, false, false)
 	req.NoError(err)
-	rooms, err := f.store.MatrixPlaceholderRooms(t.Context(), f.sourceID, nil, nil)
+	rooms, err := f.store.MatrixPlaceholderRooms(t.Context(), f.sourceID, nil, nil, attachmentpolicy.Policy{})
 	req.NoError(err)
 	req.Len(rooms, 1)
 	r := backupRuntime(t, f.server.URL, f.backup)
@@ -108,7 +175,7 @@ func TestImportRecoveryWithoutDecryptedItemsAvoidsWriteLock(t *testing.T) {
 	req.NoError(f.store.MatrixRecoveryTransaction(t.Context(), func(_ *store.Store) error {
 		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 		defer cancel()
-		retired, err := NewImporter(f.store, r).recoverRoom(ctx, f.sourceID, rooms[0], 0, sum)
+		retired, err := NewImporter(f.store, r).recoverRoom(ctx, f.sourceID, rooms[0], 0, ImportOptions{}, sum)
 		check.Zero(retired)
 		return err
 	}))
@@ -127,7 +194,7 @@ func TestImportRecoveryRevalidatesPlaceholderDuringDecryption(t *testing.T) {
 			if mode != "deletion changed" {
 				req.NoError(f.store.MarkMessageDeleted(f.sourceID, "$original"))
 			}
-			rooms, err := f.store.MatrixPlaceholderRooms(t.Context(), f.sourceID, nil, nil)
+			rooms, err := f.store.MatrixPlaceholderRooms(t.Context(), f.sourceID, nil, nil, attachmentpolicy.Policy{})
 			req.NoError(err)
 			req.Len(rooms, 1)
 			r := backupRuntime(t, f.server.URL, f.backup)
@@ -161,7 +228,7 @@ func TestImportRecoveryRevalidatesPlaceholderDuringDecryption(t *testing.T) {
 				return err
 			}}
 			sum := &ImportSummary{PendingEncrypted: 1}
-			retired, err := NewImporter(f.store, r).recoverRoom(t.Context(), f.sourceID, rooms[0], 0, sum)
+			retired, err := NewImporter(f.store, r).recoverRoom(t.Context(), f.sourceID, rooms[0], 0, ImportOptions{}, sum)
 			req.NoError(err)
 			check.Zero(retired)
 			check.Zero(sum.Recovered)
@@ -816,7 +883,7 @@ func TestImportRecoveryResumesBeforePlaceholderCheckpoint(t *testing.T) {
 			fresh := f.message(t, "$fresh", "fresh", 20)
 			fresh.RoomID = "!room:example.org"
 			// Commit the placeholder, then discard the importer before it checkpoints.
-			req.NoError(NewImporter(f.store, backupRuntime(t, f.server.URL, f.backup)).persistEvent(t.Context(), f.sourceID, convID, fresh, &ImportSummary{}))
+			req.NoError(NewImporter(f.store, backupRuntime(t, f.server.URL, f.backup)).persistEvent(t.Context(), f.sourceID, convID, fresh, attachmentpolicy.Conversation{}, ImportOptions{}, &ImportSummary{}))
 			f.timeline, f.quiet = []*event.Event{fresh}, quiet
 			sum, err := f.run(t, true, false)
 			req.NoError(err)
@@ -1368,11 +1435,11 @@ func TestImportRecoveredReplyLinksWhenTargetArrivesLater(t *testing.T) {
 			if mode == "interrupted after page commit" {
 				imp := NewImporter(f.store, backupRuntime(t, f.server.URL, f.backup))
 				req.NoError(imp.runtime.prepareBackup(t.Context()))
-				rooms, err := f.store.MatrixPlaceholderRooms(t.Context(), f.sourceID, nil, nil)
+				rooms, err := f.store.MatrixPlaceholderRooms(t.Context(), f.sourceID, nil, nil, attachmentpolicy.Policy{})
 				req.NoError(err)
 				req.Len(rooms, 1)
 				// Discard the recovered cursor to simulate exit before checkpoint persistence.
-				_, err = imp.recoverRoom(t.Context(), f.sourceID, rooms[0], 0, sum)
+				_, err = imp.recoverRoom(t.Context(), f.sourceID, rooms[0], 0, ImportOptions{}, sum)
 				req.NoError(err)
 			}
 			wantBody := "reply"
@@ -1649,5 +1716,61 @@ func TestImportRecoveryRejectsReplayedIndex(t *testing.T) {
 				check.Equal(encryptedPlaceholder, f.body(t, "$second"))
 			})
 		}
+	}
+}
+
+func TestImportRecoversRoomMedia(t *testing.T) {
+	for _, mode := range []string{"download", "no-media"} {
+		t.Run(mode, func(t *testing.T) {
+			req := require.New(t)
+			check := assert.New(t)
+			f := newRecoveryFixture(t)
+			mux, ok := f.server.Config.Handler.(*http.ServeMux)
+			req.True(ok)
+			mux.HandleFunc("GET /_matrix/client/v1/media/download/example.org/photo", func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte("photo bytes"))
+			})
+			content := map[string]any{"body": "photo.jpg", "url": "mxc://example.org/photo", "info": map[string]any{"mimetype": "image/jpeg", "size": 11}}
+			content["msgtype"] = "m.image"
+			f.timeline = []*event.Event{f.backup.encrypted(t, "$photo", 10, event.EventMessage, content)}
+			_, err := f.run(t, false, false)
+			req.NoError(err)
+			check.Equal(encryptedPlaceholder, f.body(t, "$photo"))
+			f.quiet, f.left, f.historyFails = true, true, true
+			opts := ImportOptions{UserID: "@archive:example.org", NoMedia: mode == "no-media", AttachmentsDir: t.TempDir(), MediaPolicy: attachmentpolicy.Policy{Scope: attachmentpolicy.ScopeAll, MaxParticipants: 20, MaxBytes: attachmentpolicy.DefaultChatMaxBytes}}
+			sum, err := NewImporter(f.store, backupRuntime(t, f.server.URL, f.backup)).Import(t.Context(), opts)
+			req.NoError(err)
+			check.Equal(int64(1), sum.Recovered)
+			if mode != "download" {
+				check.Zero(sum.AttachmentsDownloaded)
+				check.Equal(int64(1), sum.AttachmentsPending)
+				check.Zero(sum.AttachmentsFailed)
+				opts.NoMedia = false
+				opts.ExcludeRooms = []string{"!room:example.org"}
+				sum, err = NewImporter(f.store, backupRuntime(t, f.server.URL, f.backup)).Import(t.Context(), opts)
+				req.NoError(err)
+				check.Zero(sum.AttachmentsDownloaded)
+				opts.ExcludeRooms = nil
+				opts.Rooms = []string{"!other:example.org"}
+				sum, err = NewImporter(f.store, backupRuntime(t, f.server.URL, f.backup)).Import(t.Context(), opts)
+				req.NoError(err)
+				check.Zero(sum.AttachmentsDownloaded)
+				opts.Rooms = []string{"!room:example.org"}
+				sum, err = NewImporter(f.store, backupRuntime(t, f.server.URL, f.backup)).Import(t.Context(), opts)
+				req.NoError(err)
+				check.Zero(sum.Recovered)
+			}
+			check.Equal(int64(1), sum.AttachmentsDownloaded)
+			check.Zero(sum.PendingEncrypted)
+			ids, err := f.store.MessageExistsBatch(f.sourceID, []string{"$photo"})
+			req.NoError(err)
+			refs, err := f.store.MessageMatrixAttachments(ids["$photo"])
+			req.NoError(err)
+			ref := refs["matrix:mxc://example.org/photo"]
+			check.Equal(attachmentpolicy.StateStored, ref.State)
+			bytes, err := os.ReadFile(filepath.Join(opts.AttachmentsDir, ref.StoragePath))
+			req.NoError(err)
+			check.Equal("photo bytes", string(bytes))
+		})
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"slices"
 	"time"
 
+	"go.kenn.io/msgvault/internal/attachmentpolicy"
 	"go.kenn.io/msgvault/internal/store"
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
@@ -29,7 +30,7 @@ type recoveryAttempt struct {
 
 func (imp *Importer) recoverPlaceholders(ctx context.Context, sourceID int64, state *SyncState, opts ImportOptions, sum *ImportSummary) error {
 	sum.PendingEncrypted = 0
-	rooms, err := imp.store.MatrixPlaceholderRooms(ctx, sourceID, opts.Rooms, opts.ExcludeRooms)
+	rooms, err := imp.store.MatrixPlaceholderRooms(ctx, sourceID, opts.Rooms, opts.ExcludeRooms, opts.MediaPolicy)
 	if err != nil {
 		return err
 	}
@@ -87,11 +88,11 @@ func (imp *Importer) recoverPlaceholders(ctx context.Context, sourceID int64, st
 				after = 0
 			}
 		}
-		retired, err := imp.recoverRoom(ctx, sourceID, room, after, sum)
+		retired, err := imp.recoverRoom(ctx, sourceID, room, after, opts, sum)
 		attempt.TriedAt = time.Now().UTC()
 		imp.runtime.releaseRoom(id.RoomID(room.RoomID))
 		if retired > 0 {
-			pending, pendingErr := imp.store.MatrixPlaceholderRooms(ctx, sourceID, []string{room.RoomID}, nil)
+			pending, pendingErr := imp.store.MatrixPlaceholderRooms(ctx, sourceID, []string{room.RoomID}, nil, opts.MediaPolicy)
 			if pendingErr != nil {
 				return errors.Join(failures, err, pendingErr)
 			}
@@ -135,7 +136,10 @@ func (imp *Importer) recoverPlaceholders(ctx context.Context, sourceID int64, st
 	return errors.Join(failures, ctx.Err())
 }
 
-func (imp *Importer) recoverRoom(ctx context.Context, sourceID int64, room store.MatrixPlaceholderRoom, after int64, sum *ImportSummary) (int64, error) {
+func (imp *Importer) recoverRoom(ctx context.Context, sourceID int64, room store.MatrixPlaceholderRoom, after int64, opts ImportOptions, sum *ImportSummary) (int64, error) {
+	mutationOpts := opts
+	opts = pendingMediaOptions(opts)
+	conversation := attachmentpolicy.Conversation{Type: room.ConversationType, ParticipantCount: room.ParticipantCount}
 	type relation struct {
 		messageID int64
 		evt       *event.Event
@@ -198,7 +202,7 @@ func (imp *Importer) recoverRoom(ctx context.Context, sourceID int64, room store
 		}
 		counters := *sum
 		pageRetired := int64(0)
-		err = imp.store.MatrixRecoveryTransaction(ctx, func(s *store.Store) error {
+		err = imp.mediaTransaction(ctx, mutationOpts, func(s *store.Store) error {
 			worker := NewImporter(s, imp.runtime)
 			worker.newAfter = imp.newAfter
 			retire := func(messageID int64, plain *event.Event, target id.EventID) error {
@@ -280,13 +284,13 @@ func (imp *Importer) recoverRoom(ctx context.Context, sourceID int64, room store
 						return err
 					}
 					plain.Unsigned.RedactedBecause = nil
-					if err := worker.persistEvent(ctx, sourceID, room.ConversationID, plain, &counters); err != nil {
+					if err := worker.persistEvent(ctx, sourceID, room.ConversationID, plain, conversation, opts, &counters); err != nil {
 						if !errors.Is(err, errRelationTargetMissing) {
 							return err
 						}
 						counters.RelationsUnresolved++
 					}
-					if err := worker.replayPendingEdits(ctx, sourceID, room.ConversationID, item.MessageID, &counters); err != nil {
+					if err := worker.replayPendingEdits(ctx, sourceID, room.ConversationID, item.MessageID, conversation, opts, &counters); err != nil {
 						return err
 					}
 					counters.PendingEncrypted--
@@ -312,7 +316,7 @@ func (imp *Importer) recoverRoom(ctx context.Context, sourceID int64, room store
 				if !allowed {
 					continue
 				}
-				err = worker.persistEvent(ctx, sourceID, room.ConversationID, rel.evt, &counters)
+				err = worker.persistEvent(ctx, sourceID, room.ConversationID, rel.evt, conversation, opts, &counters)
 				if errors.Is(err, errRelationTargetMissing) {
 					counters.RelationsUnresolved++
 				} else if err != nil {
