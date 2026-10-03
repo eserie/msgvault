@@ -870,6 +870,12 @@ func copyData(tx *sql.Tx, rowCount int, options CopySubsetOptions) (*CopyResult,
 		return nil, fmt.Errorf("copy message_labels: %w", err)
 	}
 
+	// A Matrix cursor can carry pending relation events from rooms outside
+	// the subset, so exports start Matrix sync over.
+	if _, err := tx.Exec(`UPDATE sources SET sync_cursor = NULL WHERE source_type = 'matrix'`); err != nil {
+		return nil, fmt.Errorf("clear Matrix subset cursors: %w", err)
+	}
+
 	if _, err := tx.Exec(
 		"DROP TABLE IF EXISTS selected_messages",
 	); err != nil {
