@@ -533,6 +533,19 @@ func removeDiscordCredentialAfterCascade(
 }
 
 func revokeMatrixCredentials(ctx context.Context, tokensDir, userID string) error {
+	// An unfinished add-matrix renewal holds a second live device.
+	pending, hasPending, err := matrixsource.LoadPendingCredentials(tokensDir, userID)
+	if err != nil {
+		return err
+	}
+	if hasPending {
+		if err := logoutMatrixDevice(ctx, pending); err != nil {
+			return err
+		}
+		if err := matrixsource.DeletePendingCredentials(tokensDir, userID); err != nil {
+			return fmt.Errorf("remove pending Matrix credentials: %w", err)
+		}
+	}
 	exists, err := matrixsource.CredentialsExist(tokensDir, userID)
 	if err != nil {
 		return err
@@ -544,15 +557,20 @@ func revokeMatrixCredentials(ctx context.Context, tokensDir, userID string) erro
 	if err != nil {
 		return fmt.Errorf("load Matrix credentials: %w", err)
 	}
-	logoutCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-	defer cancel()
-	if err := matrixsource.Logout(logoutCtx, creds); err != nil {
-		if !matrixsource.IsUnknownToken(err) {
-			return fmt.Errorf("log out Matrix device %s: %w", creds.DeviceID, err)
-		}
+	if err := logoutMatrixDevice(ctx, creds); err != nil {
+		return err
 	}
 	if err := matrixsource.DeleteCredentials(tokensDir, userID); err != nil {
 		return fmt.Errorf("remove Matrix credentials: %w", err)
+	}
+	return nil
+}
+
+func logoutMatrixDevice(ctx context.Context, creds matrixsource.Credentials) error {
+	logoutCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	if err := matrixsource.Logout(logoutCtx, creds); err != nil && !matrixsource.IsUnknownToken(err) {
+		return fmt.Errorf("log out Matrix device %s: %w", creds.DeviceID, err)
 	}
 	return nil
 }

@@ -43,7 +43,10 @@ m.login.token from the homeserver login flow and pass --login-token-file.`,
 			if addMatrixPasswordFile != "" && addMatrixLoginTokenFile != "" {
 				return errors.New("use only one of --password-file and --login-token-file")
 			}
+			tokensDir := state.cfg.TokensDir()
 			if !isDaemonCLISubprocess() {
+				// The daemon may be remote, so only it can tell whether a pending
+				// renewal will make this secret unnecessary.
 				loginSecret, err := readMatrixLoginSecret()
 				if err != nil {
 					return err
@@ -54,73 +57,8 @@ m.login.token from the homeserver login flow and pass --login-token-file.`,
 			}
 
 			loginSecret := os.Getenv(clirun.EnvMatrixLoginSecret)
-			if loginSecret == "" {
-				return errors.New("missing Matrix login secret in daemon subprocess")
-			}
-			return matrixsource.WithCredentialLifecycleLock(state.cfg.TokensDir(), func() error {
-				creds, err := matrixsource.Login(cmd.Context(), addMatrixHomeserver, addMatrixUserID, loginSecret, addMatrixLoginTokenFile != "")
-				if err != nil {
-					return err
-				}
-				keepDevice := false
-				defer func() {
-					if keepDevice {
-						return
-					}
-					cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(cmd.Context()), 10*time.Second)
-					defer cancel()
-					_ = matrixsource.Logout(cleanupCtx, creds)
-				}()
-				s, cleanup, err := openWritableStoreAndInitForIngestInvocation(state)
-				if err != nil {
-					return err
-				}
-				defer cleanup()
-				source, err := s.GetOrCreateSource(sourceTypeMatrix, creds.UserID)
-				if err != nil {
-					return fmt.Errorf("create Matrix source: %w", err)
-				}
-				if err := s.UpdateSourceDisplayName(source.ID, "Matrix "+creds.UserID); err != nil {
-					return fmt.Errorf("set Matrix source name: %w", err)
-				}
-				if !noDefaultIdentityAddMatrix {
-					confirmDefaultIdentity(cmd.OutOrStdout(), s, source.ID, creds.UserID, creds.UserID, "account-identifier", state.logger)
-				}
-				if err := runPostSourceCreateMigrationsForInvocation(s, state); err != nil {
-					return fmt.Errorf("post-source-create migrations: %w", err)
-				}
-				// Revoke the earlier device before its token is replaced, so a failed
-				// logout leaves the old login in place for a retry.
-				// Accepted design decision: if saving the new login fails after this
-				// logout, rerunning add-matrix restores it. Saving first would instead
-				// leave the old device signed in with nothing on disk to revoke it.
-				exists, err := matrixsource.CredentialsExist(state.cfg.TokensDir(), creds.UserID)
-				if err != nil {
-					return err
-				}
-				if exists {
-					previous, err := matrixsource.LoadCredentials(state.cfg.TokensDir(), creds.UserID)
-					if err != nil {
-						return fmt.Errorf("read the existing Matrix login before replacing it (fix or remove that file, then retry): %w", err)
-					}
-					if previous.DeviceID != creds.DeviceID {
-						logoutCtx, cancel := context.WithTimeout(context.WithoutCancel(cmd.Context()), 10*time.Second)
-						err := matrixsource.Logout(logoutCtx, previous)
-						cancel()
-						if err != nil && !matrixsource.IsUnknownToken(err) {
-							return fmt.Errorf("log out previous Matrix device %s (login unchanged, retry add-matrix): %w", previous.DeviceID, err)
-						}
-					}
-				}
-				if err := matrixsource.SaveCredentials(state.cfg.TokensDir(), creds); err != nil {
-					// A published file already replaced the old login, so keep its device.
-					keepDevice = errors.Is(err, atomicfile.ErrPublished)
-					return err
-				}
-				keepDevice = true
-				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Added Matrix account %s with device %s\n", creds.UserID, creds.DeviceID)
-				_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Run: msgvault sync-matrix")
-				return nil
+			return matrixsource.WithCredentialLifecycleLock(tokensDir, func() error {
+				return addMatrixAccount(cmd, state, tokensDir, loginSecret)
 			})
 		},
 	}
@@ -131,6 +69,124 @@ m.login.token from the homeserver login flow and pass --login-token-file.`,
 	flags.StringVar(&addMatrixLoginTokenFile, "login-token-file", "", "read a single-use m.login.token from a file")
 	flags.BoolVar(&noDefaultIdentityAddMatrix, "no-default-identity", false, noDefaultIdentityHelp)
 	return cmd
+}
+
+// Test seams for injected credential write failures and logout timeouts.
+var (
+	saveMatrixCredentials        = matrixsource.SaveCredentials
+	savePendingMatrixCredentials = matrixsource.SavePendingCredentials
+	matrixRequestTimeout         = 10 * time.Second
+)
+
+// addMatrixAccount runs under the credential lifecycle lock. When it replaces
+// an existing device, it saves the new login to a pending file before revoking
+// the old one, so a failure at any step leaves one usable or resumable login.
+func addMatrixAccount(cmd *cobra.Command, state *invocation, tokensDir, loginSecret string) error {
+	ctx := cmd.Context()
+	creds, resumed, err := matrixsource.LoadPendingCredentials(tokensDir, addMatrixUserID)
+	if err != nil {
+		return fmt.Errorf("%w (fix or remove that file, then retry)", err)
+	}
+	// keepDevice stays false until the new login is recorded on disk; until
+	// then a failure revokes it.
+	hadPending := resumed
+	if resumed {
+		checkCtx, cancel := context.WithTimeout(ctx, matrixRequestTimeout)
+		err := matrixsource.CheckLogin(checkCtx, creds)
+		cancel()
+		switch {
+		case matrixsource.IsUnknownToken(err):
+			// A revoked pending login must never replace the working one.
+			if err := matrixsource.DeletePendingCredentials(tokensDir, addMatrixUserID); err != nil {
+				return fmt.Errorf("remove revoked pending Matrix login: %w", err)
+			}
+			resumed = false
+		case err != nil:
+			return fmt.Errorf("%w (login unchanged, retry add-matrix)", err)
+		}
+	}
+	keepDevice := resumed
+	staged := resumed
+	if resumed {
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Resuming the saved Matrix login for device %s\n", creds.DeviceID)
+	} else {
+		if loginSecret == "" {
+			if hadPending {
+				return errors.New("the saved Matrix login was revoked; run add-matrix again to log in")
+			}
+			return errors.New("missing Matrix login secret in daemon subprocess")
+		}
+		creds, err = matrixsource.Login(ctx, addMatrixHomeserver, addMatrixUserID, loginSecret, addMatrixLoginTokenFile != "")
+		if err != nil {
+			return err
+		}
+	}
+	defer func() {
+		if keepDevice {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), matrixRequestTimeout)
+		defer cancel()
+		_ = matrixsource.Logout(cleanupCtx, creds)
+	}()
+	s, cleanup, err := openWritableStoreAndInitForIngestInvocation(state)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	source, err := s.GetOrCreateSource(sourceTypeMatrix, creds.UserID)
+	if err != nil {
+		return fmt.Errorf("create Matrix source: %w", err)
+	}
+	if err := s.UpdateSourceDisplayName(source.ID, "Matrix "+creds.UserID); err != nil {
+		return fmt.Errorf("set Matrix source name: %w", err)
+	}
+	if !noDefaultIdentityAddMatrix {
+		confirmDefaultIdentity(cmd.OutOrStdout(), s, source.ID, creds.UserID, creds.UserID, "account-identifier", state.logger)
+	}
+	if err := runPostSourceCreateMigrationsForInvocation(s, state); err != nil {
+		return fmt.Errorf("post-source-create migrations: %w", err)
+	}
+	exists, err := matrixsource.CredentialsExist(tokensDir, creds.UserID)
+	if err != nil {
+		return err
+	}
+	if exists {
+		previous, err := matrixsource.LoadCredentials(tokensDir, creds.UserID)
+		if err != nil {
+			return fmt.Errorf("read the existing Matrix login before replacing it (fix or remove that file, then retry): %w", err)
+		}
+		if previous.DeviceID != creds.DeviceID {
+			// Rewrite even a resumed login so it is durable before the old one goes.
+			if err := savePendingMatrixCredentials(tokensDir, creds); err != nil {
+				// A published pending file can still be resumed, so keep its device.
+				keepDevice = keepDevice || errors.Is(err, atomicfile.ErrPublished)
+				return fmt.Errorf("save the new Matrix login (login unchanged, retry add-matrix): %w", err)
+			}
+			keepDevice, staged = true, true
+			logoutCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), matrixRequestTimeout)
+			err := matrixsource.Logout(logoutCtx, previous)
+			cancel()
+			if err != nil && !matrixsource.IsUnknownToken(err) {
+				return fmt.Errorf("log out previous Matrix device %s (login unchanged, retry add-matrix to finish): %w", previous.DeviceID, err)
+			}
+		}
+	}
+	if err := saveMatrixCredentials(tokensDir, creds); err != nil {
+		// A published file already replaced the old login, so keep its device.
+		keepDevice = keepDevice || errors.Is(err, atomicfile.ErrPublished)
+		if staged {
+			return fmt.Errorf("%w (the new login is saved; retry add-matrix to finish)", err)
+		}
+		return err
+	}
+	keepDevice = true
+	if err := matrixsource.DeletePendingCredentials(tokensDir, creds.UserID); err != nil {
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not remove the pending Matrix login file: %v\n", err)
+	}
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Added Matrix account %s with device %s\n", creds.UserID, creds.DeviceID)
+	_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Run: msgvault sync-matrix")
+	return nil
 }
 
 func readMatrixLoginSecret() (string, error) {

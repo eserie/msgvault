@@ -113,6 +113,28 @@ func TestRevokeMatrixCredentialsPreservesCredentialsUntilLogoutSucceeds(t *testi
 		assert.False(exists)
 	})
 
+	t.Run("unfinished renewal", func(t *testing.T) {
+		require := require.New(t)
+		assert := assert.New(t)
+		var loggedOut []string
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			loggedOut = append(loggedOut, r.Header.Get("Authorization"))
+			_, _ = w.Write([]byte(`{}`))
+		}))
+		defer server.Close()
+		tokensDir := t.TempDir()
+		require.NoError(matrixsource.SaveCredentials(tokensDir, credentials(server.URL)))
+		pending := credentials(server.URL)
+		pending.DeviceID, pending.AccessToken = "PENDINGDEVICE", "pending-token"
+		require.NoError(matrixsource.SavePendingCredentials(tokensDir, pending))
+
+		require.NoError(revokeMatrixCredentials(t.Context(), tokensDir, userID))
+		assert.ElementsMatch([]string{"Bearer synthetic-token", "Bearer pending-token"}, loggedOut)
+		exists, err := matrixsource.PendingCredentialsExist(tokensDir, userID)
+		require.NoError(err)
+		assert.False(exists)
+	})
+
 	t.Run("already revoked", func(t *testing.T) {
 		require := require.New(t)
 		require.NoError(revokeMatrixCredentials(t.Context(), t.TempDir(), userID))

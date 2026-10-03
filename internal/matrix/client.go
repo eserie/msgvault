@@ -121,6 +121,22 @@ func Logout(ctx context.Context, creds Credentials) error {
 	return nil
 }
 
+// CheckLogin confirms that creds still authenticate as their user and device.
+func CheckLogin(ctx context.Context, creds Credentials) error {
+	rt, err := Open(creds)
+	if err != nil {
+		return err
+	}
+	resp, err := rt.Client.Whoami(ctx)
+	if err != nil {
+		return fmt.Errorf("check Matrix device %s: %w", creds.DeviceID, err)
+	}
+	if resp.UserID.String() != creds.UserID || resp.DeviceID.String() != creds.DeviceID {
+		return fmt.Errorf("matrix token belongs to %s device %s, expected %s device %s", resp.UserID, resp.DeviceID, creds.UserID, creds.DeviceID)
+	}
+	return nil
+}
+
 // IsUnknownToken reports whether the homeserver says the credential has
 // already been revoked or expired.
 func IsUnknownToken(err error) bool {

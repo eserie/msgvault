@@ -28,7 +28,12 @@ It stores the access token in an owner-only file under `tokens/`.
 
 To renew a revoked or expired login, run `add-matrix` again for the same user.
 It saves the new device's token in place, logs out the old device, and keeps
-the archived history and sync state.
+the archived history and sync state. If renewal stops partway, for example on
+a full disk, the new login is kept in a pending file under `tokens/` and the
+next `add-matrix` run for that user finishes with that login instead of
+creating another device. That run still reads `--password-file` or
+`--login-token-file` but doesn't use it, so an already-used SSO token file is
+fine.
 
 For an SSO account, complete the homeserver's SSO flow to obtain a single-use
 `m.login.token`, save it to an owner-only file, and use
