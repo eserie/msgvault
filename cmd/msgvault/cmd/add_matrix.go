@@ -91,6 +91,9 @@ m.login.token from the homeserver login flow and pass --login-token-file.`,
 				}
 				// Revoke the earlier device before its token is replaced, so a failed
 				// logout leaves the old login in place for a retry.
+				// Accepted design decision: if saving the new login fails after this
+				// logout, rerunning add-matrix restores it. Saving first would instead
+				// leave the old device signed in with nothing on disk to revoke it.
 				exists, err := matrixsource.CredentialsExist(state.cfg.TokensDir(), creds.UserID)
 				if err != nil {
 					return err
