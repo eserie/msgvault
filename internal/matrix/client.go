@@ -26,7 +26,7 @@ func validateHomeserverURL(raw string) error {
 		return nil
 	}
 	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
-	if host == "localhost" || net.ParseIP(host).IsLoopback() {
+	if u.Scheme == "http" && (host == "localhost" || net.ParseIP(host).IsLoopback()) {
 		return nil
 	}
 	return fmt.Errorf("matrix homeserver URL must use HTTPS unless its host is loopback: %q", raw)
@@ -80,16 +80,12 @@ func Login(ctx context.Context, homeserver, userID, secret string, tokenLogin bo
 	}
 	if resp.UserID != id.UserID(userID) {
 		mismatchErr := fmt.Errorf("matrix login returned user %s, expected %s", resp.UserID, userID)
-		creds := Credentials{
-			Homeserver: homeserver, UserID: resp.UserID.String(), DeviceID: resp.DeviceID.String(), AccessToken: resp.AccessToken,
-		}
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer cancel()
-		cleanupErr := Logout(cleanupCtx, creds)
-		if cleanupErr != nil {
-			return creds, errors.Join(mismatchErr, cleanupErr)
-		}
-		return Credentials{}, mismatchErr
+		cleanupErr := Logout(cleanupCtx, Credentials{
+			Homeserver: homeserver, UserID: resp.UserID.String(), DeviceID: resp.DeviceID.String(), AccessToken: resp.AccessToken,
+		})
+		return Credentials{}, errors.Join(mismatchErr, cleanupErr)
 	}
 	return Credentials{
 		Homeserver: homeserver, UserID: resp.UserID.String(), DeviceID: resp.DeviceID.String(), AccessToken: resp.AccessToken,
@@ -130,5 +126,3 @@ func Logout(ctx context.Context, creds Credentials) error {
 func IsUnknownToken(err error) bool {
 	return errors.Is(err, mautrix.MUnknownToken)
 }
-
-func (r *Runtime) Close() error { return nil }

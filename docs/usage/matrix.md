@@ -1,5 +1,5 @@
 ---
-last_edited: "2026-10-01"
+last_edited: "2026-10-02"
 title: Matrix
 description: Archive plaintext history from joined Matrix rooms on any homeserver.
 ---
@@ -26,12 +26,9 @@ msgvault add-matrix \
 `add-matrix` creates a separate Matrix device named **msgvault (read-only)**.
 It stores the access token in an owner-only file under `tokens/`.
 
-An account already registered with `add-matrix` cannot be added again in
-place. Create a [backup](backup.md) first, then remove it with
-`msgvault remove-account @archive:example.org --type matrix` and confirm the
-prompt. Removal permanently deletes that account's archived Matrix messages,
-conversations, sync state, credentials, and local device state. History no
-longer retained by the homeserver cannot be recovered after re-registration.
+To renew a revoked or expired login, run `add-matrix` again for the same user.
+It saves the new device's token in place, logs out the old device, and keeps
+the archived history and sync state.
 
 For an SSO account, complete the homeserver's SSO flow to obtain a single-use
 `m.login.token`, save it to an owner-only file, and use
@@ -44,7 +41,7 @@ flow depends on the homeserver and identity provider.
 # First run backfills joined rooms; later runs use the saved /sync token.
 msgvault sync-matrix
 
-# Re-read complete history and repair rows in place.
+# Re-read complete history to pick up anything missed.
 msgvault sync-matrix --full
 
 # Sync one registered Matrix user.
@@ -53,9 +50,10 @@ msgvault sync-matrix --account @archive:example.org
 
 The first run takes a Matrix `/sync` snapshot, then walks backward through each
 joined room with `/messages`. It checkpoints each room and saves `next_batch`
-for later incremental `/sync` calls. Re-running after interruption upserts the
-same event IDs and continues from the saved room cursor. Limited incremental
-timelines are filled through `/messages` before the new cursor is committed.
+for later incremental `/sync` calls. Re-running after interruption skips event
+IDs already archived and continues from the saved room cursor. When an
+incremental timeline is cut short, msgvault reads `/messages` back to the
+previous sync token before committing the new one.
 
 Room include and exclude lists use exact Matrix room IDs. Configure them with
 the [`[matrix]` settings](../configuration.md#matrix). The exclude list wins

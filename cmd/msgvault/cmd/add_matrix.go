@@ -10,9 +10,9 @@ import (
 
 	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
+	"go.kenn.io/kit/atomicfile"
 	"go.kenn.io/msgvault/internal/clirun"
 	matrixsource "go.kenn.io/msgvault/internal/matrix"
-	"go.kenn.io/msgvault/internal/store"
 )
 
 var (
@@ -57,46 +57,25 @@ m.login.token from the homeserver login flow and pass --login-token-file.`,
 			if loginSecret == "" {
 				return errors.New("missing Matrix login secret in daemon subprocess")
 			}
-			return matrixsource.WithCredentialLifecycleLock(state.cfg.TokensDir(), func() (retErr error) {
+			return matrixsource.WithCredentialLifecycleLock(state.cfg.TokensDir(), func() error {
+				creds, err := matrixsource.Login(cmd.Context(), addMatrixHomeserver, addMatrixUserID, loginSecret, addMatrixLoginTokenFile != "")
+				if err != nil {
+					return err
+				}
+				keepDevice := false
+				defer func() {
+					if keepDevice {
+						return
+					}
+					cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(cmd.Context()), 10*time.Second)
+					defer cancel()
+					_ = matrixsource.Logout(cleanupCtx, creds)
+				}()
 				s, cleanup, err := openWritableStoreAndInitForIngestInvocation(state)
 				if err != nil {
 					return err
 				}
 				defer cleanup()
-				exists, err := matrixsource.CredentialsExist(state.cfg.TokensDir(), addMatrixUserID)
-				if err != nil {
-					return err
-				}
-				var creds matrixsource.Credentials
-				recovering := false
-				if exists {
-					if _, sourceErr := s.GetSourceByTypeAndIdentifier(sourceTypeMatrix, addMatrixUserID); sourceErr == nil {
-						return fmt.Errorf("matrix account %s is already registered; remove it before changing credentials", addMatrixUserID)
-					} else if !errors.Is(sourceErr, store.ErrSourceNotFound) {
-						return fmt.Errorf("check existing Matrix source: %w", sourceErr)
-					}
-					recovering = true
-					creds, err = matrixsource.LoadCredentials(state.cfg.TokensDir(), addMatrixUserID)
-				} else {
-					creds, err = matrixsource.Login(cmd.Context(), addMatrixHomeserver, addMatrixUserID, loginSecret, addMatrixLoginTokenFile != "")
-				}
-				if err != nil {
-					if creds.AccessToken != "" {
-						return errors.Join(err, cleanupFreshMatrixDevice(
-							cmd.Context(), state.cfg.TokensDir(), creds,
-						))
-					}
-					return err
-				}
-				keepDevice := exists
-				defer func() {
-					if keepDevice {
-						return
-					}
-					retErr = errors.Join(retErr, cleanupFreshMatrixDevice(
-						cmd.Context(), state.cfg.TokensDir(), creds,
-					))
-				}()
 				source, err := s.GetOrCreateSource(sourceTypeMatrix, creds.UserID)
 				if err != nil {
 					return fmt.Errorf("create Matrix source: %w", err)
@@ -110,17 +89,21 @@ m.login.token from the homeserver login flow and pass --login-token-file.`,
 				if err := runPostSourceCreateMigrationsForInvocation(s, state); err != nil {
 					return fmt.Errorf("post-source-create migrations: %w", err)
 				}
-				if !exists {
-					if err := matrixsource.SaveNewCredentials(state.cfg.TokensDir(), creds); err != nil {
-						return err
-					}
+				previous, err := matrixsource.ReplaceCredentials(state.cfg.TokensDir(), creds)
+				if err != nil {
+					// A published file already replaced the old login, so keep its device.
+					keepDevice = errors.Is(err, atomicfile.ErrPublished)
+					return err
 				}
 				keepDevice = true
-				if recovering {
-					_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Recovered pending Matrix registration %s with stored device %s from %s\n", creds.UserID, creds.DeviceID, creds.Homeserver)
-				} else {
-					_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Added Matrix account %s with device %s\n", creds.UserID, creds.DeviceID)
+				if previous != nil {
+					logoutCtx, cancel := context.WithTimeout(context.WithoutCancel(cmd.Context()), 10*time.Second)
+					if err := matrixsource.Logout(logoutCtx, *previous); err != nil {
+						_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not log out previous Matrix device %s: %v\n", previous.DeviceID, err)
+					}
+					cancel()
 				}
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Added Matrix account %s with device %s\n", creds.UserID, creds.DeviceID)
 				_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Run: msgvault sync-matrix")
 				return nil
 			})
@@ -133,20 +116,6 @@ m.login.token from the homeserver login flow and pass --login-token-file.`,
 	flags.StringVar(&addMatrixLoginTokenFile, "login-token-file", "", "read a single-use m.login.token from a file")
 	flags.BoolVar(&noDefaultIdentityAddMatrix, "no-default-identity", false, noDefaultIdentityHelp)
 	return cmd
-}
-
-func cleanupFreshMatrixDevice(ctx context.Context, tokensDir string, creds matrixsource.Credentials) error {
-	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-	defer cancel()
-	logoutErr := matrixsource.Logout(cleanupCtx, creds)
-	if logoutErr == nil || matrixsource.IsUnknownToken(logoutErr) {
-		return nil
-	}
-	preserveErr := matrixsource.SaveCredentials(tokensDir, creds)
-	return errors.Join(
-		fmt.Errorf("clean up new Matrix device %s: %w", creds.DeviceID, logoutErr),
-		wrapError(preserveErr, "preserve Matrix credentials for cleanup retry"),
-	)
 }
 
 func readMatrixLoginSecret() (string, error) {

@@ -1081,7 +1081,8 @@ msgvault add-matrix \
 | `--login-token-file` | — | Read a single-use `m.login.token` obtained from an SSO/login flow; mutually exclusive with `--password-file` |
 | `--no-default-identity` | `false` | Do not auto-confirm the Matrix user ID as this source's "me" identity |
 
-The access token is written to an owner-only file under `tokens/`.
+The access token is written to an owner-only file under `tokens/`. Running it
+again for a registered user renews the login in place and keeps its history.
 
 ---
 

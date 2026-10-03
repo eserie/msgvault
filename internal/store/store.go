@@ -1553,31 +1553,6 @@ func (s *Store) InitSchemaContext(ctx context.Context) error {
 	if err := s.runOnceMigration(ctx, migrationCardDAVMultipleAccounts, 1, false, s.ensureCardDAVMultiAccountSchema); err != nil {
 		return fmt.Errorf("migrate CardDAV connections: %w", err)
 	}
-	if _, err := s.db.ExecContext(ctx, `
-		CREATE INDEX IF NOT EXISTS idx_reactions_source_reaction_id
-		ON reactions(source_reaction_id)
-		WHERE source_reaction_id IS NOT NULL AND source_reaction_id != ''
-	`); err != nil {
-		return fmt.Errorf("create source reaction identity index: %w", err)
-	}
-	if _, err := s.db.ExecContext(ctx, s.dialect.InsertOrIgnore(`
-		INSERT OR IGNORE INTO reaction_source_events (source_id, source_reaction_id, reaction_id)
-		SELECT m.source_id, r.source_reaction_id, r.id
-		FROM reactions r
-		JOIN messages m ON m.id = r.message_id
-		WHERE r.source_reaction_id IS NOT NULL AND r.source_reaction_id != ''
-	`)); err != nil {
-		return fmt.Errorf("backfill reaction source events: %w", err)
-	}
-	if _, err := s.db.ExecContext(ctx, `UPDATE reactions
-		SET source_reaction_id = NULL
-		WHERE source_reaction_id IS NOT NULL AND source_reaction_id != ''
-		  AND EXISTS (
-			SELECT 1 FROM reaction_source_events rse
-			WHERE rse.reaction_id = reactions.id
-		  )`); err != nil {
-		return fmt.Errorf("retire legacy reaction source identities: %w", err)
-	}
 	if err := s.ensureCacheSourceAttribution(ctx); err != nil {
 		return err
 	}

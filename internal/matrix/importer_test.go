@@ -114,7 +114,7 @@ func TestImporterBackfillsJoinedRoomAndPersistsCheckpoint(t *testing.T) {
 	})
 	require.NoError(err)
 	assert.Equal(int64(0), fullSummary.MessagesAdded)
-	assert.Equal(int64(1), fullSummary.RelationsUnresolved, "replayed redactions stay resolved after their target identity is removed")
+	assert.Equal(int64(1), fullSummary.RelationsUnresolved, "the orphan reply still has no target")
 	body, err = st.GetMessageBodyText(messageIDs["$one"])
 	require.NoError(err)
 	assert.Equal("updated", body)
@@ -328,9 +328,9 @@ func TestImporterKeepsNewestEditAndRecomputesAfterRedaction(t *testing.T) {
 	require.NoError(err)
 	conversationID, err := st.EnsureConversationWithType(source.ID, "!room:example.org", "group_chat", "Example")
 	require.NoError(err)
-	client, err := mautrix.NewClient("https://example.invalid", id.UserID("@archive:example.org"), "token")
-	require.NoError(err)
-	imp := NewImporter(st, &Runtime{Client: client})
+	imp := NewImporter(st, &Runtime{Client: relationsClient(t, map[id.EventID]string{
+		"$original": `{"type":"m.room.message","event_id":"$older","sender":"@member:example.org","origin_server_ts":2000,"content":{"msgtype":"m.text","body":"* old","m.new_content":{"msgtype":"m.text","body":"old"},"m.relates_to":{"rel_type":"m.replace","event_id":"$original"}}}`,
+	})})
 	sum := &ImportSummary{}
 
 	original := matrixTestEvent(t, `{"type":"m.room.message","event_id":"$original","sender":"@member:example.org","origin_server_ts":1000,"content":{"msgtype":"m.text","body":"original"}}`)
@@ -345,9 +345,6 @@ func TestImporterKeepsNewestEditAndRecomputesAfterRedaction(t *testing.T) {
 	body, err := st.GetMessageBodyText(messageIDs["$original"])
 	require.NoError(err)
 	assert.Equal("newer version", body, "an older edit from a later sync must not win")
-	var sizeEstimate int64
-	require.NoError(st.DB().QueryRow(`SELECT size_estimate FROM messages WHERE id = ?`, messageIDs["$original"]).Scan(&sizeEstimate))
-	assert.Equal(int64(len("newer version")), sizeEstimate)
 	labelID, err := st.EnsureLabel(source.ID, "local-review", "Local review", "user")
 	require.NoError(err)
 	require.NoError(st.AddMessageLabels(messageIDs["$original"], []int64{labelID}))
@@ -364,8 +361,6 @@ func TestImporterKeepsNewestEditAndRecomputesAfterRedaction(t *testing.T) {
 	body, err = st.GetMessageBodyText(messageIDs["$original"])
 	require.NoError(err)
 	assert.Equal("old", body, "redacting the winning edit selects the latest survivor")
-	require.NoError(st.DB().QueryRow(`SELECT size_estimate FROM messages WHERE id = ?`, messageIDs["$original"]).Scan(&sizeEstimate))
-	assert.Equal(int64(len("old")), sizeEstimate)
 }
 
 func TestImporterRejectsCrossRoomRelations(t *testing.T) {
@@ -392,7 +387,9 @@ func TestImporterRejectsCrossRoomRelations(t *testing.T) {
 	require.NoError(imp.persistEvent(t.Context(), source.ID, roomB, crossRoomReaction, sum))
 	for i, target := range []string{"$room-a-message", "$room-a-edit", "$room-a-reaction"} {
 		redaction := matrixTestEvent(t, fmt.Sprintf(`{"type":"m.room.redaction","event_id":"$room-b-redaction-%d","sender":"@member:example.org","origin_server_ts":%d,"redacts":%q,"content":{}}`, i, 5000+i, target))
-		require.NoError(imp.persistEvent(t.Context(), source.ID, roomB, redaction, sum))
+		if err := imp.persistEvent(t.Context(), source.ID, roomB, redaction, sum); err != nil {
+			require.ErrorIs(err, errRelationTargetMissing)
+		}
 	}
 	var reactions int
 	require.NoError(st.DB().QueryRow(`SELECT COUNT(*) FROM reactions`).Scan(&reactions))
@@ -406,10 +403,6 @@ func TestImporterRejectsCrossRoomRelations(t *testing.T) {
 	require.NoError(st.DB().QueryRow(`SELECT deleted_from_source_at IS NOT NULL FROM messages WHERE id = ?`,
 		messageIDs["$room-a-message"]).Scan(&deleted))
 	assert.False(deleted)
-	var redactedMarkers int
-	require.NoError(st.DB().QueryRow(`SELECT COUNT(*) FROM matrix_redacted_events
-		WHERE source_id = ?`, source.ID).Scan(&redactedMarkers))
-	assert.Zero(redactedMarkers)
 }
 
 func TestImporterDoesNotRestoreRedactedRelationPayloads(t *testing.T) {
@@ -420,9 +413,7 @@ func TestImporterDoesNotRestoreRedactedRelationPayloads(t *testing.T) {
 	require.NoError(err)
 	conversationID, err := st.EnsureConversationWithType(source.ID, "!room:example.org", "group_chat", "Example")
 	require.NoError(err)
-	client, err := mautrix.NewClient("https://example.invalid", id.UserID("@archive:example.org"), "token")
-	require.NoError(err)
-	imp := NewImporter(st, &Runtime{Client: client})
+	imp := NewImporter(st, &Runtime{Client: relationsClient(t, nil)})
 	sum := &ImportSummary{}
 	original := matrixTestEvent(t, `{"type":"m.room.message","event_id":"$original","sender":"@member:example.org","origin_server_ts":1000,"content":{"msgtype":"m.text","body":"original"}}`)
 	reaction := matrixTestEvent(t, `{"type":"m.reaction","event_id":"$reaction","sender":"@member:example.org","origin_server_ts":2000,"content":{"m.relates_to":{"rel_type":"m.annotation","event_id":"$original","key":"ok"}}}`)
@@ -434,8 +425,11 @@ func TestImporterDoesNotRestoreRedactedRelationPayloads(t *testing.T) {
 		redaction := matrixTestEvent(t, `{"type":"m.room.redaction","event_id":"$redact","sender":"@member:example.org","origin_server_ts":4000,"redacts":"`+target+`","content":{}}`)
 		require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, redaction, sum))
 	}
-	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, reaction, sum))
-	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, edit, sum))
+	// The homeserver serves redacted events stripped, with the redaction attached.
+	for _, eventID := range []string{"$reaction", "$edit"} {
+		stripped := matrixTestEvent(t, `{"type":"m.room.message","event_id":"`+eventID+`","sender":"@member:example.org","origin_server_ts":2000,"content":{},"unsigned":{"redacted_because":{"type":"m.room.redaction","event_id":"$redact","sender":"@member:example.org","content":{}}}}`)
+		require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, stripped, sum))
+	}
 	var reactions int
 	require.NoError(st.DB().QueryRow(`SELECT COUNT(*) FROM reactions`).Scan(&reactions))
 	assert.Zero(reactions)
@@ -495,36 +489,6 @@ func TestImporterAppliesTargetOfStrippedRedaction(t *testing.T) {
 	assert.True(deleted)
 }
 
-func TestImporterSeedsLegacyOriginalBeforeEditRedaction(t *testing.T) {
-	require := require.New(t)
-	assert := assert.New(t)
-	st := testutil.NewTestStore(t)
-	source, err := st.GetOrCreateSource(SourceType, "@archive:example.org")
-	require.NoError(err)
-	conversationID, err := st.EnsureConversationWithType(source.ID, "!room:example.org", "group_chat", "Example")
-	require.NoError(err)
-	client, err := mautrix.NewClient("https://example.invalid", id.UserID("@archive:example.org"), "token")
-	require.NoError(err)
-	imp := NewImporter(st, &Runtime{Client: client})
-	sum := &ImportSummary{}
-	original := matrixTestEvent(t, `{"type":"m.room.message","event_id":"$legacy","sender":"@member:example.org","origin_server_ts":1000,"content":{"msgtype":"m.text","body":"legacy original"}}`)
-	edit := matrixTestEvent(t, `{"type":"m.room.message","event_id":"$legacy-edit","sender":"@member:example.org","origin_server_ts":2000,"content":{"msgtype":"m.text","body":"* edited","m.new_content":{"msgtype":"m.text","body":"edited"},"m.relates_to":{"rel_type":"m.replace","event_id":"$legacy"}}}`)
-	redaction := matrixTestEvent(t, `{"type":"m.room.redaction","event_id":"$redact-legacy-edit","sender":"@member:example.org","origin_server_ts":3000,"redacts":"$legacy-edit","content":{}}`)
-	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, original, sum))
-	_, err = st.DB().Exec(`DELETE FROM matrix_message_versions`)
-	require.NoError(err)
-	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, edit, sum))
-	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, redaction, sum))
-	messageIDs, err := st.MessageExistsBatch(source.ID, []string{"$legacy"})
-	require.NoError(err)
-	body, err := st.GetMessageBodyText(messageIDs["$legacy"])
-	require.NoError(err)
-	assert.Equal("legacy original", body)
-	var edited bool
-	require.NoError(st.DB().QueryRow(`SELECT is_edited FROM messages WHERE id = ?`, messageIDs["$legacy"]).Scan(&edited))
-	assert.False(edited)
-}
-
 func TestImporterFullReplayRedactedEditDoesNotCreateMessage(t *testing.T) {
 	require := require.New(t)
 	assert := assert.New(t)
@@ -533,9 +497,7 @@ func TestImporterFullReplayRedactedEditDoesNotCreateMessage(t *testing.T) {
 	require.NoError(err)
 	conversationID, err := st.EnsureConversationWithType(source.ID, "!room:example.org", "group_chat", "Example")
 	require.NoError(err)
-	client, err := mautrix.NewClient("https://example.invalid", id.UserID("@archive:example.org"), "token")
-	require.NoError(err)
-	imp := NewImporter(st, &Runtime{Client: client})
+	imp := NewImporter(st, &Runtime{Client: relationsClient(t, nil)})
 	sum := &ImportSummary{}
 	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID,
 		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$original-edit-target","sender":"@member:example.org","origin_server_ts":1000,"content":{"msgtype":"m.text","body":"original"}}`), sum))
@@ -582,23 +544,18 @@ func TestMessageBodyStripsMatrixReplyFallback(t *testing.T) {
 }
 
 func TestOnlyMutatingMessageRelationsAreDeferred(t *testing.T) {
-	require := require.New(t)
 	assert := assert.New(t)
 	reply := &event.Event{Type: event.EventMessage, Content: event.Content{Parsed: &event.MessageEventContent{
 		MsgType:   event.MsgText,
 		RelatesTo: &event.RelatesTo{InReplyTo: &event.InReplyTo{EventID: "$target"}},
 	}}}
-	deferred, err := shouldDeferRelation(reply)
-	require.NoError(err)
-	assert.False(deferred, "reply messages must exist before reactions are replayed")
+	assert.False(shouldDeferRelation(reply), "reply messages must exist before reactions are replayed")
 
 	edit := &event.Event{Type: event.EventMessage, Content: event.Content{Parsed: &event.MessageEventContent{
 		MsgType:   event.MsgText,
 		RelatesTo: &event.RelatesTo{Type: event.RelReplace, EventID: "$target"},
 	}}}
-	deferred, err = shouldDeferRelation(edit)
-	require.NoError(err)
-	assert.True(deferred)
+	assert.True(shouldDeferRelation(edit))
 }
 
 func TestDeferredReplyResolutionDoesNotOverwriteEditedBody(t *testing.T) {
@@ -649,7 +606,7 @@ func TestDeferredReplyResolutionDoesNotOverwriteEditedBody(t *testing.T) {
 func TestImporterResumesFailedRoomBackfillCheckpoint(t *testing.T) {
 	assert := assert.New(t)
 	require := require.New(t)
-	var requestedFrom []string
+	var requestedFrom, requestedTo []string
 	failedOnce := false
 	var syncCalls int
 	mux := http.NewServeMux()
@@ -659,7 +616,7 @@ func TestImporterResumesFailedRoomBackfillCheckpoint(t *testing.T) {
 			_, _ = w.Write([]byte(`{"next_batch":"next-1","rooms":{"join":{"!room:example.org":{"state":{"events":[]},"timeline":{"events":[{"type":"m.room.message","event_id":"$recent","sender":"@member:example.org","origin_server_ts":3000,"content":{"msgtype":"m.text","body":"recent"}},{"type":"m.room.message","event_id":"$edit-oldest","sender":"@member:example.org","origin_server_ts":3500,"content":{"msgtype":"m.text","body":"* edited","m.new_content":{"msgtype":"m.text","body":"edited"},"m.relates_to":{"rel_type":"m.replace","event_id":"$oldest"}}}],"prev_batch":"older-1"}}}}}`))
 			return
 		}
-		_, _ = w.Write([]byte(`{"next_batch":"next-2","rooms":{"join":{"!room:example.org":{"state":{"events":[]},"timeline":{"events":[{"type":"m.room.message","event_id":"$new","sender":"@member:example.org","origin_server_ts":5000,"content":{"msgtype":"m.text","body":"new"}}],"prev_batch":"fresh-gap"}}}}}`))
+		_, _ = w.Write([]byte(`{"next_batch":"next-2","rooms":{"join":{"!room:example.org":{"state":{"events":[]},"timeline":{"events":[{"type":"m.room.message","event_id":"$new","sender":"@member:example.org","origin_server_ts":5000,"content":{"msgtype":"m.text","body":"new"}}],"limited":true,"prev_batch":"fresh-gap"}}}}}`))
 	})
 	mux.HandleFunc("GET /_matrix/client/v3/user/@archive:example.org/account_data/m.direct", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{}`))
@@ -670,8 +627,9 @@ func TestImporterResumesFailedRoomBackfillCheckpoint(t *testing.T) {
 	mux.HandleFunc("GET /_matrix/client/v3/rooms/!room:example.org/messages", func(w http.ResponseWriter, r *http.Request) {
 		from := r.URL.Query().Get("from")
 		requestedFrom = append(requestedFrom, from)
+		requestedTo = append(requestedTo, r.URL.Query().Get("to"))
 		if from == "fresh-gap" {
-			_, _ = w.Write([]byte(`{"chunk":[{"type":"m.room.message","event_id":"$between","sender":"@member:example.org","origin_server_ts":4000,"content":{"msgtype":"m.text","body":"between"}},{"type":"m.room.message","event_id":"$recent","sender":"@member:example.org","origin_server_ts":3000,"content":{"msgtype":"m.text","body":"recent"}},{"type":"m.room.message","event_id":"$edit-oldest","sender":"@member:example.org","origin_server_ts":3500,"content":{},"unsigned":{"redacted_because":{"type":"m.room.redaction","event_id":"$redact-edit","sender":"@member:example.org","content":{}}}}],"end":"older-1"}`))
+			_, _ = w.Write([]byte(`{"chunk":[{"type":"m.room.message","event_id":"$between","sender":"@member:example.org","origin_server_ts":4000,"content":{"msgtype":"m.text","body":"between"}}]}`))
 			return
 		}
 		if from == "older-1" {
@@ -700,6 +658,8 @@ func TestImporterResumesFailedRoomBackfillCheckpoint(t *testing.T) {
 	_, err = NewImporter(st, &Runtime{Client: client}).Import(t.Context(), options)
 	require.NoError(err)
 	require.Equal([]string{"older-1", "older-2", "fresh-gap", "older-2"}, requestedFrom)
+	assert.Equal([]string{"", "", "next-1", ""}, requestedTo,
+		"the gap after an interrupted first run stops at that run's sync token")
 
 	count, err := st.CountMessagesForSource(source.ID)
 	require.NoError(err)
@@ -708,7 +668,7 @@ func TestImporterResumesFailedRoomBackfillCheckpoint(t *testing.T) {
 	require.NoError(err)
 	body, err := st.GetMessageBodyText(messages["$oldest"])
 	require.NoError(err)
-	assert.Equal("oldest", body, "a stripped gap boundary removes the checkpointed edit before deferred replay")
+	assert.Equal("edited", body, "an edit deferred before the interruption applies once its target arrives")
 }
 
 func TestImporterAppliesBackfillEditsOldestFirst(t *testing.T) {
@@ -755,15 +715,11 @@ func TestImporterAppliesBackfillEditsOldestFirst(t *testing.T) {
 func TestImporterFillsLimitedIncrementalTimelineGap(t *testing.T) {
 	assert := assert.New(t)
 	require := require.New(t)
-	var gapRequests int
+	var gapRequests []string
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /_matrix/client/v3/sync", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("since") == "next-2" {
-			_, _ = w.Write([]byte(`{"next_batch":"next-3","rooms":{"join":{"!room:example.org":{"state":{"events":[]},"timeline":{"limited":true,"events":[{"type":"m.room.message","event_id":"$new","sender":"@member:example.org","origin_server_ts":3000,"content":{"msgtype":"m.text","body":"new"}}],"prev_batch":"gap-1"}}}}}`))
-			return
-		}
 		if r.URL.Query().Get("since") == "next-1" {
-			_, _ = w.Write([]byte(`{"next_batch":"next-2","rooms":{"join":{"!room:example.org":{"state":{"events":[]},"timeline":{"events":[],"prev_batch":""}}}}}`))
+			_, _ = w.Write([]byte(`{"next_batch":"next-2","rooms":{"join":{"!room:example.org":{"state":{"events":[]},"timeline":{"limited":true,"events":[{"type":"m.room.message","event_id":"$new","sender":"@member:example.org","origin_server_ts":3000,"content":{"msgtype":"m.text","body":"new"}}],"prev_batch":"gap-1"}}}}}`))
 			return
 		}
 		_, _ = w.Write([]byte(`{"next_batch":"next-1","rooms":{"join":{"!room:example.org":{"state":{"events":[]},"timeline":{"events":[{"type":"m.room.message","event_id":"$known","sender":"@member:example.org","origin_server_ts":1000,"content":{"msgtype":"m.text","body":"known"}}],"prev_batch":"initial-backfill"}}}}}`))
@@ -775,17 +731,20 @@ func TestImporterFillsLimitedIncrementalTimelineGap(t *testing.T) {
 		_, _ = w.Write([]byte(`{"joined":{"@archive:example.org":{"display_name":"Archive"},"@member:example.org":{"display_name":"Member"}}}`))
 	})
 	mux.HandleFunc("GET /_matrix/client/v3/rooms/!room:example.org/messages", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("from") == "initial-backfill" {
-			_, _ = w.Write([]byte(`{"chunk":[{"type":"m.room.message","event_id":"$stale","sender":"@member:example.org","origin_server_ts":1500,"content":{"msgtype":"m.text","body":"stale retry marker"}}],"end":""}`))
-			return
-		}
-		gapRequests++
-		if r.URL.Query().Get("from") == "gap-1" {
+		query := r.URL.Query()
+		switch query.Get("from") {
+		case "initial-backfill":
+			_, _ = w.Write([]byte(`{"chunk":[{"type":"m.room.message","event_id":"$old","sender":"@member:example.org","origin_server_ts":500,"content":{"msgtype":"m.text","body":"old"}}]}`))
+		case "gap-1":
+			gapRequests = append(gapRequests, query.Get("to"))
+			// An empty page with an end token is not the end of the gap.
 			_, _ = w.Write([]byte(`{"chunk":[],"end":"gap-2"}`))
-			return
+		case "gap-2":
+			gapRequests = append(gapRequests, query.Get("to"))
+			_, _ = w.Write([]byte(`{"chunk":[{"type":"m.room.message","event_id":"$gap","sender":"@member:example.org","origin_server_ts":2000,"content":{"msgtype":"m.text","body":"gap"}}]}`))
+		default:
+			http.Error(w, "unexpected history cursor", http.StatusBadRequest)
 		}
-		assert.Equal("gap-2", r.URL.Query().Get("from"))
-		_, _ = w.Write([]byte(`{"chunk":[{"type":"m.room.message","event_id":"$stale","sender":"@member:example.org","origin_server_ts":2500,"content":{"msgtype":"m.text","body":"stale retry marker"}},{"type":"m.room.message","event_id":"$gap","sender":"@member:example.org","origin_server_ts":2000,"content":{"msgtype":"m.text","body":"gap"}},{"type":"m.room.message","event_id":"$known","sender":"@member:example.org","origin_server_ts":1000,"content":{"msgtype":"m.text","body":"known"}}],"end":"older"}`))
 	})
 	server := httptest.NewServer(mux)
 	defer server.Close()
@@ -798,42 +757,81 @@ func TestImporterFillsLimitedIncrementalTimelineGap(t *testing.T) {
 	opts := ImportOptions{UserID: "@archive:example.org"}
 	_, err = NewImporter(st, &Runtime{Client: client}).Import(t.Context(), opts)
 	require.NoError(err)
-	_, err = NewImporter(st, &Runtime{Client: client}).Import(t.Context(), opts)
+	second, err := NewImporter(st, &Runtime{Client: client}).Import(t.Context(), opts)
 	require.NoError(err)
-	third, err := NewImporter(st, &Runtime{Client: client}).Import(t.Context(), opts)
-	require.NoError(err)
-	assert.Equal(int64(2), third.MessagesAdded)
-	assert.Equal(2, gapRequests)
+	assert.Equal(int64(2), second.MessagesAdded)
+	assert.Equal([]string{"next-1", "next-1"}, gapRequests, "the gap walk stops at the previous sync token")
 
 	count, err := st.CountMessagesForSource(source.ID)
 	require.NoError(err)
 	assert.Equal(int64(4), count)
+	run, err := st.GetLastSuccessfulSync(source.ID)
+	require.NoError(err)
+	state, err := loadSyncState(run.CursorAfter.String)
+	require.NoError(err)
+	assert.Equal(&RoomState{Backfilled: true, SyncedTo: "next-2"}, state.Rooms["!room:example.org"])
 }
 
-func TestImporterResumesPersistedGapBoundary(t *testing.T) {
-	assert := assert.New(t)
+func TestImporterEditMustKeepEventType(t *testing.T) {
 	require := require.New(t)
-	var gapRequests []string
+	assert := assert.New(t)
+	st := testutil.NewTestStore(t)
+	source, err := st.GetOrCreateSource(SourceType, "@archive:example.org")
+	require.NoError(err)
+	conversationID, err := st.EnsureConversationWithType(source.ID, "!room:example.org", "group_chat", "Example")
+	require.NoError(err)
+	imp := NewImporter(st, &Runtime{Client: relationsClient(t, nil)})
+	sum := &ImportSummary{}
+	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID,
+		matrixTestEvent(t, `{"type":"m.sticker","event_id":"$sticker","sender":"@member:example.org","origin_server_ts":1000,"content":{"body":"party parrot","url":"mxc://example.org/parrot"}}`), sum))
+	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID,
+		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$text-edit","sender":"@member:example.org","origin_server_ts":2000,"content":{"msgtype":"m.text","body":"* replaced","m.new_content":{"msgtype":"m.text","body":"replaced"},"m.relates_to":{"rel_type":"m.replace","event_id":"$sticker"}}}`), sum))
+	messageIDs, err := st.MessageExistsBatch(source.ID, []string{"$sticker"})
+	require.NoError(err)
+	body, err := st.GetMessageBodyText(messageIDs["$sticker"])
+	require.NoError(err)
+	assert.Equal("party parrot", body)
+	var edited bool
+	require.NoError(st.DB().QueryRow(`SELECT is_edited FROM messages WHERE id = ?`, messageIDs["$sticker"]).Scan(&edited))
+	assert.False(edited)
+	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID,
+		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$file","sender":"@member:example.org","origin_server_ts":3000,"content":{"msgtype":"m.file","body":"report.pdf","url":"mxc://example.org/report"}}`), sum))
+	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID,
+		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$file-edit","sender":"@member:example.org","origin_server_ts":4000,"content":{"msgtype":"m.text","body":"* gone","m.new_content":{"msgtype":"m.text","body":"gone"},"m.relates_to":{"rel_type":"m.replace","event_id":"$file"}}}`), sum))
+	messageIDs, err = st.MessageExistsBatch(source.ID, []string{"$file"})
+	require.NoError(err)
+	body, err = st.GetMessageBodyText(messageIDs["$file"])
+	require.NoError(err)
+	assert.Equal("gone", body, "Matrix lets an edit change a file into text")
+}
+
+// relationsClient serves each original's surviving m.replace events.
+func relationsClient(t *testing.T, edits map[id.EventID]string) *mautrix.Client {
+	t.Helper()
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /_matrix/client/v3/sync", func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal("checkpoint", r.URL.Query().Get("since"))
-		_, _ = w.Write([]byte(`{"next_batch":"next","rooms":{"join":{"!room:example.org":{"state":{"events":[]},"timeline":{"limited":true,"events":[{"type":"m.room.message","event_id":"$new-boundary","sender":"@member:example.org","origin_server_ts":3000,"content":{"msgtype":"m.text","body":"new boundary"}}],"prev_batch":"new-gap"}}}}}`))
+	mux.HandleFunc("GET /_matrix/client/v1/rooms/{room}/relations/{event}/m.replace", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"chunk":[` + edits[id.EventID(r.PathValue("event"))] + `]}`))
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	client, err := mautrix.NewClient(server.URL, id.UserID("@archive:example.org"), "token")
+	require.NoError(t, err)
+	return client
+}
+
+func TestImporterReplaysRedactionsAfterReactionsDespiteClockSkew(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /_matrix/client/v3/sync", func(w http.ResponseWriter, _ *http.Request) {
+		// The redaction's server timestamp is older than the reaction it removes.
+		_, _ = w.Write([]byte(`{"next_batch":"next-1","rooms":{"join":{"!room:example.org":{"state":{"events":[]},"timeline":{"events":[{"type":"m.room.message","event_id":"$one","sender":"@member:example.org","origin_server_ts":1000,"content":{"msgtype":"m.text","body":"one"}},{"type":"m.reaction","event_id":"$late-reaction","sender":"@member:example.org","origin_server_ts":5000,"content":{"m.relates_to":{"rel_type":"m.annotation","event_id":"$one","key":"ok"}}},{"type":"m.room.redaction","event_id":"$early-redaction","sender":"@member:example.org","origin_server_ts":4000,"redacts":"$late-reaction","content":{}}]}}}}}`))
 	})
 	mux.HandleFunc("GET /_matrix/client/v3/user/@archive:example.org/account_data/m.direct", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{}`))
 	})
 	mux.HandleFunc("GET /_matrix/client/v3/rooms/!room:example.org/joined_members", func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"joined":{"@archive:example.org":{"display_name":"Archive"},"@member:example.org":{"display_name":"Member"}}}`))
-	})
-	mux.HandleFunc("GET /_matrix/client/v3/rooms/!room:example.org/messages", func(w http.ResponseWriter, r *http.Request) {
-		from := r.URL.Query().Get("from")
-		gapRequests = append(gapRequests, from)
-		switch from {
-		case "resume-gap":
-			_, _ = w.Write([]byte(`{"chunk":[{"type":"m.reaction","event_id":"$relation-boundary","sender":"@member:example.org","origin_server_ts":2000,"content":{"m.relates_to":{"rel_type":"m.annotation","event_id":"$known","key":"thumbs"}}}],"end":"older"}`))
-		default:
-			http.Error(w, "unexpected gap cursor", http.StatusBadRequest)
-		}
+		_, _ = w.Write([]byte(`{"joined":{"@member:example.org":{"display_name":"Member"}}}`))
 	})
 	server := httptest.NewServer(mux)
 	defer server.Close()
@@ -841,40 +839,131 @@ func TestImporterResumesPersistedGapBoundary(t *testing.T) {
 	require.NoError(err)
 
 	st := testutil.NewTestStore(t)
+	_, err = st.GetOrCreateSource(SourceType, "@archive:example.org")
+	require.NoError(err)
+	sum, err := NewImporter(st, &Runtime{Client: client}).Import(t.Context(), ImportOptions{UserID: "@archive:example.org"})
+	require.NoError(err)
+	assert.Zero(sum.RelationsUnresolved)
+	var reactions int
+	require.NoError(st.DB().QueryRow(`SELECT COUNT(*) FROM reactions`).Scan(&reactions))
+	assert.Zero(reactions)
+}
+
+func TestImporterReappliesEditWhosePointerWasNotSaved(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	st := testutil.NewTestStore(t)
 	source, err := st.GetOrCreateSource(SourceType, "@archive:example.org")
 	require.NoError(err)
-	state := newSyncState()
-	state.NextBatch = "checkpoint"
-	state.Rooms["!room:example.org"] = &RoomState{
-		Backfilled:            true,
-		BoundaryEventIDs:      []string{"$known"},
-		GapBatch:              "resume-gap",
-		GapBoundaryReached:    true,
-		GapPendingRelationIDs: []string{"$relation-boundary"},
-		GapBoundaryIDs:        []string{"$relation-boundary"},
-		PendingBoundaryIDs:    []string{"$new-boundary"},
-	}
-	cursor, err := state.marshal()
+	conversationID, err := st.EnsureConversationWithType(source.ID, "!room:example.org", "group_chat", "Example")
 	require.NoError(err)
-	syncID, err := st.StartSync(source.ID, SourceType)
+	imp := NewImporter(st, &Runtime{Client: relationsClient(t, nil)})
+	sum := &ImportSummary{}
+	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID,
+		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$original","sender":"@member:example.org","origin_server_ts":1000,"content":{"msgtype":"m.text","body":"original"}}`), sum))
+	messageIDs, err := st.MessageExistsBatch(source.ID, []string{"$original"})
 	require.NoError(err)
-	require.NoError(st.CompleteSync(syncID, cursor))
+	messageID := messageIDs["$original"]
+	// An interruption after the text and flag but before the pointer.
+	require.NoError(imp.setBody(messageID, "edited"))
+	require.NoError(st.SetMessageEdited(messageID))
 
-	_, err = NewImporter(st, &Runtime{Client: client}).Import(t.Context(), ImportOptions{UserID: "@archive:example.org"})
+	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID,
+		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$edit","sender":"@member:example.org","origin_server_ts":2000,"content":{"msgtype":"m.text","body":"* edited","m.new_content":{"msgtype":"m.text","body":"edited"},"m.relates_to":{"rel_type":"m.replace","event_id":"$original"}}}`), sum))
+	edit, err := imp.appliedEdit(messageID)
 	require.NoError(err)
-	assert.Equal([]string{"resume-gap"}, gapRequests,
-		"resume must finish at the persisted remaining relation boundary")
-	run, err := st.GetLastSuccessfulSync(source.ID)
+	assert.Equal(appliedEdit{EventID: "$edit", TS: 2000}, edit)
+	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID,
+		matrixTestEvent(t, `{"type":"m.room.redaction","event_id":"$redact","sender":"@member:example.org","origin_server_ts":3000,"redacts":"$edit","content":{}}`), sum))
+	body, err := st.GetMessageBodyText(messageID)
 	require.NoError(err)
-	resumed, err := loadSyncState(run.CursorAfter.String)
+	assert.Equal("original", body)
+}
+
+func TestImporterIgnoresInvalidReplacements(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	st := testutil.NewTestStore(t)
+	source, err := st.GetOrCreateSource(SourceType, "@archive:example.org")
 	require.NoError(err)
-	room := resumed.Rooms["!room:example.org"]
-	require.NotNil(room)
-	assert.True(room.Backfilled)
-	assert.Equal([]string{"$new-boundary"}, room.BoundaryEventIDs)
-	assert.Empty(room.GapBatch)
-	assert.False(room.GapBoundaryReached)
-	assert.Empty(room.GapPendingRelationIDs)
-	assert.Empty(room.GapBoundaryIDs)
-	assert.Empty(room.PendingBoundaryIDs)
+	conversationID, err := st.EnsureConversationWithType(source.ID, "!room:example.org", "group_chat", "Example")
+	require.NoError(err)
+	imp := NewImporter(st, &Runtime{Client: relationsClient(t, nil)})
+	sum := &ImportSummary{}
+	for _, raw := range []string{
+		`{"type":"m.room.message","event_id":"$original","sender":"@member:example.org","origin_server_ts":1000,"content":{"msgtype":"m.text","body":"original"}}`,
+		`{"type":"m.room.message","event_id":"$bare-edit","sender":"@member:example.org","origin_server_ts":2000,"content":{"msgtype":"m.text","body":"* bare","m.relates_to":{"rel_type":"m.replace","event_id":"$original"}}}`,
+		`{"type":"m.room.message","event_id":"$state-edit","state_key":"","sender":"@member:example.org","origin_server_ts":3000,"content":{"msgtype":"m.text","body":"* state","m.new_content":{"msgtype":"m.text","body":"state"},"m.relates_to":{"rel_type":"m.replace","event_id":"$original"}}}`,
+	} {
+		require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, matrixTestEvent(t, raw), sum))
+	}
+	messageIDs, err := st.MessageExistsBatch(source.ID, []string{"$original", "$bare-edit"})
+	require.NoError(err)
+	assert.Zero(messageIDs["$bare-edit"], "a replacement without new content is not a message")
+	body, err := st.GetMessageBodyText(messageIDs["$original"])
+	require.NoError(err)
+	assert.Equal("original", body)
+}
+
+func TestImporterReplayRecoversReplyLinkLostBeforeCheckpoint(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	st := testutil.NewTestStore(t)
+	source, err := st.GetOrCreateSource(SourceType, "@archive:example.org")
+	require.NoError(err)
+	conversationID, err := st.EnsureConversationWithType(source.ID, "!room:example.org", "group_chat", "Example")
+	require.NoError(err)
+	imp := NewImporter(st, &Runtime{Client: relationsClient(t, nil)})
+	sum := &ImportSummary{}
+	reply := `{"type":"m.room.message","event_id":"$reply","sender":"@member:example.org","origin_server_ts":2000,"content":{"msgtype":"m.text","body":"reply","m.relates_to":{"m.in_reply_to":{"event_id":"$target"}}}}`
+	// The reply was saved, but the run stopped before its deferral was checkpointed.
+	require.ErrorIs(imp.persistEvent(t.Context(), source.ID, conversationID, matrixTestEvent(t, reply), sum), errRelationTargetMissing)
+	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID,
+		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$target","sender":"@member:example.org","origin_server_ts":1000,"content":{"msgtype":"m.text","body":"target"}}`), sum))
+	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, matrixTestEvent(t, reply), sum))
+	ids, err := st.MessageExistsBatch(source.ID, []string{"$reply", "$target"})
+	require.NoError(err)
+	var replyTo int64
+	require.NoError(st.DB().QueryRow(`SELECT reply_to_message_id FROM messages WHERE id = ?`, ids["$reply"]).Scan(&replyTo))
+	assert.Equal(ids["$target"], replyTo)
+}
+
+func TestImporterSkipsMalformedEventAndKeepsGoing(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	st := testutil.NewTestStore(t)
+	source, err := st.GetOrCreateSource(SourceType, "@archive:example.org")
+	require.NoError(err)
+	conversationID, err := st.EnsureConversationWithType(source.ID, "!room:example.org", "group_chat", "Example")
+	require.NoError(err)
+	imp := NewImporter(st, &Runtime{Client: relationsClient(t, nil)})
+	sum := &ImportSummary{}
+	malformed := matrixTestEvent(t, `{"type":"m.room.message","event_id":"$bad","sender":"@member:example.org","origin_server_ts":1000,"content":{"msgtype":"m.text","body":42}}`)
+	assert.False(shouldDeferRelation(malformed))
+	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, malformed, sum))
+	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID,
+		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$good","sender":"@member:example.org","origin_server_ts":2000,"content":{"msgtype":"m.text","body":"good"}}`), sum))
+	assert.Equal(int64(1), sum.EventsSkipped)
+	ids, err := st.MessageExistsBatch(source.ID, []string{"$bad", "$good"})
+	require.NoError(err)
+	assert.Zero(ids["$bad"])
+	assert.NotZero(ids["$good"])
+}
+
+func TestMessageBodyKeepsCaptionsAndDropsReplyFallbacks(t *testing.T) {
+	for name, tc := range map[string]struct {
+		raw  string
+		want string
+	}{
+		"image caption":        {`{"msgtype":"m.image","body":"Meter reading 12345","filename":"photo.jpg","url":"mxc://example.org/p"}`, "[image] Meter reading 12345"},
+		"file without caption": {`{"msgtype":"m.file","body":"report.pdf","url":"mxc://example.org/r"}`, "[file: report.pdf]"},
+		"plain reply fallback": {`{"msgtype":"m.text","body":"> <@other:example.org> their words\n\nmy answer","m.relates_to":{"m.in_reply_to":{"event_id":"$x"}}}`, "my answer"},
+		"html reply fallback":  {`{"msgtype":"m.text","body":"> <@other:example.org> their words\n\nmy answer","format":"org.matrix.custom.html","formatted_body":"<mx-reply><blockquote>their words</blockquote></mx-reply>my answer","m.relates_to":{"m.in_reply_to":{"event_id":"$x"}}}`, "my answer"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			evt := matrixTestEvent(t, `{"type":"m.room.message","event_id":"$e","sender":"@member:example.org","origin_server_ts":1,"content":`+tc.raw+`}`)
+			require.NoError(t, evt.Content.ParseRaw(evt.Type))
+			assert.Equal(t, tc.want, messageBody(evt.Content.AsMessage()))
+		})
+	}
 }

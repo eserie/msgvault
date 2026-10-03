@@ -16,7 +16,7 @@ func TestHomeserverURLRequiresHTTPSExceptLoopback(t *testing.T) {
 			require.NoError(t, validateHomeserverURL(raw))
 		})
 	}
-	for _, raw := range []string{"http://matrix.example.test", "ftp://matrix.example.test", "not a URL"} {
+	for _, raw := range []string{"http://matrix.example.test", "ftp://matrix.example.test", "ftp://localhost:8008", "not a URL"} {
 		t.Run(raw, func(t *testing.T) {
 			require.Error(t, validateHomeserverURL(raw))
 		})
@@ -85,27 +85,6 @@ func TestLoginRejectsDifferentReturnedUser(t *testing.T) {
 	_, err := Login(t.Context(), server.URL, "@archive:example.org", "password", false)
 	require.ErrorContains(t, err, "returned user @other:example.org")
 	assert.Equal(1, logoutCalls)
-}
-
-func TestLoginReturnsDifferentUserCredentialWhenCleanupFails(t *testing.T) {
-	require := require.New(t)
-	assert := assert.New(t)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/_matrix/client/v3/logout" {
-			http.Error(w, "temporary failure", http.StatusServiceUnavailable)
-			return
-		}
-		_, _ = w.Write([]byte(`{"access_token":"secret","device_id":"DEVICE3","user_id":"@other:example.org"}`))
-	}))
-	defer server.Close()
-
-	creds, err := Login(t.Context(), server.URL, "@archive:example.org", "password", false)
-
-	require.ErrorContains(err, "returned user @other:example.org")
-	require.ErrorContains(err, "logout Matrix device DEVICE3")
-	assert.Equal("@other:example.org", creds.UserID)
-	assert.Equal("DEVICE3", creds.DeviceID)
-	assert.Equal("secret", creds.AccessToken)
 }
 
 func TestLogoutDeletesDedicatedDevice(t *testing.T) {

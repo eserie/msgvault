@@ -4399,6 +4399,9 @@ func (s *Store) MergeParticipants(oldID, newID int64) error {
 		}
 		// Drop old rows that would collide with an existing row of the new
 		// participant, then repoint the remainder.
+		if err := repointReactionSourceEvents(context.Background(), tx, oldID, newID); err != nil {
+			return err
+		}
 		if _, err := tx.Exec(`
 			DELETE FROM reactions WHERE participant_id = ? AND EXISTS (
 				SELECT 1 FROM reactions r2 WHERE r2.message_id = reactions.message_id
@@ -5531,16 +5534,16 @@ func (s *Store) UpsertReaction(messageID, participantID int64, reactionType, rea
 	return write(s.db)
 }
 
-// UpsertReactionWithSourceID archives a provider reaction identity so a later
-// provider redaction can remove the exact reaction without scanning messages.
+// UpsertReactionWithSourceID inserts a reaction and records the provider event
+// that produced it, so a later provider redaction can remove it by event ID.
 func (s *Store) UpsertReactionWithSourceID(messageID, participantID int64, reactionType, reactionValue, sourceReactionID string, createdAt time.Time) error {
 	write := func(q querier) error {
 		if err := s.requireSyncMessageSourceTx(q, messageID); err != nil {
 			return err
 		}
 		if _, err := q.Exec(s.dialect.InsertOrIgnore(`INSERT OR IGNORE INTO reactions
-			(message_id, participant_id, reaction_type, reaction_value, source_reaction_id, created_at)
-			VALUES (?, ?, ?, ?, ?, ?)`), messageID, participantID, reactionType, reactionValue, sourceReactionID, createdAt); err != nil {
+			(message_id, participant_id, reaction_type, reaction_value, created_at)
+			VALUES (?, ?, ?, ?, ?)`), messageID, participantID, reactionType, reactionValue, createdAt); err != nil {
 			return err
 		}
 		_, err := q.Exec(s.dialect.InsertOrIgnore(`INSERT OR IGNORE INTO reaction_source_events
@@ -5551,72 +5554,80 @@ func (s *Store) UpsertReactionWithSourceID(messageID, participantID int64, react
 			WHERE r.message_id = ? AND r.participant_id = ?
 			  AND r.reaction_type = ? AND r.reaction_value = ?`),
 			sourceReactionID, messageID, participantID, reactionType, reactionValue)
-		if err != nil {
-			return err
-		}
-		_, err = q.Exec(`UPDATE reactions SET source_reaction_id = NULL
-			WHERE message_id = ? AND participant_id = ?
-			  AND reaction_type = ? AND reaction_value = ?`,
-			messageID, participantID, reactionType, reactionValue)
 		return err
 	}
-	if s.syncGeneration != nil {
-		return s.withTx(func(tx *loggedTx) error { return write(tx) })
-	}
-	return write(s.db)
+	return s.withTx(func(tx *loggedTx) error { return write(tx) })
 }
 
-// DeleteReactionBySourceID removes a provider reaction scoped to one source.
-func (s *Store) DeleteReactionBySourceID(sourceID int64, sourceReactionID string) (bool, error) {
+// DeleteReactionBySourceID forgets one provider reaction event in a
+// conversation and removes the visible reaction once no event backs it.
+func (s *Store) DeleteReactionBySourceID(sourceID, conversationID int64, sourceReactionID string) (bool, error) {
 	deleted := false
 	err := s.withSyncSourceWriteContext(context.Background(), sourceID, func(q querier) error {
 		var reactionID int64
-		err := q.QueryRow(`SELECT reaction_id FROM reaction_source_events
-			WHERE source_id = ? AND source_reaction_id = ?`, sourceID, sourceReactionID).Scan(&reactionID)
-		if err == nil {
-			result, deleteErr := q.Exec(`DELETE FROM reaction_source_events
-				WHERE source_id = ? AND source_reaction_id = ?`, sourceID, sourceReactionID)
-			if deleteErr != nil {
-				return deleteErr
-			}
-			rows, rowsErr := result.RowsAffected()
-			if rowsErr != nil {
-				return rowsErr
-			}
-			deleted = rows > 0
-			if _, deleteErr = q.Exec(`DELETE FROM reactions
-				WHERE id = ? AND NOT EXISTS (
-					SELECT 1 FROM reaction_source_events WHERE reaction_id = ?
-				)`, reactionID, reactionID); deleteErr != nil {
-				return deleteErr
-			}
+		err := q.QueryRow(`SELECT rse.reaction_id FROM reaction_source_events rse
+			JOIN reactions r ON r.id = rse.reaction_id
+			JOIN messages m ON m.id = r.message_id
+			WHERE rse.source_id = ? AND rse.source_reaction_id = ? AND m.conversation_id = ?`,
+			sourceID, sourceReactionID, conversationID).Scan(&reactionID)
+		if errors.Is(err, sql.ErrNoRows) {
 			return nil
 		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return err
-		}
-
-		// Legacy rows are retained for archives created before the identity map.
-		// The explicit predicate matches the partial legacy index on SQLite.
-		result, err := q.Exec(`DELETE FROM reactions
-			WHERE source_reaction_id = ?
-			  AND source_reaction_id IS NOT NULL AND source_reaction_id != ''
-			  AND NOT EXISTS (
-				SELECT 1 FROM reaction_source_events rse
-				WHERE rse.reaction_id = reactions.id
-			  )
-			  AND EXISTS (
-				SELECT 1 FROM messages m
-				WHERE m.id = reactions.message_id AND m.source_id = ?
-			  )`, sourceReactionID, sourceID)
 		if err != nil {
 			return err
 		}
-		rows, err := result.RowsAffected()
-		deleted = rows > 0
+		if _, err := q.Exec(`DELETE FROM reaction_source_events
+			WHERE source_id = ? AND source_reaction_id = ?`, sourceID, sourceReactionID); err != nil {
+			return err
+		}
+		deleted = true
+		_, err = q.Exec(`DELETE FROM reactions
+			WHERE id = ? AND NOT EXISTS (
+				SELECT 1 FROM reaction_source_events WHERE reaction_id = ?
+			)`, reactionID, reactionID)
 		return err
 	})
 	return deleted, err
+}
+
+// repointReactionSourceEvents moves provider reaction event IDs from the
+// absorbed participant's duplicate reactions to the surviving ones, before a
+// participant merge deletes the duplicates.
+func repointReactionSourceEvents(ctx context.Context, tx *loggedTx, loser, winner int64) error {
+	_, err := tx.ExecContext(ctx, `UPDATE reaction_source_events SET reaction_id = (
+			SELECT r2.id FROM reactions r1 JOIN reactions r2
+			  ON r2.message_id = r1.message_id AND r2.participant_id = ?
+			 AND r2.reaction_type = r1.reaction_type AND r2.reaction_value = r1.reaction_value
+			WHERE r1.id = reaction_source_events.reaction_id)
+		WHERE reaction_id IN (
+			SELECT r1.id FROM reactions r1 JOIN reactions r2
+			  ON r2.message_id = r1.message_id AND r2.participant_id = ?
+			 AND r2.reaction_type = r1.reaction_type AND r2.reaction_value = r1.reaction_value
+			WHERE r1.participant_id = ?)`, winner, winner, loser)
+	if err != nil {
+		return fmt.Errorf("repoint reaction source events (loser=%d, winner=%d): %w", loser, winner, err)
+	}
+	return nil
+}
+
+// MessageIDByMetadataValue finds a message in a conversation whose top-level
+// metadata key holds value, or returns 0.
+func (s *Store) MessageIDByMetadataValue(conversationID int64, key, value string) (int64, error) {
+	field := "json_extract(metadata, '$.' || ?)"
+	if s.IsPostgreSQL() {
+		field = "metadata ->> CAST(? AS TEXT)"
+	}
+	var messageID int64
+	err := s.db.QueryRow(`SELECT id FROM messages
+		WHERE conversation_id = ? AND `+field+` = ?
+		ORDER BY id LIMIT 1`, conversationID, key, value).Scan(&messageID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("find message by metadata %s: %w", key, err)
+	}
+	return messageID, nil
 }
 
 type ReactionRef struct {
@@ -6136,32 +6147,12 @@ func (s *Store) ScanArchivedRawMessagesForConversation(
 func (s *Store) UpdateMessageDerivedText(
 	messageID int64, bodyText, bodyHTML, snippet sql.NullString, fts FTSDoc,
 ) error {
-	return s.updateMessageDerivedText(messageID, bodyText, bodyHTML, snippet, fts, nil)
-}
-
-// UpdateMessageDerivedTextAndSize also replaces the provider-derived payload
-// size in the same transaction as the displayed text and search document.
-func (s *Store) UpdateMessageDerivedTextAndSize(
-	messageID int64, bodyText, bodyHTML, snippet sql.NullString, fts FTSDoc, sizeEstimate int64,
-) error {
-	return s.updateMessageDerivedText(messageID, bodyText, bodyHTML, snippet, fts, &sizeEstimate)
-}
-
-func (s *Store) updateMessageDerivedText(
-	messageID int64, bodyText, bodyHTML, snippet sql.NullString, fts FTSDoc, sizeEstimate *int64,
-) error {
 	fts.MessageID = messageID
 	return s.withTx(func(tx *loggedTx) error {
 		if err := upsertMessageBody(tx, s.dialect, s.fts5Available, messageID, bodyText, bodyHTML); err != nil {
 			return fmt.Errorf("update derived message body: %w", err)
 		}
-		query := `UPDATE messages SET snippet = ? WHERE id = ?`
-		args := []any{snippet, messageID}
-		if sizeEstimate != nil {
-			query = `UPDATE messages SET snippet = ?, size_estimate = ? WHERE id = ?`
-			args = []any{snippet, *sizeEstimate, messageID}
-		}
-		if _, err := tx.Exec(query, args...); err != nil {
+		if _, err := tx.Exec(`UPDATE messages SET snippet = ? WHERE id = ?`, snippet, messageID); err != nil {
 			return fmt.Errorf("update derived message snippet: %w", err)
 		}
 		if s.fts5Available {

@@ -29,16 +29,12 @@ const (
 var errRelationTargetMissing = errors.New("matrix relation target is not archived yet")
 
 type RoomState struct {
-	Backfilled            bool     `json:"backfilled,omitzero"`
-	PrevBatch             string   `json:"prev_batch,omitempty"`
-	GapBatch              string   `json:"gap_batch,omitempty"`
-	LegacyGapBridge       bool     `json:"legacy_gap_bridge,omitzero"`
-	GapBoundaryReached    bool     `json:"gap_boundary_reached,omitzero"`
-	GapPendingRelationIDs []string `json:"gap_pending_relation_ids,omitempty"`
-	GapBoundaryIDs        []string `json:"gap_boundary_ids,omitempty"`
-	PendingBoundaryIDs    []string `json:"pending_boundary_ids,omitempty"`
-	BoundaryEventIDs      []string `json:"boundary_event_ids,omitempty"`
-	DeferredRelations     []string `json:"deferred_relations,omitempty"`
+	Backfilled bool   `json:"backfilled,omitzero"`
+	PrevBatch  string `json:"prev_batch,omitempty"`
+	// SyncedTo is the /sync next_batch through which this room's timeline is
+	// archived; it stops the next gap walk.
+	SyncedTo          string   `json:"synced_to,omitempty"`
+	DeferredRelations []string `json:"deferred_relations,omitempty"`
 }
 
 type SyncState struct {
@@ -167,7 +163,7 @@ func (imp *Importer) Import(ctx context.Context, opts ImportOptions) (sum *Impor
 	slices.Sort(roomIDs)
 	for _, roomID := range roomIDs {
 		room := resp.Rooms.Join[roomID]
-		if err = imp.importRoom(ctx, source.ID, syncID, roomID, room, directRooms[roomID], state, opts, sum); err != nil {
+		if err = imp.importRoom(ctx, source.ID, syncID, roomID, room, resp.NextBatch, directRooms[roomID], state, opts, sum); err != nil {
 			return sum, err
 		}
 	}
@@ -223,16 +219,17 @@ func (imp *Importer) directRooms(ctx context.Context) (map[id.RoomID]bool, error
 	return out, nil
 }
 
-func (imp *Importer) importRoom(ctx context.Context, sourceID, syncID int64, roomID id.RoomID, room *mautrix.SyncJoinedRoom, direct bool, state *SyncState, opts ImportOptions, sum *ImportSummary) error {
+func (imp *Importer) importRoom(ctx context.Context, sourceID, syncID int64, roomID id.RoomID, room *mautrix.SyncJoinedRoom, nextBatch string, direct bool, state *SyncState, opts ImportOptions, sum *ImportSummary) error {
 	rs := state.Rooms[roomID.String()]
 	hadRoomState := rs != nil
-	wasBackfilled := rs != nil && rs.Backfilled
+	gapTo := ""
 	if rs == nil || opts.Full {
-		rs = &RoomState{
-			PrevBatch:        room.Timeline.PrevBatch,
-			BoundaryEventIDs: matrixEventIDs(room.Timeline.Events),
-		}
+		// SyncedTo is set before the first checkpoint so an interruption still
+		// bounds the next run's gap walk.
+		rs = &RoomState{PrevBatch: room.Timeline.PrevBatch, SyncedTo: nextBatch}
 		state.Rooms[roomID.String()] = rs
+	} else {
+		gapTo = rs.SyncedTo
 	}
 	roomType := "group_chat"
 	if direct {
@@ -331,11 +328,7 @@ func (imp *Importer) importRoom(ctx context.Context, sourceID, syncID int64, roo
 				return err
 			}
 		}
-		deferRelation, deferErr := shouldDeferRelation(evt)
-		if deferErr != nil {
-			return deferErr
-		}
-		if deferRelation {
+		if shouldDeferRelation(evt) {
 			return rememberDeferred(evt)
 		}
 		return persist(evt)
@@ -350,93 +343,23 @@ func (imp *Importer) importRoom(ctx context.Context, sourceID, syncID int64, roo
 	if err := imp.checkpoint(syncID, state, sum); err != nil {
 		return err
 	}
-	boundary := stringSet(rs.BoundaryEventIDs)
-	boundaryVisible := containsMatrixEventID(room.Timeline.Events, boundary)
-	bridgeInterruptedBackfill := hadRoomState && !wasBackfilled && !opts.Full && !boundaryVisible
-	fillIncrementalGap := wasBackfilled && !opts.Full && room.Timeline.Limited && !boundaryVisible
-	resumeGap := rs.GapBatch != ""
-	legacyGapResume := resumeGap && (rs.LegacyGapBridge || len(rs.GapBoundaryIDs) == 0)
-	if resumeGap || bridgeInterruptedBackfill || fillIncrementalGap {
-		if legacyGapResume {
-			rs.LegacyGapBridge = true
-			if len(rs.GapBoundaryIDs) == 0 {
-				rs.GapBoundaryIDs = slices.Clone(rs.BoundaryEventIDs)
-			}
-			if err := imp.checkpoint(syncID, state, sum); err != nil {
-				return err
-			}
-		}
-		if !resumeGap {
-			rs.GapBatch = room.Timeline.PrevBatch
-			rs.GapBoundaryIDs = slices.Clone(rs.BoundaryEventIDs)
-			rs.PendingBoundaryIDs = matrixEventIDs(room.Timeline.Events)
-			if err := imp.checkpoint(syncID, state, sum); err != nil {
-				return err
-			}
-		}
-		if err := imp.fillTimelineGap(ctx, syncID, roomID, rs, stringSet(rs.GapBoundaryIDs), state, sum, ingest); err != nil {
+	saveProgress := func(string) error { return imp.checkpoint(syncID, state, sum) }
+	if gapTo != "" && room.Timeline.Limited {
+		// The previous sync token stops the walk where this room's archive ends.
+		if err := imp.paginate(ctx, roomID, room.Timeline.PrevBatch, gapTo, ingest, saveProgress); err != nil {
 			return err
 		}
-		if resumeGap && len(rs.PendingBoundaryIDs) > 0 {
-			completedBoundary := slices.Clone(rs.PendingBoundaryIDs)
-			rs.BoundaryEventIDs = completedBoundary
-			rs.GapBoundaryIDs = nil
-			rs.PendingBoundaryIDs = nil
-			if err := imp.checkpoint(syncID, state, sum); err != nil {
-				return err
-			}
-			if !containsMatrixEventID(room.Timeline.Events, stringSet(completedBoundary)) {
-				rs.GapBatch = room.Timeline.PrevBatch
-				rs.GapBoundaryIDs = completedBoundary
-				rs.PendingBoundaryIDs = matrixEventIDs(room.Timeline.Events)
-				if err := imp.checkpoint(syncID, state, sum); err != nil {
-					return err
-				}
-				if err := imp.fillTimelineGap(ctx, syncID, roomID, rs, stringSet(rs.GapBoundaryIDs), state, sum, ingest); err != nil {
-					return err
-				}
-			}
-		}
-		if legacyGapResume && !containsMatrixEventID(room.Timeline.Events, boundary) {
-			rs.LegacyGapBridge = false
-			if err := imp.checkpoint(syncID, state, sum); err != nil {
-				return err
-			}
-			rs.GapBatch = room.Timeline.PrevBatch
-			rs.GapBoundaryIDs = slices.Clone(rs.BoundaryEventIDs)
-			rs.PendingBoundaryIDs = matrixEventIDs(room.Timeline.Events)
-			if err := imp.checkpoint(syncID, state, sum); err != nil {
-				return err
-			}
-			if err := imp.fillTimelineGap(ctx, syncID, roomID, rs, boundary, state, sum, ingest); err != nil {
-				return err
-			}
-		}
-		rs.GapBoundaryIDs = nil
-		rs.PendingBoundaryIDs = nil
-		rs.LegacyGapBridge = false
+	}
+	rs.SyncedTo = nextBatch
+	if err := imp.checkpoint(syncID, state, sum); err != nil {
+		return err
 	}
 	if !rs.Backfilled {
-		cursor := rs.PrevBatch
-		for cursor != "" {
-			previousCursor := cursor
-			page, pageErr := imp.runtime.Client.Messages(ctx, roomID, cursor, "", mautrix.DirectionBackward, nil, pageSize)
-			if pageErr != nil {
-				return fmt.Errorf("backfill Matrix room %s: %w", roomID, pageErr)
-			}
-			for _, evt := range slices.Backward(page.Chunk) {
-				if err := ingest(evt); err != nil {
-					return err
-				}
-			}
-			cursor = page.End
-			rs.PrevBatch = cursor
-			if err := imp.checkpoint(syncID, state, sum); err != nil {
-				return err
-			}
-			if cursor == "" || cursor == previousCursor {
-				break
-			}
+		if err := imp.paginate(ctx, roomID, rs.PrevBatch, "", ingest, func(end string) error {
+			rs.PrevBatch = end
+			return saveProgress(end)
+		}); err != nil {
+			return err
 		}
 	}
 	// /messages walks from new to old, so a relation may arrive before its
@@ -451,7 +374,8 @@ func (imp *Importer) importRoom(ctx context.Context, sourceID, syncID int64, roo
 		}
 		return strings.Compare(a.ID.String(), b.ID.String())
 	})
-	remainingDeferred := make([]*event.Event, 0)
+	// History is complete here, so a relation whose target is still missing
+	// points at something never archived and is dropped.
 	for _, evt := range deferred {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -459,25 +383,13 @@ func (imp *Importer) importRoom(ctx context.Context, sourceID, syncID int64, roo
 		if err := imp.replayDeferredRelation(ctx, sourceID, convID, evt, sum); err != nil {
 			if errors.Is(err, errRelationTargetMissing) {
 				sum.RelationsUnresolved++
-				remainingDeferred = append(remainingDeferred, evt)
 				continue
 			}
 			return err
 		}
 	}
 	rs.Backfilled = true
-	rs.GapBatch = ""
-	rs.DeferredRelations = rs.DeferredRelations[:0]
-	for _, evt := range remainingDeferred {
-		raw, marshalErr := json.Marshal(evt, json.Deterministic(true))
-		if marshalErr != nil {
-			return fmt.Errorf("encode unresolved Matrix relation %s: %w", evt.ID, marshalErr)
-		}
-		rs.DeferredRelations = append(rs.DeferredRelations, string(raw))
-	}
-	if boundaryIDs := matrixEventIDs(room.Timeline.Events); len(boundaryIDs) > 0 {
-		rs.BoundaryEventIDs = boundaryIDs
-	}
+	rs.DeferredRelations = nil
 	sum.RoomsProcessed++
 	if opts.Progress != nil {
 		opts.Progress(fmt.Sprintf("%s: %d members", roomID, len(members)))
@@ -494,13 +406,9 @@ func relationReplayPriority(evt *event.Event) int {
 
 func (imp *Importer) replayDeferredRelation(ctx context.Context, sourceID, convID int64, evt *event.Event, sum *ImportSummary) error {
 	if evt != nil && (evt.Type == event.EventMessage || evt.Type == event.EventSticker) {
-		if evt.Content.Parsed == nil {
-			if err := evt.Content.ParseRaw(evt.Type); errors.Is(err, event.ErrUnsupportedContentType) {
-				sum.EventsSkipped++
-				return nil
-			} else if err != nil {
-				return fmt.Errorf("parse deferred Matrix event %s (%s): %w", evt.ID, evt.Type.Type, err)
-			}
+		if !parseContent(evt) {
+			sum.EventsSkipped++
+			return nil
 		}
 		content := evt.Content.AsMessage()
 		if content.RelatesTo.GetReplaceID() == "" && content.RelatesTo.GetReplyTo() != "" {
@@ -529,113 +437,59 @@ func (imp *Importer) resolveDeferredReply(ctx context.Context, sourceID, convID 
 	return imp.store.SetMessageReplyContext(ctx, messageID, targetID)
 }
 
-func (imp *Importer) fillTimelineGap(
-	ctx context.Context,
-	syncID int64,
-	roomID id.RoomID,
-	rs *RoomState,
-	boundary map[string]struct{},
-	state *SyncState,
-	sum *ImportSummary,
-	persist func(*event.Event) error,
-) error {
-	cursor := rs.GapBatch
-	relationBoundaries := make(map[string]struct{})
-	if rs.GapBoundaryReached {
-		for _, eventID := range rs.GapPendingRelationIDs {
-			relationBoundaries[eventID] = struct{}{}
-		}
-	} else {
-		deferred, err := decodeDeferredRelations(rs.DeferredRelations)
+// paginate walks room history backward from `from`, stopping at `to` when set.
+func (imp *Importer) paginate(ctx context.Context, roomID id.RoomID, from, to string, ingest func(*event.Event) error, saved func(end string) error) error {
+	for from != "" {
+		page, err := imp.runtime.Client.Messages(ctx, roomID, from, to, mautrix.DirectionBackward, nil, pageSize)
 		if err != nil {
-			return err
+			return fmt.Errorf("read Matrix room %s history: %w", roomID, err)
 		}
-		for _, evt := range deferred {
-			if _, isBoundary := boundary[evt.ID.String()]; isBoundary {
-				relationBoundaries[evt.ID.String()] = struct{}{}
-			}
-		}
-	}
-	reachedBoundary := rs.GapBoundaryReached
-	for cursor != "" {
-		previousCursor := cursor
-		page, err := imp.runtime.Client.Messages(ctx, roomID, cursor, "", mautrix.DirectionBackward, nil, pageSize)
-		if err != nil {
-			return fmt.Errorf("fill Matrix timeline gap in room %s: %w", roomID, err)
-		}
-		beforeBoundary := len(page.Chunk)
-		var strippedBoundaries []*event.Event
-		for i, evt := range page.Chunk {
-			if evt != nil {
-				if _, isBoundary := boundary[evt.ID.String()]; isBoundary {
-					if !reachedBoundary && beforeBoundary == len(page.Chunk) {
-						beforeBoundary = i
-					}
-					if _, isRelationBoundary := relationBoundaries[evt.ID.String()]; isRelationBoundary && evt.Unsigned.RedactedBecause != nil {
-						strippedBoundaries = append(strippedBoundaries, evt)
-					}
-					delete(relationBoundaries, evt.ID.String())
-				}
-			}
-		}
-		for _, strippedBoundary := range strippedBoundaries {
-			if err := persist(strippedBoundary); err != nil {
+		for _, evt := range slices.Backward(page.Chunk) {
+			if err := ingest(evt); err != nil {
 				return err
 			}
 		}
-		if !reachedBoundary {
-			for i := beforeBoundary - 1; i >= 0; i-- {
-				if err := persist(page.Chunk[i]); err != nil {
-					return err
-				}
-			}
-			reachedBoundary = beforeBoundary < len(page.Chunk)
+		// An empty page with an end token can still precede older history.
+		if page.End == "" || page.End == from {
+			return saved("")
 		}
-		cursor = page.End
-		rs.GapBatch = cursor
-		rs.GapBoundaryReached = reachedBoundary
-		rs.GapPendingRelationIDs = sortedStringSet(relationBoundaries)
-		if (reachedBoundary && len(relationBoundaries) == 0) || cursor == "" || cursor == previousCursor {
-			rs.GapBatch = ""
-			rs.GapBoundaryReached = false
-			rs.GapPendingRelationIDs = nil
-			return imp.checkpoint(syncID, state, sum)
-		}
-		if err := imp.checkpoint(syncID, state, sum); err != nil {
+		from = page.End
+		if err := saved(from); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func sortedStringSet(values map[string]struct{}) []string {
-	result := make([]string, 0, len(values))
-	for value := range values {
-		result = append(result, value)
+// parseContent parses evt's content once and reports whether it is usable.
+// Unsupported or malformed payloads are skipped so one bad event cannot stop
+// every later sync.
+func parseContent(evt *event.Event) bool {
+	if evt.Content.Parsed != nil {
+		return true
 	}
-	slices.Sort(result)
-	return result
+	if evt.Content.ParseRaw(evt.Type) != nil {
+		// ParseRaw leaves a partial value behind on failure.
+		evt.Content.Parsed = nil
+		return false
+	}
+	return true
 }
 
-func shouldDeferRelation(evt *event.Event) (bool, error) {
+func shouldDeferRelation(evt *event.Event) bool {
 	if evt == nil {
-		return false, nil
+		return false
 	}
 	switch evt.Type {
 	case event.EventReaction, event.EventRedaction:
-		return true, nil
+		return true
 	case event.EventMessage, event.EventSticker:
-		if evt.Content.Parsed == nil {
-			if err := evt.Content.ParseRaw(evt.Type); errors.Is(err, event.ErrUnsupportedContentType) {
-				return false, nil
-			} else if err != nil {
-				return false, fmt.Errorf("parse Matrix event %s (%s): %w", evt.ID, evt.Type.Type, err)
-			}
+		if !parseContent(evt) {
+			return false
 		}
-		content := evt.Content.AsMessage()
-		return content.RelatesTo != nil && content.RelatesTo.GetReplaceID() != "", nil
+		return evt.Content.AsMessage().RelatesTo.GetReplaceID() != ""
 	default:
-		return false, nil
+		return false
 	}
 }
 
@@ -649,35 +503,6 @@ func decodeDeferredRelations(rawEvents []string) ([]*event.Event, error) {
 		events = append(events, &evt)
 	}
 	return events, nil
-}
-
-func matrixEventIDs(events []*event.Event) []string {
-	ids := make([]string, 0, len(events))
-	for _, evt := range events {
-		if evt != nil && evt.ID != "" {
-			ids = append(ids, evt.ID.String())
-		}
-	}
-	return ids
-}
-
-func stringSet(values []string) map[string]struct{} {
-	out := make(map[string]struct{}, len(values))
-	for _, value := range values {
-		out[value] = struct{}{}
-	}
-	return out
-}
-
-func containsMatrixEventID(events []*event.Event, ids map[string]struct{}) bool {
-	for _, evt := range events {
-		if evt != nil {
-			if _, ok := ids[evt.ID.String()]; ok {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 func (imp *Importer) checkpoint(syncID int64, state *SyncState, sum *ImportSummary) error {
@@ -746,61 +571,28 @@ func (imp *Importer) persistEvent(ctx context.Context, sourceID, convID int64, e
 		return nil
 	}
 	if evt.Unsigned.RedactedBecause != nil {
+		target := evt.ID
 		if evt.Type == event.EventRedaction {
+			// Redacting a redaction does not undo it; apply the original target.
 			redaction := *evt
 			redaction.Unsigned.RedactedBecause = nil
 			if redaction.Content.Parsed == nil {
-				if err := redaction.Content.ParseRaw(redaction.Type); err != nil && !errors.Is(err, event.ErrUnsupportedContentType) {
-					return fmt.Errorf("parse stripped Matrix redaction %s: %w", redaction.ID, err)
-				}
+				_ = redaction.Content.ParseRaw(redaction.Type)
 			}
-			target := redaction.Redacts
+			target = redaction.Redacts
 			if target == "" {
 				target = redaction.Content.AsRedaction().Redacts
 			}
-			if target != "" {
-				if err := imp.persistPlainEvent(ctx, sourceID, convID, &redaction, nil, sum); err != nil {
-					return err
-				}
+			if target == "" {
+				return nil
 			}
 		}
-		messageID, redactedEdit, redactErr := imp.store.RedactMatrixMessageVersion(sourceID, evt.ID.String())
-		if redactErr != nil {
-			return redactErr
-		}
-		if redactedEdit {
-			if err := imp.ensureOriginalMessageVersion(sourceID, messageID); err != nil {
-				return err
-			}
-			if err := imp.applyLatestMessageVersion(messageID); err != nil {
-				return err
-			}
-			return imp.store.MarkMatrixEventRedacted(sourceID, evt.ID.String())
-		}
-		if evt.Type == event.EventReaction {
-			if _, err := imp.store.DeleteReactionBySourceID(sourceID, evt.ID.String()); err != nil {
-				return err
-			}
-			return imp.store.MarkMatrixEventRedacted(sourceID, evt.ID.String())
-		}
-		found, err := imp.store.MessageExistsBatch(sourceID, []string{evt.ID.String()})
-		if err != nil {
-			return err
-		}
-		if found[evt.ID.String()] != 0 {
-			if err := imp.store.MarkMessageDeleted(sourceID, evt.ID.String()); err != nil {
-				return err
-			}
-		}
-		return imp.store.MarkMatrixEventRedacted(sourceID, evt.ID.String())
+		_, err := imp.redact(ctx, sourceID, convID, evt.RoomID, target)
+		return err
 	}
-	if evt.Content.Parsed == nil {
-		if err := evt.Content.ParseRaw(evt.Type); errors.Is(err, event.ErrUnsupportedContentType) {
-			sum.EventsSkipped++
-			return nil
-		} else if err != nil {
-			return fmt.Errorf("parse Matrix event %s (%s): %w", evt.ID, evt.Type.Type, err)
-		}
+	if !parseContent(evt) {
+		sum.EventsSkipped++
+		return nil
 	}
 	raw, err := json.Marshal(evt, json.Deterministic(true))
 	if err != nil {
@@ -817,15 +609,11 @@ func (imp *Importer) persistPlainEvent(ctx context.Context, sourceID, convID int
 	switch evt.Type {
 	case event.EventMessage, event.EventSticker:
 		content := evt.Content.AsMessage()
-		if target := content.RelatesTo.GetReplaceID(); target != "" && content.NewContent != nil {
-			redacted, err := imp.store.IsMatrixEventRedacted(sourceID, evt.ID.String())
-			if err != nil {
-				return err
-			}
-			if redacted {
+		if target := content.RelatesTo.GetReplaceID(); target != "" {
+			if content.NewContent == nil {
 				return nil
 			}
-			return imp.persistEdit(sourceID, convID, evt, raw, target, content.NewContent)
+			return imp.persistEdit(sourceID, convID, evt, target, content.NewContent)
 		}
 		return imp.persistMessage(ctx, sourceID, convID, evt, raw, messageBody(content), content, sum)
 	case event.EventRedaction:
@@ -833,64 +621,43 @@ func (imp *Importer) persistPlainEvent(ctx context.Context, sourceID, convID int
 		if target == "" {
 			target = evt.Content.AsRedaction().Redacts
 		}
-		if target != "" {
-			targetConversationID, owned, lookupErr := imp.store.MatrixEventConversation(sourceID, target.String())
-			if lookupErr != nil {
-				return lookupErr
-			}
-			if owned && targetConversationID != convID {
-				return nil
-			}
-			redacted, redactErr := imp.store.IsMatrixEventRedacted(sourceID, target.String())
-			if redactErr != nil {
-				return redactErr
-			}
-			if redacted {
-				return nil
-			}
-			messageID, redactedEdit, redactErr := imp.store.RedactMatrixMessageVersion(sourceID, target.String())
-			if redactErr != nil {
-				return redactErr
-			}
-			if redactedEdit {
-				if err := imp.ensureOriginalMessageVersion(sourceID, messageID); err != nil {
-					return err
-				}
-				if err := imp.applyLatestMessageVersion(messageID); err != nil {
-					return err
-				}
-				return imp.store.MarkMatrixEventRedacted(sourceID, target.String())
-			}
-			deleted, deleteErr := imp.store.DeleteReactionBySourceID(sourceID, target.String())
-			if deleteErr != nil {
-				return deleteErr
-			}
-			if deleted {
-				return imp.store.MarkMatrixEventRedacted(sourceID, target.String())
-			}
-			found, lookupErr := imp.store.MessageExistsBatch(sourceID, []string{target.String()})
-			if lookupErr != nil {
-				return lookupErr
-			}
-			if found[target.String()] != 0 {
-				if err := imp.store.MarkMessageDeleted(sourceID, target.String()); err != nil {
-					return err
-				}
-				return imp.store.MarkMatrixEventRedacted(sourceID, target.String())
-			}
-			return errRelationTargetMissing
-		}
-	case event.EventReaction:
-		redacted, err := imp.store.IsMatrixEventRedacted(sourceID, evt.ID.String())
-		if err != nil {
-			return err
-		}
-		if redacted {
+		if target == "" {
 			return nil
 		}
+		handled, err := imp.redact(ctx, sourceID, convID, evt.RoomID, target)
+		if err == nil && !handled {
+			return errRelationTargetMissing
+		}
+		return err
+	case event.EventReaction:
 		return imp.persistReaction(sourceID, convID, evt)
 	}
 	return nil
+}
+
+// redact applies a Matrix redaction to whatever archived item the event ID
+// names in this room, and reports whether it found one.
+func (imp *Importer) redact(ctx context.Context, sourceID, convID int64, roomID id.RoomID, target id.EventID) (bool, error) {
+	deleted, err := imp.store.DeleteReactionBySourceID(sourceID, convID, target.String())
+	if err != nil || deleted {
+		return deleted, err
+	}
+	found, err := imp.store.MessageExistsBatch(sourceID, []string{target.String()})
+	if err != nil {
+		return false, err
+	}
+	if messageID := found[target.String()]; messageID != 0 {
+		message, err := imp.store.GetMessageRelationTarget(messageID)
+		if err != nil || message.ConversationID != convID {
+			return true, err
+		}
+		return true, imp.store.MarkMessageDeleted(sourceID, target.String())
+	}
+	messageID, err := imp.store.MessageIDByMetadataValue(convID, editEventKey, target.String())
+	if err != nil || messageID == 0 {
+		return false, err
+	}
+	return true, imp.restoreAfterEditRedaction(ctx, roomID, messageID, target)
 }
 
 func messageBody(content *event.MessageEventContent) string {
@@ -898,8 +665,10 @@ func messageBody(content *event.MessageEventContent) string {
 		return ""
 	}
 	if content.RelatesTo.GetReplyTo() != "" {
+		// A reply's quoted fallback belongs to the message it quotes.
 		withoutFallback := *content
 		withoutFallback.RemoveReplyFallback()
+		withoutFallback.Body = event.TrimReplyFallbackText(withoutFallback.Body)
 		content = &withoutFallback
 	}
 	if content.MsgType.IsText() {
@@ -908,18 +677,23 @@ func messageBody(content *event.MessageEventContent) string {
 		}
 		return textutil.SanitizeTerminalMultiline(content.Body)
 	}
+	var label string
 	switch content.MsgType {
 	case event.MsgImage:
-		return "[image]"
+		label = "[image]"
 	case event.MsgVideo:
-		return "[video]"
+		label = "[video]"
 	case event.MsgAudio:
-		return "[audio]"
+		label = "[audio]"
 	case event.MsgFile:
-		return "[file: " + content.GetFileName() + "]"
+		label = "[file: " + content.GetFileName() + "]"
 	default:
 		return textutil.SanitizeTerminalMultiline(content.Body)
 	}
+	if caption := content.GetCaption(); caption != "" {
+		label += " " + caption
+	}
+	return textutil.SanitizeTerminalMultiline(label)
 }
 
 func (imp *Importer) persistMessage(ctx context.Context, sourceID, convID int64, evt *event.Event, raw []byte, body string, content *event.MessageEventContent, sum *ImportSummary) error {
@@ -949,14 +723,15 @@ func (imp *Importer) persistMessage(ctx context.Context, sourceID, convID int64,
 	if err != nil {
 		return err
 	}
-	displayBody := body
 	if existingID := existing[evt.ID.String()]; existingID != 0 {
-		latest, latestErr := imp.store.LatestMatrixMessageVersion(existingID)
-		if latestErr == nil {
-			displayBody = latest.Body
-		} else if !errors.Is(latestErr, sql.ErrNoRows) {
-			return latestErr
+		// Matrix events never change, so only a reply link may still be missing.
+		if replyToMessageID != 0 {
+			return imp.store.SetMessageReplyContext(ctx, existingID, replyToMessageID)
 		}
+		if replyTargetMissing {
+			return errRelationTargetMissing
+		}
+		return nil
 	}
 	senderID, err := imp.participant(evt.Sender, "")
 	if err != nil {
@@ -967,23 +742,14 @@ func (imp *Importer) persistMessage(ctx context.Context, sourceID, convID int64,
 		ConversationID: convID, SourceID: sourceID, SourceMessageID: evt.ID.String(), MessageType: SourceType,
 		SentAt: sql.NullTime{Time: when, Valid: evt.Timestamp > 0}, ReceivedAt: sql.NullTime{Time: when, Valid: evt.Timestamp > 0},
 		SenderID: sql.NullInt64{Int64: senderID, Valid: senderID != 0}, IsFromMe: evt.Sender == imp.runtime.Client.UserID,
-		Snippet: sql.NullString{String: snippet(displayBody), Valid: displayBody != ""}, SizeEstimate: int64(len(displayBody)),
+		Snippet: sql.NullString{String: snippet(body), Valid: body != ""}, SizeEstimate: int64(len(body)),
 	}
 	messageID, err := imp.store.PersistMessageContext(ctx, &store.MessagePersistData{
-		Message: msg, BodyText: sql.NullString{String: displayBody, Valid: displayBody != ""}, RawMIME: raw, RawFormat: rawFormat,
-		FTS: &store.FTSDoc{Body: displayBody}, PreserveLabels: true,
+		Message: msg, BodyText: sql.NullString{String: body, Valid: body != ""}, RawMIME: raw, RawFormat: rawFormat,
+		FTS: &store.FTSDoc{Body: body}, PreserveLabels: true,
 	})
 	if err != nil {
 		return fmt.Errorf("persist Matrix event %s: %w", evt.ID, err)
-	}
-	if err := imp.store.UpsertMatrixMessageVersion(sourceID, store.MatrixMessageVersion{
-		MessageID: messageID, EventID: evt.ID.String(), EventTS: evt.Timestamp,
-		Body: body, RawEvent: raw, IsOriginal: true,
-	}); err != nil {
-		return err
-	}
-	if err := imp.applyLatestMessageVersion(messageID); err != nil {
-		return err
 	}
 	if replyToMessageID != 0 {
 		if err := imp.store.SetMessageReplyContext(ctx, messageID, replyToMessageID); err != nil {
@@ -991,16 +757,27 @@ func (imp *Importer) persistMessage(ctx context.Context, sourceID, convID int64,
 		}
 	}
 	sum.MessagesProcessed++
-	if existing[evt.ID.String()] == 0 {
-		sum.MessagesAdded++
-	}
+	sum.MessagesAdded++
 	if replyTargetMissing {
 		return errRelationTargetMissing
 	}
 	return nil
 }
 
-func (imp *Importer) persistEdit(sourceID, convID int64, evt *event.Event, raw []byte, target id.EventID, content *event.MessageEventContent) error {
+// editEventKey names the message metadata field holding the applied edit, so
+// a later redaction of that edit can find its message.
+const editEventKey = "matrix_edit_event_id"
+
+type appliedEdit struct {
+	EventID string `json:"matrix_edit_event_id"`
+	TS      int64  `json:"matrix_edit_ts"`
+}
+
+func (e appliedEdit) olderThan(evt *event.Event) bool {
+	return e.EventID == "" || e.TS < evt.Timestamp || (e.TS == evt.Timestamp && e.EventID < evt.ID.String())
+}
+
+func (imp *Importer) persistEdit(sourceID, convID int64, evt *event.Event, target id.EventID, content *event.MessageEventContent) error {
 	found, err := imp.store.MessageExistsBatch(sourceID, []string{target.String()})
 	if err != nil {
 		return err
@@ -1013,61 +790,127 @@ func (imp *Importer) persistEdit(sourceID, convID int64, evt *event.Event, raw [
 	if err != nil {
 		return err
 	}
-	editorID, err := imp.participant(evt.Sender, "")
-	if err != nil {
-		return err
-	}
-	if targetMessage.ConversationID != convID || !targetMessage.SenderID.Valid || targetMessage.SenderID.Int64 != editorID {
+	if targetMessage.ConversationID != convID {
 		return nil
 	}
-	if err := imp.ensureOriginalMessageVersion(sourceID, messageID); err != nil {
-		return err
-	}
-	body := messageBody(content)
-	if err := imp.store.UpsertMatrixMessageVersion(sourceID, store.MatrixMessageVersion{
-		MessageID: messageID, EventID: evt.ID.String(), EventTS: evt.Timestamp, Body: body, RawEvent: raw,
-	}); err != nil {
-		return err
-	}
-	return imp.applyLatestMessageVersion(messageID)
-}
-
-func (imp *Importer) ensureOriginalMessageVersion(sourceID, messageID int64) error {
-	hasOriginal, err := imp.store.HasOriginalMatrixMessageVersion(messageID)
-	if err != nil || hasOriginal {
-		return err
-	}
-	raw, err := imp.store.GetMessageRaw(messageID)
+	original, err := imp.archivedEvent(messageID)
 	if err != nil {
 		return err
+	}
+	if !validReplacement(original, evt) {
+		return nil
+	}
+	current, err := imp.appliedEdit(messageID)
+	if err != nil || !current.olderThan(evt) {
+		return err
+	}
+	return imp.applyEdit(messageID, messageBody(content), appliedEdit{EventID: evt.ID.String(), TS: evt.Timestamp})
+}
+
+// validReplacement applies Matrix's replacement rules: same sender and event
+// type, no state events, no edit of an edit.
+func validReplacement(original, edit *event.Event) bool {
+	if original.Sender != edit.Sender || original.Type != edit.Type || original.StateKey != nil || edit.StateKey != nil {
+		return false
+	}
+	return original.Content.AsMessage().RelatesTo.GetReplaceID() == ""
+}
+
+func (imp *Importer) archivedEvent(messageID int64) (*event.Event, error) {
+	raw, err := imp.store.GetMessageRaw(messageID)
+	if err != nil {
+		return nil, err
 	}
 	var original event.Event
 	if err := json.Unmarshal(raw, &original); err != nil {
-		return fmt.Errorf("decode retained Matrix event %d: %w", messageID, err)
+		return nil, fmt.Errorf("decode archived Matrix event %d: %w", messageID, err)
 	}
 	if original.Content.Parsed == nil {
-		if err := original.Content.ParseRaw(original.Type); err != nil {
-			return fmt.Errorf("parse retained Matrix event %s: %w", original.ID, err)
+		if err := original.Content.ParseRaw(original.Type); err != nil && !errors.Is(err, event.ErrUnsupportedContentType) {
+			return nil, fmt.Errorf("parse archived Matrix event %s: %w", original.ID, err)
 		}
 	}
-	return imp.store.UpsertMatrixMessageVersion(sourceID, store.MatrixMessageVersion{
-		MessageID: messageID, EventID: original.ID.String(), EventTS: original.Timestamp,
-		Body: messageBody(original.Content.AsMessage()), RawEvent: raw, IsOriginal: true,
-	})
+	return &original, nil
 }
 
-func (imp *Importer) applyLatestMessageVersion(messageID int64) error {
-	latest, err := imp.store.LatestMatrixMessageVersion(messageID)
+func (imp *Importer) appliedEdit(messageID int64) (appliedEdit, error) {
+	var edit appliedEdit
+	metadata, err := imp.store.GetMessageMetadata(messageID)
+	if err != nil || !metadata.Valid {
+		return edit, err
+	}
+	if err := json.Unmarshal([]byte(metadata.String), &edit); err != nil {
+		return edit, fmt.Errorf("decode Matrix edit metadata for message %d: %w", messageID, err)
+	}
+	return edit, nil
+}
+
+func (imp *Importer) applyEdit(messageID int64, body string, edit appliedEdit) error {
+	metadata, err := json.Marshal(edit, json.Deterministic(true))
 	if err != nil {
 		return err
 	}
-	body := latest.Body
-	if err := imp.store.UpdateMessageDerivedTextAndSize(messageID,
-		sql.NullString{String: body, Valid: body != ""}, sql.NullString{},
-		sql.NullString{String: snippet(body), Valid: body != ""}, store.FTSDoc{Body: body}, int64(len(body))); err != nil {
+	if err := imp.setBody(messageID, body); err != nil {
 		return err
 	}
-	return imp.store.SetMessageEditedState(messageID, !latest.IsOriginal)
+	if err := imp.store.SetMessageEdited(messageID); err != nil {
+		return err
+	}
+	// The pointer goes last: a resumed run that sees it skips this edit.
+	return imp.store.SetMessageMetadata(messageID, sql.NullString{String: string(metadata), Valid: true})
+}
+
+func (imp *Importer) setBody(messageID int64, body string) error {
+	return imp.store.UpdateMessageDerivedText(messageID,
+		sql.NullString{String: body, Valid: body != ""}, sql.NullString{},
+		sql.NullString{String: snippet(body), Valid: body != ""}, store.FTSDoc{Body: body})
+}
+
+// restoreAfterEditRedaction asks the homeserver for the original's surviving
+// edits and shows the newest one, or the original text when none is left.
+func (imp *Importer) restoreAfterEditRedaction(ctx context.Context, roomID id.RoomID, messageID int64, redacted id.EventID) error {
+	original, err := imp.archivedEvent(messageID)
+	if err != nil {
+		return err
+	}
+	var newest *event.Event
+	var newestContent *event.MessageEventContent
+	from := ""
+	for {
+		page, err := imp.runtime.Client.GetRelations(ctx, roomID, original.ID, &mautrix.ReqGetRelations{RelationType: event.RelReplace, From: from})
+		if err != nil {
+			return fmt.Errorf("list Matrix edits of %s: %w", original.ID, err)
+		}
+		for _, edit := range page.Chunk {
+			if edit == nil || edit.ID == redacted {
+				continue
+			}
+			if edit.Content.Parsed == nil && edit.Content.ParseRaw(edit.Type) != nil {
+				continue
+			}
+			content := edit.Content.AsMessage()
+			if content.NewContent == nil || content.RelatesTo.GetReplaceID() != original.ID || !validReplacement(original, edit) {
+				continue
+			}
+			if newest == nil || (appliedEdit{EventID: newest.ID.String(), TS: newest.Timestamp}).olderThan(edit) {
+				newest, newestContent = edit, content.NewContent
+			}
+		}
+		if page.NextBatch == "" || page.NextBatch == from {
+			break
+		}
+		from = page.NextBatch
+	}
+	if newest != nil {
+		return imp.applyEdit(messageID, messageBody(newestContent), appliedEdit{EventID: newest.ID.String(), TS: newest.Timestamp})
+	}
+	if err := imp.setBody(messageID, messageBody(original.Content.AsMessage())); err != nil {
+		return err
+	}
+	if err := imp.store.SetMessageEditedState(messageID, false); err != nil {
+		return err
+	}
+	return imp.store.SetMessageMetadata(messageID, sql.NullString{})
 }
 
 func (imp *Importer) persistReaction(sourceID, convID int64, evt *event.Event) error {

@@ -86,7 +86,7 @@ func runMatrixSync(ctx context.Context, s *store.Store, cfg *config.Config, acco
 				Rooms: cfg.Matrix.Rooms, ExcludeRooms: cfg.Matrix.ExcludeRooms,
 				Progress: progress,
 			})
-			return errors.Join(importErr, runtime.Close())
+			return importErr
 		})
 		if syncErr != nil {
 			failures = append(failures, fmt.Sprintf("%s: %v", source.Identifier, syncErr))

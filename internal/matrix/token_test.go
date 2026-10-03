@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -58,43 +59,21 @@ func TestCredentialsRoundTripUsesPrivateFile(t *testing.T) {
 	require := require.New(t)
 	dir := t.TempDir()
 	want := Credentials{Homeserver: "https://matrix.example.org", UserID: "@archive:example.org", DeviceID: "DEVICE1", AccessToken: "secret"}
-	exists, err := CredentialsExist(dir, want.UserID)
-	require.NoError(err)
-	assert.False(exists)
 	require.NoError(SaveCredentials(dir, want))
-	exists, err = CredentialsExist(dir, want.UserID)
-	require.NoError(err)
-	assert.True(exists)
 	got, err := LoadCredentials(dir, want.UserID)
 	require.NoError(err)
 	assert.Equal(want, got)
-	info, err := os.Stat(tokenPath(dir, want.UserID))
-	require.NoError(err)
-	assert.Equal(os.FileMode(0o600), info.Mode().Perm())
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(tokenPath(dir, want.UserID))
+		require.NoError(err)
+		assert.Equal(os.FileMode(0o600), info.Mode().Perm())
+	}
 	require.NoError(DeleteCredentials(dir, want.UserID))
 	_, err = os.Stat(tokenPath(dir, want.UserID))
 	require.ErrorIs(err, os.ErrNotExist)
 }
 
-func TestSaveNewCredentialsRemovesPublishedFileAfterReplaceFailure(t *testing.T) {
-	require := require.New(t)
-	dir := t.TempDir()
-	creds := Credentials{Homeserver: "https://matrix.example.org", UserID: "@archive:example.org", DeviceID: "DEVICE1", AccessToken: "secret"}
-	original := secureReplaceCredentials
-	t.Cleanup(func() { secureReplaceCredentials = original })
-	secureReplaceCredentials = func(path string, data []byte, mode os.FileMode) error {
-		require.NoError(os.WriteFile(path, data, mode))
-		return fmt.Errorf("synthetic directory sync failure: %w", atomicfile.ErrPublished)
-	}
-
-	err := SaveNewCredentials(dir, creds)
-	require.ErrorContains(err, "synthetic directory sync failure")
-	_, err = os.Stat(tokenPath(dir, creds.UserID))
-	require.ErrorIs(err, os.ErrNotExist)
-}
-
-func TestSaveCredentialsKeepsPublishedCredentialForCleanupRetry(t *testing.T) {
-	assert := assert.New(t)
+func TestSaveCredentialsKeepsPublishedFileAfterReplaceFailure(t *testing.T) {
 	require := require.New(t)
 	dir := t.TempDir()
 	creds := Credentials{Homeserver: "https://matrix.example.org", UserID: "@archive:example.org", DeviceID: "DEVICE1", AccessToken: "secret"}
@@ -106,10 +85,10 @@ func TestSaveCredentialsKeepsPublishedCredentialForCleanupRetry(t *testing.T) {
 	}
 
 	err := SaveCredentials(dir, creds)
-	require.ErrorContains(err, "synthetic directory sync failure")
-	got, loadErr := LoadCredentials(dir, creds.UserID)
-	require.NoError(loadErr)
-	assert.Equal(creds, got)
+	require.ErrorIs(err, atomicfile.ErrPublished)
+	got, err := LoadCredentials(dir, creds.UserID)
+	require.NoError(err, "the published login is the only one left, so it stays")
+	require.Equal(creds, got)
 }
 
 func TestSaveCredentialsKeepsExistingFileAfterUnpublishedReplaceFailure(t *testing.T) {
@@ -129,4 +108,24 @@ func TestSaveCredentialsKeepsExistingFileAfterUnpublishedReplaceFailure(t *testi
 	data, err := os.ReadFile(path)
 	require.NoError(err)
 	assert.Equal(t, "existing", string(data))
+}
+
+func TestReplaceCredentialsReturnsPreviousDevice(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+	dir := t.TempDir()
+	first := Credentials{Homeserver: "https://matrix.example.org", UserID: "@archive:example.org", DeviceID: "OLD", AccessToken: "revoked"}
+	previous, err := ReplaceCredentials(dir, first)
+	require.NoError(err)
+	assert.Nil(previous)
+
+	second := first
+	second.DeviceID, second.AccessToken = "NEW", "fresh"
+	previous, err = ReplaceCredentials(dir, second)
+	require.NoError(err)
+	require.NotNil(previous)
+	assert.Equal(first, *previous)
+	got, err := LoadCredentials(dir, first.UserID)
+	require.NoError(err)
+	assert.Equal(second, got)
 }

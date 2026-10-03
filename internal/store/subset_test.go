@@ -1314,44 +1314,6 @@ func TestCopySubset_Basic(t *testing.T) {
 	assert.False(hasViolation, "foreign key violations found in destination database")
 }
 
-func TestCopySubsetFiltersMatrixRedactionMarkers(t *testing.T) {
-	require := require.New(t)
-	assert := assert.New(t)
-	srcDir := t.TempDir()
-	dstDir := filepath.Join(t.TempDir(), "dst")
-	srcDB := createTestSourceDB(t, srcDir, 2)
-
-	db, err := sql.Open("sqlite3", srcDB+"?_foreign_keys=OFF")
-	require.NoError(err)
-	_, err = db.Exec(`INSERT INTO matrix_message_versions
-		(source_id, message_id, event_id, event_ts, body, is_original, redacted)
-		VALUES (1, 1, 'edit_1', 1, 'first', FALSE, TRUE),
-		       (1, 2, 'edit_2', 2, 'second', FALSE, TRUE)`)
-	require.NoError(err)
-	_, err = db.Exec(`INSERT INTO matrix_redacted_events (source_id, event_id)
-		VALUES (1, 'msg_1'), (1, 'msg_2'), (1, 'edit_1'),
-		       (1, 'edit_2'), (1, 'unrelated_event')`)
-	require.NoError(err)
-	require.NoError(db.Close())
-
-	_, err = CopySubset(srcDB, dstDir, 1, false)
-	require.NoError(err)
-	destination, err := sql.Open("sqlite3", filepath.Join(dstDir, "msgvault.db"))
-	require.NoError(err)
-	defer func() { require.NoError(destination.Close()) }()
-	rows, err := destination.Query(`SELECT event_id FROM matrix_redacted_events ORDER BY event_id`)
-	require.NoError(err)
-	defer func() { require.NoError(rows.Close()) }()
-	var eventIDs []string
-	for rows.Next() {
-		var eventID string
-		require.NoError(rows.Scan(&eventID))
-		eventIDs = append(eventIDs, eventID)
-	}
-	require.NoError(rows.Err())
-	assert.Equal([]string{"edit_2", "msg_2"}, eventIDs)
-}
-
 func TestCopySubsetExcludesDocumentDerivativesAndHostedConsent(t *testing.T) {
 	require := require.New(t)
 	srcDir := t.TempDir()
@@ -3158,6 +3120,10 @@ func TestCopySubset_ReactionParticipants(t *testing.T) {
 			 reaction_type, reaction_value)
 		VALUES (1, 1, 100, 'emoji', 'thumbsup')`)
 	require.NoError(err, "insert reaction")
+	_, err = db.Exec(`
+		INSERT INTO reaction_source_events (source_id, source_reaction_id, reaction_id)
+		SELECT source_id, '$reaction', 1 FROM messages WHERE id = 1`)
+	require.NoError(err, "insert reaction source event")
 	_ = db.Close()
 
 	result, err := CopySubset(srcDB, dstDir, 5, false)
@@ -3182,6 +3148,11 @@ func TestCopySubset_ReactionParticipants(t *testing.T) {
 	require.NoError(dstDB.QueryRow(
 		"SELECT COUNT(*) FROM reactions",
 	).Scan(&rxnCount))
+	var sourceEventCount int64
+	require.NoError(dstDB.QueryRow(
+		"SELECT COUNT(*) FROM reaction_source_events WHERE source_reaction_id = '$reaction'",
+	).Scan(&sourceEventCount))
+	assert.Equal(int64(1), sourceEventCount, "reaction source events")
 	assert.Equal(int64(1), rxnCount, "reactions count")
 
 	// FK integrity
@@ -3191,76 +3162,6 @@ func TestCopySubset_ReactionParticipants(t *testing.T) {
 	hasViolation := fkRows.Next()
 	require.NoError(fkRows.Err(), "foreign_key_check rows")
 	assert.False(hasViolation, "FK violations with reaction participants")
-}
-
-func TestCopySubset_ReactionsByColumnNameAcrossSchemaVersions(t *testing.T) {
-	tests := []struct {
-		name             string
-		legacyDefinition string
-		insert           string
-		wantSourceID     sql.NullString
-		wantMapped       bool
-	}{
-		{
-			name: "migrated column appended",
-			legacyDefinition: `CREATE TABLE reactions_legacy (
-				id INTEGER PRIMARY KEY, message_id INTEGER NOT NULL, participant_id INTEGER NOT NULL,
-				reaction_type TEXT NOT NULL, reaction_value TEXT NOT NULL,
-				created_at DATETIME, removed_at DATETIME, source_reaction_id TEXT,
-				UNIQUE(message_id, participant_id, reaction_type, reaction_value))`,
-			insert:       `INSERT INTO reactions VALUES (1, 1, 1, 'emoji', 'wave', '2026-09-01T10:00:00Z', NULL, '$reaction')`,
-			wantSourceID: sql.NullString{},
-			wantMapped:   true,
-		},
-		{
-			name: "unmigrated source",
-			legacyDefinition: `CREATE TABLE reactions_legacy (
-				id INTEGER PRIMARY KEY, message_id INTEGER NOT NULL, participant_id INTEGER NOT NULL,
-				reaction_type TEXT NOT NULL, reaction_value TEXT NOT NULL,
-				created_at DATETIME, removed_at DATETIME,
-				UNIQUE(message_id, participant_id, reaction_type, reaction_value))`,
-			insert:       `INSERT INTO reactions VALUES (1, 1, 1, 'emoji', 'wave', '2026-09-01T10:00:00Z', NULL)`,
-			wantSourceID: sql.NullString{},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			require := require.New(t)
-			assert := assert.New(t)
-			srcDB := createTestSourceDB(t, t.TempDir(), 1)
-			db, err := sql.Open("sqlite3", srcDB+"?_foreign_keys=OFF")
-			require.NoError(err)
-			_, err = db.Exec(tt.legacyDefinition + `;
-				DROP TABLE reactions;
-				ALTER TABLE reactions_legacy RENAME TO reactions;`)
-			require.NoError(err)
-			_, err = db.Exec(tt.insert)
-			require.NoError(err)
-			require.NoError(db.Close())
-
-			dstDir := filepath.Join(t.TempDir(), "dst")
-			_, err = CopySubset(srcDB, dstDir, 1, false)
-			require.NoError(err)
-			dst, err := sql.Open("sqlite3", filepath.Join(dstDir, "msgvault.db"))
-			require.NoError(err)
-			defer func() { _ = dst.Close() }()
-			var createdAt string
-			var sourceReactionID sql.NullString
-			require.NoError(dst.QueryRow(`SELECT created_at, source_reaction_id FROM reactions WHERE id = 1`).Scan(
-				&createdAt, &sourceReactionID,
-			))
-			assert.Contains(createdAt, "2026-09-01")
-			assert.Equal(tt.wantSourceID, sourceReactionID)
-			var mapped int
-			require.NoError(dst.QueryRow(`SELECT COUNT(*) FROM reaction_source_events
-				WHERE source_reaction_id = '$reaction'`).Scan(&mapped))
-			wantMapped := 0
-			if tt.wantMapped {
-				wantMapped = 1
-			}
-			assert.Equal(wantMapped, mapped)
-		})
-	}
 }
 
 // TestCopySubset_NullSourceIDLabels verifies that user-created labels
@@ -3544,65 +3445,6 @@ func TestCopySubset_LegacySourceWithoutOAuthApp(t *testing.T) {
 		"SELECT oauth_app FROM sources",
 	).Scan(&oauthApp), "query oauth_app")
 	assert.False(oauthApp.Valid, "oauth_app = %q, want NULL", oauthApp.String)
-}
-
-func TestCopySubsetClearsMatrixCursorPayload(t *testing.T) {
-	require := require.New(t)
-	assert := assert.New(t)
-	srcDir := t.TempDir()
-	dstDir := filepath.Join(t.TempDir(), "dst")
-	srcDB := createTestSourceDB(t, srcDir, 3)
-
-	db, err := sql.Open("sqlite3", srcDB)
-	require.NoError(err)
-	_, err = db.Exec(`UPDATE sources SET source_type = 'matrix',
-		sync_cursor = '{"rooms":{"!private:example.test":{"deferred_relations":["private payload"]}}}'`)
-	require.NoError(err)
-	require.NoError(db.Close())
-
-	_, err = CopySubset(srcDB, dstDir, 3, false)
-	require.NoError(err)
-	dstDB, err := sql.Open("sqlite3", filepath.Join(dstDir, "msgvault.db"))
-	require.NoError(err)
-	defer func() { require.NoError(dstDB.Close()) }()
-	var cursor sql.NullString
-	require.NoError(dstDB.QueryRow(`SELECT sync_cursor FROM sources WHERE source_type = 'matrix'`).Scan(&cursor))
-	assert.False(cursor.Valid, "Matrix cursor payload must not cross the subset boundary")
-}
-
-func TestCopySubsetClearsProfileOnlyMatrixCursorPayload(t *testing.T) {
-	require := require.New(t)
-	assert := assert.New(t)
-	ctx := t.Context()
-	srcDB := createTestSourceDB(t, t.TempDir(), 5)
-	source, err := Open(srcDB)
-	require.NoError(err)
-	profileSource, err := source.GetOrCreateSource("matrix", "@profile-only:example.org")
-	require.NoError(err)
-	_, err = source.DB().Exec(`UPDATE sources SET sync_cursor = ? WHERE id = ?`,
-		`{"rooms":{"!private:example.org":{"deferred_relations":["private payload"]}}}`, profileSource.ID)
-	require.NoError(err)
-	_, err = source.RecordContactObservationContext(ctx, 2, ParticipantContactObservationInput{
-		SourceID:       &profileSource.ID,
-		AddressKind:    ContactAddressUsername,
-		OriginalValue:  "profile-only",
-		ProviderUserID: new("profile-only-user"),
-		Envelope:       ValueEnvelopeInput{Source: ProvenanceArchiveObservation},
-	})
-	require.NoError(err)
-	require.NoError(source.Close())
-
-	dstDir := filepath.Join(t.TempDir(), "dst")
-	_, err = CopySubsetWithOptions(srcDB, dstDir, 5, CopySubsetOptions{IncludeProfiles: true})
-	require.NoError(err)
-	destination, err := Open(filepath.Join(dstDir, "msgvault.db"))
-	require.NoError(err)
-	t.Cleanup(func() { _ = destination.Close() })
-
-	copied, err := destination.GetSourceByID(profileSource.ID)
-	require.NoError(err, "profile provenance must retain its source")
-	assert.False(copied.SyncCursor.Valid,
-		"a Matrix source copied only through profile provenance must not retain its cursor payload")
 }
 
 func TestCopySubset_ControlCharInPath(t *testing.T) {

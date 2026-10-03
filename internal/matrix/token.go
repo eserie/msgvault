@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 
 	"github.com/gofrs/flock"
-	"go.kenn.io/kit/atomicfile"
 	"go.kenn.io/msgvault/internal/fileutil"
 )
 
@@ -57,18 +56,6 @@ func tokenPath(tokensDir, userID string) string {
 
 // SaveCredentials atomically writes credentials to a 0600 file.
 func SaveCredentials(tokensDir string, creds Credentials) error {
-	return saveCredentials(tokensDir, creds, false)
-}
-
-// SaveNewCredentials writes credentials created by add-matrix. A failure
-// reported after publication removes the new file because the caller will log
-// out that fresh device. Updates and cleanup recovery use SaveCredentials so a
-// published access token is never discarded while its device may remain live.
-func SaveNewCredentials(tokensDir string, creds Credentials) error {
-	return saveCredentials(tokensDir, creds, true)
-}
-
-func saveCredentials(tokensDir string, creds Credentials, removePublishedOnError bool) error {
 	if err := fileutil.SecureMkdirAll(tokensDir, 0o700); err != nil {
 		return fmt.Errorf("create tokens dir: %w", err)
 	}
@@ -78,14 +65,6 @@ func saveCredentials(tokensDir string, creds Credentials, removePublishedOnError
 	}
 	path := tokenPath(tokensDir, creds.UserID)
 	if err := secureReplaceCredentials(path, data, 0o600); err != nil {
-		// SecureReplaceFile can report an error after publishing the replacement
-		// (for example, while syncing its directory). Do not leave credentials
-		// behind for a device that add-matrix will log out on this error path.
-		if removePublishedOnError && errors.Is(err, atomicfile.ErrPublished) {
-			if removeErr := os.Remove(path); removeErr != nil && !os.IsNotExist(removeErr) {
-				return fmt.Errorf("write Matrix credentials: %w (remove incomplete credentials: %w)", err, removeErr)
-			}
-		}
 		return fmt.Errorf("write Matrix credentials: %w", err)
 	}
 	return nil
@@ -119,7 +98,7 @@ func DeleteCredentials(tokensDir, userID string) error {
 	return err
 }
 
-// CredentialsExist reports whether an account already has a dedicated device.
+// CredentialsExist reports whether an account has a stored device credential.
 func CredentialsExist(tokensDir, userID string) (bool, error) {
 	_, err := os.Stat(tokenPath(tokensDir, userID))
 	if err == nil {
@@ -129,4 +108,18 @@ func CredentialsExist(tokensDir, userID string) (bool, error) {
 		return false, nil
 	}
 	return false, fmt.Errorf("check Matrix credentials: %w", err)
+}
+
+// ReplaceCredentials saves creds over any earlier login for the same account
+// and returns that earlier device when it differs, so the caller can log it out.
+func ReplaceCredentials(tokensDir string, creds Credentials) (*Credentials, error) {
+	var replaced *Credentials
+	// A missing or unreadable earlier file leaves no device to log out.
+	if previous, err := LoadCredentials(tokensDir, creds.UserID); err == nil && previous.DeviceID != creds.DeviceID {
+		replaced = &previous
+	}
+	if err := SaveCredentials(tokensDir, creds); err != nil {
+		return nil, err
+	}
+	return replaced, nil
 }

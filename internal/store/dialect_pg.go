@@ -663,7 +663,6 @@ func (d *PostgreSQLDialect) LegacyColumnMigrations() []ColumnMigration {
 		{`ALTER TABLE messages ADD COLUMN IF NOT EXISTS deleted_from_source_at TIMESTAMPTZ`, "deleted_from_source_at"},
 		{`ALTER TABLE messages ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ`, "deleted_at"},
 		{`ALTER TABLE messages ADD COLUMN IF NOT EXISTS delete_batch_id TEXT`, "delete_batch_id"},
-		{`ALTER TABLE reactions ADD COLUMN IF NOT EXISTS source_reaction_id TEXT`, "reactions.source_reaction_id"},
 		{`ALTER TABLE conversations ADD COLUMN IF NOT EXISTS title TEXT`, "title"},
 		{`ALTER TABLE conversations ADD COLUMN IF NOT EXISTS conversation_type TEXT NOT NULL DEFAULT 'email_thread'`, "conversation_type"},
 		{`ALTER TABLE labels ADD COLUMN IF NOT EXISTS system_role TEXT`, "labels.system_role"},
@@ -2327,7 +2326,7 @@ var exclusiveLockTables = []string{
 	"sync_runs", "sources", "conversations", "conversation_participants",
 	"messages", "message_recipients", "message_labels", "message_bodies", "message_raw",
 	"meeting_details", "meeting_action_items",
-	"attachments", "document_occurrences", "labels", "participants", "participant_identifiers", "reactions",
+	"attachments", "document_occurrences", "labels", "participants", "participant_identifiers", "reactions", "reaction_source_events",
 	"participant_contact_observations", identityMatchCandidatesTableName, identityMatchCandidateSourcesTableName,
 	identityMatchEvidenceTableName, identityMatchEvidenceSourcesTableName,
 	// persons and person_participants: MergeParticipants (reached from the
