@@ -345,6 +345,9 @@ func TestImporterKeepsNewestEditAndRecomputesAfterRedaction(t *testing.T) {
 	body, err := st.GetMessageBodyText(messageIDs["$original"])
 	require.NoError(err)
 	assert.Equal("newer version", body, "an older edit from a later sync must not win")
+	var sizeEstimate int64
+	require.NoError(st.DB().QueryRow(st.Rebind(`SELECT size_estimate FROM messages WHERE id = ?`), messageIDs["$original"]).Scan(&sizeEstimate))
+	assert.Equal(int64(len("newer version")), sizeEstimate)
 	labelID, err := st.EnsureLabel(source.ID, "local-review", "Local review", "user")
 	require.NoError(err)
 	require.NoError(st.AddMessageLabels(messageIDs["$original"], []int64{labelID}))
@@ -361,6 +364,8 @@ func TestImporterKeepsNewestEditAndRecomputesAfterRedaction(t *testing.T) {
 	body, err = st.GetMessageBodyText(messageIDs["$original"])
 	require.NoError(err)
 	assert.Equal("old", body, "redacting the winning edit selects the latest survivor")
+	require.NoError(st.DB().QueryRow(st.Rebind(`SELECT size_estimate FROM messages WHERE id = ?`), messageIDs["$original"]).Scan(&sizeEstimate))
+	assert.Equal(int64(len("old")), sizeEstimate)
 }
 
 func TestImporterRejectsCrossRoomRelations(t *testing.T) {

@@ -151,3 +151,44 @@ func TestAddMatrixKeepsOldLoginWhenPreviousLogoutFails(t *testing.T) {
 	assert.Equal(old, creds, "the old login stays so revocation can be retried")
 	assert.Equal([]string{"Bearer still-valid", "Bearer fresh"}, loggedOut, "the new device is logged out again")
 }
+
+func TestAddMatrixStopsWhenExistingLoginIsUnreadable(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	var loggedOut []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /_matrix/client/v3/login", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"user_id":"@archive:example.org","device_id":"NEW","access_token":"fresh"}`))
+	})
+	mux.HandleFunc("POST /_matrix/client/v3/logout", func(w http.ResponseWriter, r *http.Request) {
+		loggedOut = append(loggedOut, r.Header.Get("Authorization"))
+		_, _ = w.Write([]byte(`{}`))
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	home := t.TempDir()
+	cfg := &config.Config{HomeDir: home, Data: config.DataConfig{DataDir: home}}
+	require.NoError(matrixsource.SaveCredentials(cfg.TokensDir(), matrixsource.Credentials{
+		Homeserver: server.URL, UserID: "@archive:example.org", DeviceID: "OLD", AccessToken: "old",
+	}))
+	matches, err := filepath.Glob(filepath.Join(cfg.TokensDir(), "matrix_*.json"))
+	require.NoError(err)
+	require.Len(matches, 1)
+	require.NoError(os.WriteFile(matches[0], []byte("not json"), 0o600))
+
+	t.Setenv(daemonCLISubprocessEnv, strconv.Itoa(os.Getppid()))
+	t.Setenv(clirun.EnvMatrixLoginSecret, "password")
+	root := newTestRootCmd()
+	root.AddCommand(newAddMatrixCmd())
+	root.SetArgs([]string{"add-matrix", "--homeserver", server.URL, "--user-id", "@archive:example.org", "--no-default-identity"})
+	root.SetContext(testInvocationContext(t.Context(), cfg, invocationOptions{}))
+	root.SetOut(io.Discard)
+	root.SetErr(io.Discard)
+	require.ErrorContains(root.Execute(), "existing Matrix login")
+
+	data, err := os.ReadFile(matches[0])
+	require.NoError(err)
+	assert.Equal("not json", string(data), "the unreadable file is left for the user to fix")
+	assert.Equal([]string{"Bearer fresh"}, loggedOut, "only the new device is logged out again")
+}

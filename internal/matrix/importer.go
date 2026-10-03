@@ -861,9 +861,12 @@ func (imp *Importer) applyEdit(messageID int64, body string, edit appliedEdit) e
 }
 
 func (imp *Importer) setBody(messageID int64, body string) error {
-	return imp.store.UpdateMessageDerivedText(messageID,
+	if err := imp.store.UpdateMessageDerivedText(messageID,
 		sql.NullString{String: body, Valid: body != ""}, sql.NullString{},
-		sql.NullString{String: snippet(body), Valid: body != ""}, store.FTSDoc{Body: body})
+		sql.NullString{String: snippet(body), Valid: body != ""}, store.FTSDoc{Body: body}); err != nil {
+		return err
+	}
+	return imp.store.SetMessageSizeEstimate(messageID, int64(len(body)))
 }
 
 // restoreAfterEditRedaction asks the homeserver for the original's surviving

@@ -91,12 +91,22 @@ m.login.token from the homeserver login flow and pass --login-token-file.`,
 				}
 				// Revoke the earlier device before its token is replaced, so a failed
 				// logout leaves the old login in place for a retry.
-				if previous, err := matrixsource.LoadCredentials(state.cfg.TokensDir(), creds.UserID); err == nil && previous.DeviceID != creds.DeviceID {
-					logoutCtx, cancel := context.WithTimeout(context.WithoutCancel(cmd.Context()), 10*time.Second)
-					err := matrixsource.Logout(logoutCtx, previous)
-					cancel()
-					if err != nil && !matrixsource.IsUnknownToken(err) {
-						return fmt.Errorf("log out previous Matrix device %s (login unchanged, retry add-matrix): %w", previous.DeviceID, err)
+				exists, err := matrixsource.CredentialsExist(state.cfg.TokensDir(), creds.UserID)
+				if err != nil {
+					return err
+				}
+				if exists {
+					previous, err := matrixsource.LoadCredentials(state.cfg.TokensDir(), creds.UserID)
+					if err != nil {
+						return fmt.Errorf("read the existing Matrix login before replacing it (fix or remove that file, then retry): %w", err)
+					}
+					if previous.DeviceID != creds.DeviceID {
+						logoutCtx, cancel := context.WithTimeout(context.WithoutCancel(cmd.Context()), 10*time.Second)
+						err := matrixsource.Logout(logoutCtx, previous)
+						cancel()
+						if err != nil && !matrixsource.IsUnknownToken(err) {
+							return fmt.Errorf("log out previous Matrix device %s (login unchanged, retry add-matrix): %w", previous.DeviceID, err)
+						}
 					}
 				}
 				if err := matrixsource.SaveCredentials(state.cfg.TokensDir(), creds); err != nil {

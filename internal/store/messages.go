@@ -3009,6 +3009,15 @@ func (s *Store) SetMessageEdited(messageID int64) error {
 	return s.SetMessageEditedState(messageID, true)
 }
 
+// SetMessageSizeEstimate replaces a message's size estimate after an importer
+// changes its displayed text, such as when applying a provider edit.
+func (s *Store) SetMessageSizeEstimate(messageID, sizeEstimate int64) error {
+	return s.withSyncMessageWriteContext(context.Background(), messageID, func(q querier) error {
+		_, err := q.Exec(`UPDATE messages SET size_estimate = ? WHERE id = ?`, sizeEstimate, messageID)
+		return err
+	})
+}
+
 // SetMessageEditedState records whether the source's currently selected
 // message version is an edit.
 func (s *Store) SetMessageEditedState(messageID int64, edited bool) error {
