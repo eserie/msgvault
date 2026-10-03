@@ -1,6 +1,7 @@
 package whatsapp
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json/v2"
@@ -18,6 +19,8 @@ import (
 )
 
 const appleEpochOffset = int64(978307200)
+
+const appleRawFormat = "whatsapp_apple_json"
 
 type appleChat struct {
 	RowID  int64
@@ -88,6 +91,13 @@ func (value *appleTimestampValue) scanString(source string) error {
 	value.Seconds = seconds
 	value.Valid = true
 	return nil
+}
+
+// appleDerivedMessage is one source row derived exactly as a full import
+// writes it, waiting for comparison with the stored copy.
+type appleDerivedMessage struct {
+	stanzaID string
+	data     *store.MessagePersistData
 }
 
 type appleGroupMember struct {
@@ -288,6 +298,7 @@ func (imp *Importer) importApple(
 				break
 			}
 
+			var pending []appleDerivedMessage
 			for _, sourceMessage := range messages {
 				afterRowID = sourceMessage.RowID
 				summary.MessagesProcessed++
@@ -331,36 +342,58 @@ func (imp *Importer) importApple(
 				message := mapAppleMessage(
 					sourceMessage, conversationID, source.ID, senderID,
 				)
-				messageID, err := imp.store.UpsertMessage(&message)
-				if err != nil {
-					return summary, fmt.Errorf("upsert Apple message: %w", err)
-				}
-				if err := imp.store.UpsertMessageBody(
-					messageID, sourceMessage.Text, sql.NullString{},
-				); err != nil {
-					return summary, fmt.Errorf("store Apple message body: %w", err)
-				}
 				rawJSON, err := json.Marshal(sourceMessage, json.Deterministic(true))
 				if err != nil {
 					return summary, fmt.Errorf("encode Apple message raw data: %w", err)
 				}
-				if err := imp.store.UpsertMessageRawWithFormat(
-					messageID, rawJSON, "whatsapp_apple_json",
-				); err != nil {
-					return summary, fmt.Errorf("store Apple message raw data: %w", err)
-				}
-				if err := imp.store.UpsertFTS(
-					messageID, "", sourceMessage.Text.String, senderPhone, "", "",
-				); err != nil {
-					return summary, fmt.Errorf("index Apple message: %w", err)
-				}
+				pending = append(pending, appleDerivedMessage{
+					stanzaID: sourceMessage.StanzaID,
+					data: &store.MessagePersistData{
+						Message:        &message,
+						BodyText:       sourceMessage.Text,
+						RawMIME:        rawJSON,
+						RawFormat:      appleRawFormat,
+						PreserveLabels: true,
+						FTS: &store.FTSDoc{
+							Body:     sourceMessage.Text.String,
+							FromAddr: senderPhone,
+						},
+					},
+				})
+			}
 
-				summary.MessagesAdded++
-				chatAdded++
-				totalAdded++
+			stanzaIDs := make([]string, len(pending))
+			for i, derived := range pending {
+				stanzaIDs[i] = derived.stanzaID
+			}
+			stored, err := imp.store.StoredMessagesContext(
+				ctx, source.ID, appleRawFormat, stanzaIDs,
+			)
+			if err != nil {
+				return summary, fmt.Errorf("load stored Apple messages: %w", err)
+			}
+			for _, derived := range pending {
 				if totalLimit > 0 && totalAdded >= totalLimit {
 					break
 				}
+				if existing, ok := stored[derived.stanzaID]; ok && appleMessageStored(existing, derived.data) {
+					unchanged, err := imp.store.MessageContentMatchesContext(
+						ctx, existing.ID, derived.data.BodyText, *derived.data.FTS,
+					)
+					if err != nil {
+						return summary, fmt.Errorf("compare stored Apple message: %w", err)
+					}
+					if unchanged {
+						summary.MessagesSkipped++
+						continue
+					}
+				}
+				if _, err := imp.store.PersistMessageContext(ctx, derived.data); err != nil {
+					return summary, fmt.Errorf("persist Apple message: %w", err)
+				}
+				summary.MessagesAdded++
+				chatAdded++
+				totalAdded++
 			}
 
 			if err := imp.store.UpdateSyncCheckpoint(syncID, &store.Checkpoint{
@@ -712,6 +745,30 @@ func mapAppleMessage(
 		SizeEstimate:    int64(len(message.Text.String)),
 		ArchivedAt:      time.Now(),
 	}
+}
+
+// appleMessageStored reports whether the stored message columns and raw
+// payload already equal the derived message. Body and search document are
+// checked separately because they need a per-message read.
+func appleMessageStored(stored store.StoredMessage, data *store.MessagePersistData) bool {
+	message := data.Message
+	return stored.ConversationID == message.ConversationID &&
+		stored.SenderID == message.SenderID &&
+		stored.SourceIsFromMe.Valid && stored.SourceIsFromMe.Bool == message.IsFromMe &&
+		stored.MessageType == message.MessageType &&
+		sameAppleInstant(stored.SentAt, message.SentAt) &&
+		sameAppleInstant(stored.InternalDate, message.InternalDate) &&
+		stored.Snippet == message.Snippet &&
+		stored.SizeEstimate == message.SizeEstimate &&
+		bytes.Equal(stored.Raw, data.RawMIME)
+}
+
+// sameAppleInstant ignores differences below the microsecond PostgreSQL keeps.
+func sameAppleInstant(stored, derived sql.NullTime) bool {
+	if stored.Valid != derived.Valid {
+		return false
+	}
+	return !stored.Valid || stored.Time.Sub(derived.Time).Abs() < time.Microsecond
 }
 
 func appleMessageTimestamp(value appleTimestampValue) sql.NullTime {

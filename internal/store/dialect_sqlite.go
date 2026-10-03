@@ -407,6 +407,24 @@ func (d *SQLiteDialect) FTSUpsert(q querier, doc FTSDoc) error {
 	return err
 }
 
+// FTSMatches compares the stored FTS5 columns with doc.
+func (d *SQLiteDialect) FTSMatches(q querier, doc FTSDoc) (bool, error) {
+	var subject, body, fromAddr, toAddrs, ccAddrs sql.NullString
+	err := q.QueryRow(
+		`SELECT subject, body, from_addr, to_addr, cc_addr FROM messages_fts WHERE rowid = ?`,
+		doc.MessageID,
+	).Scan(&subject, &body, &fromAddr, &toAddrs, &ccAddrs)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return subject.String == doc.Subject && body.String == doc.Body &&
+		fromAddr.String == doc.FromAddr && toAddrs.String == doc.ToAddrs &&
+		ccAddrs.String == doc.CcAddrs, nil
+}
+
 // FTSSearchClause returns SQL fragments for FTS5 full-text search.
 //
 // The bm25 weights approximate PostgreSQL's setweight field-priority

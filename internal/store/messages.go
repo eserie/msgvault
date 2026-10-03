@@ -484,6 +484,98 @@ func (s *Store) MessageExistsBatch(sourceID int64, sourceMessageIDs []string) (m
 	return result, nil
 }
 
+// StoredMessage is the stored output of one message, for importers that
+// compare a freshly derived message before rewriting it.
+type StoredMessage struct {
+	ID             int64
+	ConversationID int64
+	SenderID       sql.NullInt64
+	SourceIsFromMe sql.NullBool
+	MessageType    string
+	SentAt         sql.NullTime
+	InternalDate   sql.NullTime
+	Snippet        sql.NullString
+	SizeEstimate   int64
+	// Raw is nil when the message has no raw payload in the requested format.
+	Raw []byte
+}
+
+// StoredMessagesContext returns the stored output of the given source
+// messages, keyed by source_message_id. Bodies are left out; read them one
+// message at a time with MessageContentMatchesContext.
+func (s *Store) StoredMessagesContext(
+	ctx context.Context, sourceID int64, rawFormat string, sourceMessageIDs []string,
+) (map[string]StoredMessage, error) {
+	result := make(map[string]StoredMessage, len(sourceMessageIDs))
+	err := queryInChunksContext(ctx, s.db, sourceMessageIDs, []any{rawFormat, sourceID}, `
+		SELECT m.source_message_id, m.id, m.conversation_id, m.sender_id,
+		       m.source_is_from_me, COALESCE(m.message_type, ''), m.sent_at,
+		       m.internal_date, m.snippet, COALESCE(m.size_estimate, 0),
+		       r.raw_data, r.compression
+		FROM messages m
+		LEFT JOIN message_raw r ON r.message_id = m.id AND r.raw_format = ?
+		WHERE m.source_id = ? AND m.source_message_id IN (%s)`,
+		func(rows *loggedRows) error {
+			var sourceMessageID string
+			var stored StoredMessage
+			var raw []byte
+			var compression sql.NullString
+			if err := rows.Scan(
+				&sourceMessageID, &stored.ID, &stored.ConversationID, &stored.SenderID,
+				&stored.SourceIsFromMe, &stored.MessageType, &stored.SentAt,
+				&stored.InternalDate, &stored.Snippet, &stored.SizeEstimate,
+				&raw, &compression,
+			); err != nil {
+				return err
+			}
+			if raw != nil {
+				decoded, err := decodeMessageRaw(raw, compression)
+				if err != nil {
+					return fmt.Errorf("decode raw for message %d: %w", stored.ID, err)
+				}
+				stored.Raw = decoded
+			}
+			result[sourceMessageID] = stored
+			return nil
+		})
+	if err != nil {
+		return nil, fmt.Errorf("load stored messages: %w", err)
+	}
+	return result, nil
+}
+
+// MessageContentMatchesContext reports whether one message's stored body and
+// search document are what PersistMessage would write for bodyText, a NULL
+// HTML body and doc. The search check is skipped when FTS is unavailable,
+// matching PersistMessage.
+func (s *Store) MessageContentMatchesContext(
+	ctx context.Context, messageID int64, bodyText sql.NullString, doc FTSDoc,
+) (bool, error) {
+	var storedText, storedHTML sql.NullString
+	err := s.db.QueryRowContext(ctx,
+		`SELECT body_text, body_html FROM message_bodies WHERE message_id = ?`,
+		messageID,
+	).Scan(&storedText, &storedHTML)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read message body: %w", err)
+	}
+	if storedText != bodyText || storedHTML.Valid {
+		return false, nil
+	}
+	if !s.fts5Available {
+		return true, nil
+	}
+	doc.MessageID = messageID
+	matches, err := s.dialect.FTSMatches(boundQuerier{ctx: ctx, q: s.db}, doc)
+	if err != nil {
+		return false, fmt.Errorf("compare search document: %w", err)
+	}
+	return matches, nil
+}
+
 // MessageSourceIDsInSnowflakeInterval returns canonical decimal source IDs in
 // the exact numeric interval (lower, upper] for one source and conversation.
 // Snowflakes are compared as decimal strings so values above signed int64 are
