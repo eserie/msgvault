@@ -111,3 +111,43 @@ func TestAddMatrixRenewsExistingAccountInPlace(t *testing.T) {
 	require.NoError(err)
 	assert.Equal(int64(1), count)
 }
+
+func TestAddMatrixKeepsOldLoginWhenPreviousLogoutFails(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	var loggedOut []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /_matrix/client/v3/login", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"user_id":"@archive:example.org","device_id":"NEW","access_token":"fresh"}`))
+	})
+	mux.HandleFunc("POST /_matrix/client/v3/logout", func(w http.ResponseWriter, r *http.Request) {
+		loggedOut = append(loggedOut, r.Header.Get("Authorization"))
+		if r.Header.Get("Authorization") == "Bearer still-valid" {
+			http.Error(w, `{"errcode":"M_UNKNOWN","error":"temporary failure"}`, http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte(`{}`))
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	home := t.TempDir()
+	cfg := &config.Config{HomeDir: home, Data: config.DataConfig{DataDir: home}}
+	old := matrixsource.Credentials{Homeserver: server.URL, UserID: "@archive:example.org", DeviceID: "OLD", AccessToken: "still-valid"}
+	require.NoError(matrixsource.SaveCredentials(cfg.TokensDir(), old))
+
+	t.Setenv(daemonCLISubprocessEnv, strconv.Itoa(os.Getppid()))
+	t.Setenv(clirun.EnvMatrixLoginSecret, "password")
+	root := newTestRootCmd()
+	root.AddCommand(newAddMatrixCmd())
+	root.SetArgs([]string{"add-matrix", "--homeserver", server.URL, "--user-id", "@archive:example.org", "--no-default-identity"})
+	root.SetContext(testInvocationContext(t.Context(), cfg, invocationOptions{}))
+	root.SetOut(io.Discard)
+	root.SetErr(io.Discard)
+	require.ErrorContains(root.Execute(), "login unchanged")
+
+	creds, err := matrixsource.LoadCredentials(cfg.TokensDir(), "@archive:example.org")
+	require.NoError(err)
+	assert.Equal(old, creds, "the old login stays so revocation can be retried")
+	assert.Equal([]string{"Bearer still-valid", "Bearer fresh"}, loggedOut, "the new device is logged out again")
+}

@@ -109,23 +109,3 @@ func TestSaveCredentialsKeepsExistingFileAfterUnpublishedReplaceFailure(t *testi
 	require.NoError(err)
 	assert.Equal(t, "existing", string(data))
 }
-
-func TestReplaceCredentialsReturnsPreviousDevice(t *testing.T) {
-	assert := assert.New(t)
-	require := require.New(t)
-	dir := t.TempDir()
-	first := Credentials{Homeserver: "https://matrix.example.org", UserID: "@archive:example.org", DeviceID: "OLD", AccessToken: "revoked"}
-	previous, err := ReplaceCredentials(dir, first)
-	require.NoError(err)
-	assert.Nil(previous)
-
-	second := first
-	second.DeviceID, second.AccessToken = "NEW", "fresh"
-	previous, err = ReplaceCredentials(dir, second)
-	require.NoError(err)
-	require.NotNil(previous)
-	assert.Equal(first, *previous)
-	got, err := LoadCredentials(dir, first.UserID)
-	require.NoError(err)
-	assert.Equal(second, got)
-}

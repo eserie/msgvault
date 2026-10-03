@@ -109,17 +109,3 @@ func CredentialsExist(tokensDir, userID string) (bool, error) {
 	}
 	return false, fmt.Errorf("check Matrix credentials: %w", err)
 }
-
-// ReplaceCredentials saves creds over any earlier login for the same account
-// and returns that earlier device when it differs, so the caller can log it out.
-func ReplaceCredentials(tokensDir string, creds Credentials) (*Credentials, error) {
-	var replaced *Credentials
-	// A missing or unreadable earlier file leaves no device to log out.
-	if previous, err := LoadCredentials(tokensDir, creds.UserID); err == nil && previous.DeviceID != creds.DeviceID {
-		replaced = &previous
-	}
-	if err := SaveCredentials(tokensDir, creds); err != nil {
-		return nil, err
-	}
-	return replaced, nil
-}

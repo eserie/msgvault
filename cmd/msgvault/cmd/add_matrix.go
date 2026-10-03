@@ -89,20 +89,22 @@ m.login.token from the homeserver login flow and pass --login-token-file.`,
 				if err := runPostSourceCreateMigrationsForInvocation(s, state); err != nil {
 					return fmt.Errorf("post-source-create migrations: %w", err)
 				}
-				previous, err := matrixsource.ReplaceCredentials(state.cfg.TokensDir(), creds)
-				if err != nil {
+				// Revoke the earlier device before its token is replaced, so a failed
+				// logout leaves the old login in place for a retry.
+				if previous, err := matrixsource.LoadCredentials(state.cfg.TokensDir(), creds.UserID); err == nil && previous.DeviceID != creds.DeviceID {
+					logoutCtx, cancel := context.WithTimeout(context.WithoutCancel(cmd.Context()), 10*time.Second)
+					err := matrixsource.Logout(logoutCtx, previous)
+					cancel()
+					if err != nil && !matrixsource.IsUnknownToken(err) {
+						return fmt.Errorf("log out previous Matrix device %s (login unchanged, retry add-matrix): %w", previous.DeviceID, err)
+					}
+				}
+				if err := matrixsource.SaveCredentials(state.cfg.TokensDir(), creds); err != nil {
 					// A published file already replaced the old login, so keep its device.
 					keepDevice = errors.Is(err, atomicfile.ErrPublished)
 					return err
 				}
 				keepDevice = true
-				if previous != nil {
-					logoutCtx, cancel := context.WithTimeout(context.WithoutCancel(cmd.Context()), 10*time.Second)
-					if err := matrixsource.Logout(logoutCtx, *previous); err != nil {
-						_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Warning: could not log out previous Matrix device %s: %v\n", previous.DeviceID, err)
-					}
-					cancel()
-				}
 				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Added Matrix account %s with device %s\n", creds.UserID, creds.DeviceID)
 				_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Run: msgvault sync-matrix")
 				return nil
