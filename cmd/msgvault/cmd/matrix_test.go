@@ -58,6 +58,7 @@ func TestRunConfiguredMatrixSyncRefreshesCacheAfterFailedAttempt(t *testing.T) {
 
 func TestAddMatrixRenewsExistingAccountInPlace(t *testing.T) {
 	require := require.New(t)
+	assert := assert.New(t)
 	var loggedOut []string
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /_matrix/client/v3/login", func(w http.ResponseWriter, _ *http.Request) {
@@ -98,15 +99,15 @@ func TestAddMatrixRenewsExistingAccountInPlace(t *testing.T) {
 
 	creds, err := matrixsource.LoadCredentials(cfg.TokensDir(), "@archive:example.org")
 	require.NoError(err)
-	assert.Equal(t, "NEW", creds.DeviceID)
-	assert.Equal(t, []string{"Bearer revoked"}, loggedOut)
+	assert.Equal("NEW", creds.DeviceID)
+	assert.Equal([]string{"Bearer revoked"}, loggedOut)
 	st, err = store.Open(cfg.DatabaseDSN())
 	require.NoError(err)
 	defer func() { _ = st.Close() }()
 	renewed, err := st.GetOrCreateSource(sourceTypeMatrix, "@archive:example.org")
 	require.NoError(err)
-	assert.Equal(t, source.ID, renewed.ID)
+	assert.Equal(source.ID, renewed.ID)
 	count, err := st.CountMessagesForSource(source.ID)
 	require.NoError(err)
-	assert.Equal(t, int64(1), count)
+	assert.Equal(int64(1), count)
 }

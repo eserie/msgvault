@@ -80,27 +80,27 @@ func TestImporterBackfillsJoinedRoomAndPersistsCheckpoint(t *testing.T) {
 	}
 	assert.Equal(id.RoomID("!room:example.org"), encrypted.RoomID)
 	var replyToMessageID int64
-	require.NoError(st.DB().QueryRow(`SELECT reply_to_message_id FROM messages WHERE id = ?`, messageIDs["$reply"]).Scan(&replyToMessageID))
+	require.NoError(st.DB().QueryRow(st.Rebind(`SELECT reply_to_message_id FROM messages WHERE id = ?`), messageIDs["$reply"]).Scan(&replyToMessageID))
 	assert.Equal(messageIDs["$one"], replyToMessageID)
 	var orphanReplyTargetValid bool
-	require.NoError(st.DB().QueryRow(`SELECT reply_to_message_id IS NOT NULL FROM messages WHERE id = ?`, messageIDs["$orphan-reply"]).Scan(&orphanReplyTargetValid))
+	require.NoError(st.DB().QueryRow(st.Rebind(`SELECT reply_to_message_id IS NOT NULL FROM messages WHERE id = ?`), messageIDs["$orphan-reply"]).Scan(&orphanReplyTargetValid))
 	assert.False(orphanReplyTargetValid)
 	var deletedAtValid bool
-	require.NoError(st.DB().QueryRow(`SELECT deleted_from_source_at IS NOT NULL FROM messages WHERE id = ?`, messageIDs["$delete-me"]).Scan(&deletedAtValid))
+	require.NoError(st.DB().QueryRow(st.Rebind(`SELECT deleted_from_source_at IS NOT NULL FROM messages WHERE id = ?`), messageIDs["$delete-me"]).Scan(&deletedAtValid))
 	assert.True(deletedAtValid)
 	var reactions int
-	require.NoError(st.DB().QueryRow(`SELECT COUNT(*) FROM reactions WHERE message_id = ?`, messageIDs["$one"]).Scan(&reactions))
+	require.NoError(st.DB().QueryRow(st.Rebind(`SELECT COUNT(*) FROM reactions WHERE message_id = ?`), messageIDs["$one"]).Scan(&reactions))
 	assert.Equal(1, reactions)
 	var sourceReactionID string
-	require.NoError(st.DB().QueryRow(`
+	require.NoError(st.DB().QueryRow(st.Rebind(`
 		SELECT rse.source_reaction_id
 		FROM reaction_source_events rse
 		JOIN reactions r ON r.id = rse.reaction_id
-		WHERE r.message_id = ?`, messageIDs["$one"]).Scan(&sourceReactionID))
+		WHERE r.message_id = ?`), messageIDs["$one"]).Scan(&sourceReactionID))
 	assert.Equal("$reaction", sourceReactionID)
 	assert.Equal(int64(1), sum.RelationsUnresolved)
 	var conversationType string
-	require.NoError(st.DB().QueryRow(`SELECT conversation_type FROM conversations WHERE source_id = ?`, source.ID).Scan(&conversationType))
+	require.NoError(st.DB().QueryRow(st.Rebind(`SELECT conversation_type FROM conversations WHERE source_id = ?`), source.ID).Scan(&conversationType))
 	assert.Equal("direct_chat", conversationType)
 	run, err := st.GetLastSuccessfulSync(source.ID)
 	require.NoError(err)
@@ -239,7 +239,7 @@ func TestImporterReclassifiesInactiveRoomFromDirectAccountData(t *testing.T) {
 	_, err = NewImporter(st, &Runtime{Client: client}).Import(t.Context(), ImportOptions{UserID: "@archive:example.org"})
 	require.NoError(err)
 	var conversationType string
-	require.NoError(st.DB().QueryRow(`SELECT conversation_type FROM conversations WHERE source_conversation_id = ?`, "!room:example.org").Scan(&conversationType))
+	require.NoError(st.DB().QueryRow(st.Rebind(`SELECT conversation_type FROM conversations WHERE source_conversation_id = ?`), "!room:example.org").Scan(&conversationType))
 	assert.Equal("direct_chat", conversationType)
 }
 
@@ -275,7 +275,7 @@ func TestImporterExplicitEmptyRoomNameClearsArchivedTitle(t *testing.T) {
 	_, err = NewImporter(st, &Runtime{Client: client}).Import(t.Context(), ImportOptions{UserID: "@archive:example.org"})
 	require.NoError(err)
 	var title string
-	require.NoError(st.DB().QueryRow(`SELECT title FROM conversations WHERE source_conversation_id = ?`, "!room:example.org").Scan(&title))
+	require.NoError(st.DB().QueryRow(st.Rebind(`SELECT title FROM conversations WHERE source_conversation_id = ?`), "!room:example.org").Scan(&title))
 	assert.Empty(title)
 }
 
@@ -348,11 +348,11 @@ func TestImporterKeepsNewestEditAndRecomputesAfterRedaction(t *testing.T) {
 	labelID, err := st.EnsureLabel(source.ID, "local-review", "Local review", "user")
 	require.NoError(err)
 	require.NoError(st.AddMessageLabels(messageIDs["$original"], []int64{labelID}))
-	_, err = st.DB().Exec(`UPDATE messages SET embed_gen = 7 WHERE id = ?`, messageIDs["$original"])
+	_, err = st.DB().Exec(st.Rebind(`UPDATE messages SET embed_gen = 7 WHERE id = ?`), messageIDs["$original"])
 	require.NoError(err)
 	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, original, sum))
 	var embedGen int64
-	require.NoError(st.DB().QueryRow(`SELECT embed_gen FROM messages WHERE id = ?`, messageIDs["$original"]).Scan(&embedGen))
+	require.NoError(st.DB().QueryRow(st.Rebind(`SELECT embed_gen FROM messages WHERE id = ?`), messageIDs["$original"]).Scan(&embedGen))
 	assert.Equal(int64(7), embedGen, "unchanged full replay must preserve the selected edit's embedding generation")
 	labelIDs, err := st.MessageLabelIDsContext(t.Context(), messageIDs["$original"])
 	require.NoError(err)
@@ -400,7 +400,7 @@ func TestImporterRejectsCrossRoomRelations(t *testing.T) {
 	require.NoError(err)
 	assert.Equal("edited", body)
 	var deleted bool
-	require.NoError(st.DB().QueryRow(`SELECT deleted_from_source_at IS NOT NULL FROM messages WHERE id = ?`,
+	require.NoError(st.DB().QueryRow(st.Rebind(`SELECT deleted_from_source_at IS NOT NULL FROM messages WHERE id = ?`),
 		messageIDs["$room-a-message"]).Scan(&deleted))
 	assert.False(deleted)
 }
@@ -462,7 +462,7 @@ func TestImporterFullReplayPreservesRedactedMessageContent(t *testing.T) {
 	require.NoError(err)
 	assert.Equal("retained", body)
 	var deleted bool
-	require.NoError(st.DB().QueryRow(`SELECT deleted_from_source_at IS NOT NULL FROM messages WHERE id = ?`, messageIDs["$one"]).Scan(&deleted))
+	require.NoError(st.DB().QueryRow(st.Rebind(`SELECT deleted_from_source_at IS NOT NULL FROM messages WHERE id = ?`), messageIDs["$one"]).Scan(&deleted))
 	assert.True(deleted)
 }
 
@@ -485,7 +485,7 @@ func TestImporterAppliesTargetOfStrippedRedaction(t *testing.T) {
 	messageIDs, err := st.MessageExistsBatch(source.ID, []string{"$message"})
 	require.NoError(err)
 	var deleted bool
-	require.NoError(st.DB().QueryRow(`SELECT deleted_from_source_at IS NOT NULL FROM messages WHERE id = ?`, messageIDs["$message"]).Scan(&deleted))
+	require.NoError(st.DB().QueryRow(st.Rebind(`SELECT deleted_from_source_at IS NOT NULL FROM messages WHERE id = ?`), messageIDs["$message"]).Scan(&deleted))
 	assert.True(deleted)
 }
 
@@ -599,7 +599,7 @@ func TestDeferredReplyResolutionDoesNotOverwriteEditedBody(t *testing.T) {
 	require.NoError(err)
 	assert.Equal("newest edit", body)
 	var replyTo int64
-	require.NoError(st.DB().QueryRow(`SELECT reply_to_message_id FROM messages WHERE id = ?`, replyID).Scan(&replyTo))
+	require.NoError(st.DB().QueryRow(st.Rebind(`SELECT reply_to_message_id FROM messages WHERE id = ?`), replyID).Scan(&replyTo))
 	assert.Equal(targetID, replyTo)
 }
 
@@ -792,7 +792,7 @@ func TestImporterEditMustKeepEventType(t *testing.T) {
 	require.NoError(err)
 	assert.Equal("party parrot", body)
 	var edited bool
-	require.NoError(st.DB().QueryRow(`SELECT is_edited FROM messages WHERE id = ?`, messageIDs["$sticker"]).Scan(&edited))
+	require.NoError(st.DB().QueryRow(st.Rebind(`SELECT is_edited FROM messages WHERE id = ?`), messageIDs["$sticker"]).Scan(&edited))
 	assert.False(edited)
 	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID,
 		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$file","sender":"@member:example.org","origin_server_ts":3000,"content":{"msgtype":"m.file","body":"report.pdf","url":"mxc://example.org/report"}}`), sum))
@@ -924,7 +924,7 @@ func TestImporterReplayRecoversReplyLinkLostBeforeCheckpoint(t *testing.T) {
 	ids, err := st.MessageExistsBatch(source.ID, []string{"$reply", "$target"})
 	require.NoError(err)
 	var replyTo int64
-	require.NoError(st.DB().QueryRow(`SELECT reply_to_message_id FROM messages WHERE id = ?`, ids["$reply"]).Scan(&replyTo))
+	require.NoError(st.DB().QueryRow(st.Rebind(`SELECT reply_to_message_id FROM messages WHERE id = ?`), ids["$reply"]).Scan(&replyTo))
 	assert.Equal(ids["$target"], replyTo)
 }
 
