@@ -777,6 +777,120 @@ func TestImporterFillsLimitedIncrementalTimelineGap(t *testing.T) {
 	assert.Equal(&RoomState{Backfilled: true, SyncedTo: "next-2"}, state.Rooms["!room:example.org"])
 }
 
+func TestImporterResumesInterruptedGapFromSavedPage(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+	msg := func(eventID string, ts int) string {
+		return fmt.Sprintf(`{"type":"m.room.message","event_id":"%s","sender":"@member:example.org","origin_server_ts":%d,"content":{"msgtype":"m.text","body":"%s"}}`, eventID, ts, eventID)
+	}
+	var historyRequests []string
+	var resumedSyncs int
+	failed := map[string]bool{}
+	interruptOnce := func(w http.ResponseWriter, page string) bool {
+		if failed[page] {
+			return false
+		}
+		failed[page] = true
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"errcode":"M_FORBIDDEN","error":"temporary test interruption"}`))
+		return true
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /_matrix/client/v3/sync", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("since") != "next-1" {
+			_, _ = fmt.Fprintf(w, `{"next_batch":"next-1","rooms":{"join":{"!room:example.org":{"state":{"events":[]},"timeline":{"events":[%s],"prev_batch":"initial-backfill"}}}}}`, msg("$known", 1000))
+			return
+		}
+		// A failed run never saves its token, so every later run syncs from next-1.
+		resumedSyncs++
+		switch resumedSyncs {
+		case 1:
+			_, _ = fmt.Fprintf(w, `{"next_batch":"next-2","rooms":{"join":{"!room:example.org":{"state":{"events":[]},"timeline":{"limited":true,"events":[%s],"prev_batch":"gap-1"}}}}}`, msg("$new", 4000))
+		case 2:
+			_, _ = fmt.Fprintf(w, `{"next_batch":"next-3","rooms":{"join":{"!room:example.org":{"state":{"events":[]},"timeline":{"limited":true,"events":[%s],"prev_batch":"fresh-gap"}}}}}`, msg("$newer", 6000))
+		default:
+			_, _ = fmt.Fprintf(w, `{"next_batch":"next-4","rooms":{"join":{"!room:example.org":{"state":{"events":[]},"timeline":{"limited":true,"events":[%s],"prev_batch":"last-gap"}}}}}`, msg("$newest", 8000))
+		}
+	})
+	mux.HandleFunc("GET /_matrix/client/v3/user/@archive:example.org/account_data/m.direct", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{}`))
+	})
+	mux.HandleFunc("GET /_matrix/client/v3/rooms/!room:example.org/joined_members", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"joined":{"@archive:example.org":{"display_name":"Archive"},"@member:example.org":{"display_name":"Member"}}}`))
+	})
+	mux.HandleFunc("GET /_matrix/client/v3/rooms/!room:example.org/messages", func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query()
+		from := query.Get("from")
+		if from != "initial-backfill" {
+			historyRequests = append(historyRequests, from+"->"+query.Get("to"))
+		}
+		switch from {
+		case "initial-backfill":
+			_, _ = fmt.Fprintf(w, `{"chunk":[%s]}`, msg("$old", 500))
+		case "gap-1":
+			_, _ = fmt.Fprintf(w, `{"chunk":[%s],"end":"gap-2"}`, msg("$gap-newer", 3000))
+		case "gap-2":
+			if !interruptOnce(w, from) {
+				_, _ = fmt.Fprintf(w, `{"chunk":[%s]}`, msg("$gap-older", 2000))
+			}
+		case "fresh-gap":
+			_, _ = fmt.Fprintf(w, `{"chunk":[%s],"end":"fresh-2"}`, msg("$fresh-newer", 5500))
+		case "fresh-2":
+			if !interruptOnce(w, from) {
+				_, _ = fmt.Fprintf(w, `{"chunk":[%s,%s]}`, msg("$fresh-older", 5000), msg("$new", 4000))
+			}
+		case "last-gap":
+			_, _ = fmt.Fprintf(w, `{"chunk":[%s,%s]}`, msg("$late", 7000), msg("$newer", 6000))
+		default:
+			http.Error(w, "unexpected history cursor", http.StatusBadRequest)
+		}
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	client, err := mautrix.NewClient(server.URL, id.UserID("@archive:example.org"), "token")
+	require.NoError(err)
+
+	st := testutil.NewTestStore(t)
+	source, err := st.GetOrCreateSource(SourceType, "@archive:example.org")
+	require.NoError(err)
+	opts := ImportOptions{UserID: "@archive:example.org"}
+	_, err = NewImporter(st, &Runtime{Client: client}).Import(t.Context(), opts)
+	require.NoError(err)
+	_, err = NewImporter(st, &Runtime{Client: client}).Import(t.Context(), opts)
+	require.Error(err)
+	checkpoint, err := st.GetLatestCheckpointedSyncByType(source.ID, SourceType)
+	require.NoError(err)
+	interrupted, err := loadSyncState(checkpoint.CursorBefore.String)
+	require.NoError(err)
+	assert.Equal("gap-2", interrupted.Rooms["!room:example.org"].GapFrom)
+	assert.Equal("next-2", interrupted.Rooms["!room:example.org"].GapTo)
+
+	_, err = NewImporter(st, &Runtime{Client: client}).Import(t.Context(), opts)
+	require.Error(err, "the next gap is interrupted too")
+	_, err = NewImporter(st, &Runtime{Client: client}).Import(t.Context(), opts)
+	require.NoError(err)
+	assert.Equal([]string{
+		"gap-1->next-1", "gap-2->next-1",
+		"gap-2->next-1", "fresh-gap->next-2", "fresh-2->next-2",
+		"fresh-2->next-2", "last-gap->next-3",
+	}, historyRequests, "each run finishes the saved gap from its page before walking newer events")
+
+	ids := []string{"$known", "$old", "$new", "$gap-newer", "$gap-older", "$fresh-newer", "$fresh-older", "$newer", "$late", "$newest"}
+	found, err := st.MessageExistsBatch(source.ID, ids)
+	require.NoError(err)
+	for _, eventID := range ids {
+		assert.NotZero(found[eventID], eventID)
+	}
+	count, err := st.CountMessagesForSource(source.ID)
+	require.NoError(err)
+	assert.Equal(int64(len(ids)), count)
+	run, err := st.GetLastSuccessfulSync(source.ID)
+	require.NoError(err)
+	state, err := loadSyncState(run.CursorAfter.String)
+	require.NoError(err)
+	assert.Equal(&RoomState{Backfilled: true, SyncedTo: "next-4"}, state.Rooms["!room:example.org"])
+}
+
 func TestImporterEditMustKeepEventType(t *testing.T) {
 	require := require.New(t)
 	assert := assert.New(t)

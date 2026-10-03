@@ -33,7 +33,11 @@ type RoomState struct {
 	PrevBatch  string `json:"prev_batch,omitempty"`
 	// SyncedTo is the /sync next_batch through which this room's timeline is
 	// archived; it stops the next gap walk.
-	SyncedTo          string   `json:"synced_to,omitempty"`
+	SyncedTo string `json:"synced_to,omitempty"`
+	// GapFrom and GapTo hold an interrupted gap walk: the next page to read
+	// and the next_batch of the run that stopped, archived from the gap onward.
+	GapFrom           string   `json:"gap_from,omitempty"`
+	GapTo             string   `json:"gap_to,omitempty"`
 	DeferredRelations []string `json:"deferred_relations,omitempty"`
 }
 
@@ -344,13 +348,31 @@ func (imp *Importer) importRoom(ctx context.Context, sourceID, syncID int64, roo
 		return err
 	}
 	saveProgress := func(string) error { return imp.checkpoint(syncID, state, sum) }
-	if gapTo != "" && room.Timeline.Limited {
-		// The previous sync token stops the walk where this room's archive ends.
-		if err := imp.paginate(ctx, roomID, room.Timeline.PrevBatch, gapTo, ingest, saveProgress); err != nil {
+	saveGap := func(end string) error {
+		if end != "" {
+			rs.GapFrom = end
+		}
+		return saveProgress(end)
+	}
+	if rs.GapFrom != "" {
+		// An earlier run stopped inside this gap. Finish it from the saved page;
+		// that run had archived everything after the gap, through GapTo.
+		if err := imp.paginate(ctx, roomID, rs.GapFrom, gapTo, ingest, saveGap); err != nil {
+			return err
+		}
+		gapTo, rs.SyncedTo, rs.GapFrom, rs.GapTo = rs.GapTo, rs.GapTo, "", ""
+		if err := saveProgress(""); err != nil {
 			return err
 		}
 	}
-	rs.SyncedTo = nextBatch
+	if gapTo != "" && room.Timeline.Limited {
+		// The previous sync token stops the walk where this room's archive ends.
+		rs.GapTo = nextBatch
+		if err := imp.paginate(ctx, roomID, room.Timeline.PrevBatch, gapTo, ingest, saveGap); err != nil {
+			return err
+		}
+	}
+	rs.SyncedTo, rs.GapFrom, rs.GapTo = nextBatch, "", ""
 	if err := imp.checkpoint(syncID, state, sum); err != nil {
 		return err
 	}
