@@ -972,3 +972,26 @@ func TestMessageBodyKeepsCaptionsAndDropsReplyFallbacks(t *testing.T) {
 		})
 	}
 }
+
+func TestImporterEditedReplyKeepsQuotedFallbackOut(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	st := testutil.NewTestStore(t)
+	source, err := st.GetOrCreateSource(SourceType, "@archive:example.org")
+	require.NoError(err)
+	conversationID, err := st.EnsureConversationWithType(source.ID, "!room:example.org", "group_chat", "Example")
+	require.NoError(err)
+	imp := NewImporter(st, &Runtime{Client: relationsClient(t, nil)})
+	sum := &ImportSummary{}
+	reply := `{"type":"m.room.message","event_id":"$reply","sender":"@member:example.org","origin_server_ts":1000,"content":{"msgtype":"m.text","body":"answer","m.relates_to":{"m.in_reply_to":{"event_id":"$quoted"}}}}`
+	edit := `{"type":"m.room.message","event_id":"$edit","sender":"@member:example.org","origin_server_ts":2000,"content":{"msgtype":"m.text","body":"* fixed","m.new_content":{"msgtype":"m.text","body":"> <@other:example.org> their words\n\nfixed answer"},"m.relates_to":{"rel_type":"m.replace","event_id":"$reply"}}}`
+	if err := imp.persistEvent(t.Context(), source.ID, conversationID, matrixTestEvent(t, reply), sum); err != nil {
+		require.ErrorIs(err, errRelationTargetMissing)
+	}
+	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, matrixTestEvent(t, edit), sum))
+	ids, err := st.MessageExistsBatch(source.ID, []string{"$reply"})
+	require.NoError(err)
+	body, err := st.GetMessageBodyText(ids["$reply"])
+	require.NoError(err)
+	assert.Equal("fixed answer", body)
+}

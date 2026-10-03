@@ -804,7 +804,7 @@ func (imp *Importer) persistEdit(sourceID, convID int64, evt *event.Event, targe
 	if err != nil || !current.olderThan(evt) {
 		return err
 	}
-	return imp.applyEdit(messageID, messageBody(content), appliedEdit{EventID: evt.ID.String(), TS: evt.Timestamp})
+	return imp.applyEdit(messageID, editedBody(original, content), appliedEdit{EventID: evt.ID.String(), TS: evt.Timestamp})
 }
 
 // validReplacement applies Matrix's replacement rules: same sender and event
@@ -814,6 +814,14 @@ func validReplacement(original, edit *event.Event) bool {
 		return false
 	}
 	return original.Content.AsMessage().RelatesTo.GetReplaceID() == ""
+}
+
+// editedBody renders an edit's new content with the original's relation,
+// which Matrix keeps for replacements, so a reply's quoted fallback stays out.
+func editedBody(original *event.Event, content *event.MessageEventContent) string {
+	withRelation := *content
+	withRelation.RelatesTo = original.Content.AsMessage().RelatesTo
+	return messageBody(&withRelation)
 }
 
 func (imp *Importer) archivedEvent(messageID int64) (*event.Event, error) {
@@ -905,7 +913,7 @@ func (imp *Importer) restoreAfterEditRedaction(ctx context.Context, roomID id.Ro
 		from = page.NextBatch
 	}
 	if newest != nil {
-		return imp.applyEdit(messageID, messageBody(newestContent), appliedEdit{EventID: newest.ID.String(), TS: newest.Timestamp})
+		return imp.applyEdit(messageID, editedBody(original, newestContent), appliedEdit{EventID: newest.ID.String(), TS: newest.Timestamp})
 	}
 	if err := imp.setBody(messageID, messageBody(original.Content.AsMessage())); err != nil {
 		return err
