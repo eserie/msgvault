@@ -310,7 +310,7 @@ func TestImportAppleRerunRepairsPartialWrites(t *testing.T) {
 	// Earlier releases wrote the search entry and body in separate commits, so
 	// an interrupted run could leave either one behind the rest of the message.
 	ids := make(map[string]int64)
-	for _, sourceID := range []string{"group-in", "direct-in"} {
+	for _, sourceID := range []string{"group-in", "direct-in", "lid-in"} {
 		var id int64
 		require.NoError(st.DB().QueryRow(
 			st.Rebind(`SELECT id FROM messages WHERE source_message_id = ?`), sourceID,
@@ -321,13 +321,21 @@ func TestImportAppleRerunRepairsPartialWrites(t *testing.T) {
 	require.NoError(st.UpsertMessageBody(
 		ids["direct-in"], sql.NullString{String: "stale body", Valid: true}, sql.NullString{},
 	))
+	_, err = st.DB().Exec(
+		st.Rebind(`UPDATE message_raw SET raw_data = ?, compression = 'zlib' WHERE message_id = ?`),
+		[]byte("not zlib"), ids["lid-in"],
+	)
+	require.NoError(err)
 	require.False(appleSearchNamesSender(t, st, "group-in", "group prototype text", "+15555550103"))
 	markAppleMessagesUnwritten(t, st)
 
 	summary, err := importer.Import(context.Background(), chatDBPath, appleTestOptions())
 	require.NoError(err)
-	assert.Equal(int64(2), summary.MessagesAdded)
-	assert.Equal([]string{"direct-in", "group-in"}, rewrittenAppleMessages(t, st))
+	assert.Equal(int64(3), summary.MessagesAdded)
+	assert.Equal([]string{"direct-in", "group-in", "lid-in"}, rewrittenAppleMessages(t, st))
+	raw, err := st.GetMessageRaw(ids["lid-in"])
+	require.NoError(err)
+	assert.Contains(string(raw), "lid prototype text")
 	assert.True(appleSearchNamesSender(t, st, "group-in", "group prototype text", "+15555550103"))
 	assert.Equal("direct prototype text", appleBodyText(t, st, "direct-in"))
 

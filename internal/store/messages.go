@@ -496,7 +496,8 @@ type StoredMessage struct {
 	InternalDate   sql.NullTime
 	Snippet        sql.NullString
 	SizeEstimate   int64
-	// Raw is nil when the message has no raw payload in the requested format.
+	// Raw is nil when the message has no readable raw payload in the requested
+	// format.
 	Raw []byte
 }
 
@@ -530,10 +531,14 @@ func (s *Store) StoredMessagesContext(
 			}
 			if raw != nil {
 				decoded, err := decodeMessageRaw(raw, compression)
-				if err != nil {
+				switch {
+				case errors.Is(err, ErrInvalidMessageRaw):
+					// Leave Raw nil so the caller rewrites the unreadable payload.
+				case err != nil:
 					return fmt.Errorf("decode raw for message %d: %w", stored.ID, err)
+				default:
+					stored.Raw = decoded
 				}
-				stored.Raw = decoded
 			}
 			result[sourceMessageID] = stored
 			return nil

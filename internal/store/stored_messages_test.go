@@ -76,6 +76,16 @@ func TestStoredMessagesContext(t *testing.T) {
 	_, foreign := stored["foreign"]
 	assert.False(foreign, "another source's message with the same ID is excluded")
 
+	_, err = st.DB().Exec(
+		st.Rebind(`UPDATE message_raw SET raw_data = ?, compression = 'zlib' WHERE message_id = ?`),
+		[]byte("not zlib"), firstID,
+	)
+	require.NoError(err)
+	corrupt, err := st.StoredMessagesContext(ctx, source.ID, "whatsapp_apple_json", []string{"first"})
+	require.NoError(err, "an unreadable payload is a mismatch, not an error")
+	assert.Nil(corrupt["first"].Raw)
+	assert.Equal(firstID, corrupt["first"].ID)
+
 	ids := make([]string, 0, 501)
 	for i := range 501 {
 		ids = append(ids, fmt.Sprintf("absent-%d", i))
