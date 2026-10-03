@@ -93,13 +93,6 @@ func (value *appleTimestampValue) scanString(source string) error {
 	return nil
 }
 
-// appleDerivedMessage is one source row derived exactly as a full import
-// writes it, waiting for comparison with the stored copy.
-type appleDerivedMessage struct {
-	stanzaID string
-	data     *store.MessagePersistData
-}
-
 type appleGroupMember struct {
 	JID         string
 	ContactName string
@@ -277,19 +270,12 @@ func (imp *Importer) importApple(
 			if err := ctx.Err(); err != nil {
 				return summary, err
 			}
-			remaining := batchSize
-			if totalLimit > 0 {
-				left := totalLimit - totalAdded
-				if left <= 0 {
-					break
-				}
-				if left < int64(remaining) {
-					remaining = int(left)
-				}
+			if totalLimit > 0 && totalAdded >= totalLimit {
+				break
 			}
-
+			// Fetch full pages even under --limit: unchanged rows don't count toward it.
 			messages, err := fetchAppleMessages(
-				ctx, db, chat.RowID, afterRowID, remaining,
+				ctx, db, chat.RowID, afterRowID, batchSize,
 			)
 			if err != nil {
 				return summary, fmt.Errorf("fetch Apple messages: %w", err)
@@ -298,19 +284,26 @@ func (imp *Importer) importApple(
 				break
 			}
 
-			var pending []appleDerivedMessage
+			var stanzaIDs []string
 			for _, sourceMessage := range messages {
+				if isImportableAppleMessage(sourceMessage, duplicateStanzas) {
+					stanzaIDs = append(stanzaIDs, sourceMessage.StanzaID)
+				}
+			}
+			stored, err := imp.store.StoredMessagesContext(
+				ctx, source.ID, appleRawFormat, stanzaIDs,
+			)
+			if err != nil {
+				return summary, fmt.Errorf("load stored Apple messages: %w", err)
+			}
+
+			for _, sourceMessage := range messages {
+				if totalLimit > 0 && totalAdded >= totalLimit {
+					break
+				}
 				afterRowID = sourceMessage.RowID
 				summary.MessagesProcessed++
-				// iOS uses 0 for text and 7 for URL messages; these codes differ from Android.
-				// Keep this filter in sync with fetchDuplicateAppleTextStanzas.
-				if (sourceMessage.MessageType != 0 && sourceMessage.MessageType != 7) ||
-					!sourceMessage.Text.Valid || strings.TrimSpace(sourceMessage.Text.String) == "" ||
-					strings.TrimSpace(sourceMessage.StanzaID) == "" {
-					summary.MessagesSkipped++
-					continue
-				}
-				if _, duplicate := duplicateStanzas[sourceMessage.StanzaID]; duplicate {
+				if !isImportableAppleMessage(sourceMessage, duplicateStanzas) {
 					summary.MessagesSkipped++
 					continue
 				}
@@ -346,39 +339,20 @@ func (imp *Importer) importApple(
 				if err != nil {
 					return summary, fmt.Errorf("encode Apple message raw data: %w", err)
 				}
-				pending = append(pending, appleDerivedMessage{
-					stanzaID: sourceMessage.StanzaID,
-					data: &store.MessagePersistData{
-						Message:        &message,
-						BodyText:       sourceMessage.Text,
-						RawMIME:        rawJSON,
-						RawFormat:      appleRawFormat,
-						PreserveLabels: true,
-						FTS: &store.FTSDoc{
-							Body:     sourceMessage.Text.String,
-							FromAddr: senderPhone,
-						},
+				data := &store.MessagePersistData{
+					Message:        &message,
+					BodyText:       sourceMessage.Text,
+					RawMIME:        rawJSON,
+					RawFormat:      appleRawFormat,
+					PreserveLabels: true,
+					FTS: &store.FTSDoc{
+						Body:     sourceMessage.Text.String,
+						FromAddr: senderPhone,
 					},
-				})
-			}
-
-			stanzaIDs := make([]string, len(pending))
-			for i, derived := range pending {
-				stanzaIDs[i] = derived.stanzaID
-			}
-			stored, err := imp.store.StoredMessagesContext(
-				ctx, source.ID, appleRawFormat, stanzaIDs,
-			)
-			if err != nil {
-				return summary, fmt.Errorf("load stored Apple messages: %w", err)
-			}
-			for _, derived := range pending {
-				if totalLimit > 0 && totalAdded >= totalLimit {
-					break
 				}
-				if existing, ok := stored[derived.stanzaID]; ok && appleMessageStored(existing, derived.data) {
+				if existing, ok := stored[sourceMessage.StanzaID]; ok && appleMessageStored(existing, data) {
 					unchanged, err := imp.store.MessageContentMatchesContext(
-						ctx, existing.ID, derived.data.BodyText, *derived.data.FTS,
+						ctx, existing.ID, data.BodyText, *data.FTS,
 					)
 					if err != nil {
 						return summary, fmt.Errorf("compare stored Apple message: %w", err)
@@ -388,7 +362,7 @@ func (imp *Importer) importApple(
 						continue
 					}
 				}
-				if _, err := imp.store.PersistMessageContext(ctx, derived.data); err != nil {
+				if _, err := imp.store.PersistMessageContext(ctx, data); err != nil {
 					return summary, fmt.Errorf("persist Apple message: %w", err)
 				}
 				summary.MessagesAdded++
@@ -408,7 +382,7 @@ func (imp *Importer) importApple(
 				summary.MessagesSkipped,
 			)
 
-			if len(messages) < remaining || (totalLimit > 0 && totalAdded >= totalLimit) {
+			if len(messages) < batchSize || (totalLimit > 0 && totalAdded >= totalLimit) {
 				break
 			}
 		}
@@ -745,6 +719,19 @@ func mapAppleMessage(
 		SizeEstimate:    int64(len(message.Text.String)),
 		ArchivedAt:      time.Now(),
 	}
+}
+
+// isImportableAppleMessage is the import's row filter. iOS uses 0 for text and
+// 7 for URL messages; these codes differ from Android. Keep this filter in
+// sync with fetchDuplicateAppleTextStanzas.
+func isImportableAppleMessage(message appleMessage, duplicateStanzas map[string]struct{}) bool {
+	if (message.MessageType != 0 && message.MessageType != 7) ||
+		!message.Text.Valid || strings.TrimSpace(message.Text.String) == "" ||
+		strings.TrimSpace(message.StanzaID) == "" {
+		return false
+	}
+	_, duplicate := duplicateStanzas[message.StanzaID]
+	return !duplicate
 }
 
 // appleMessageStored reports whether the stored message columns and raw
