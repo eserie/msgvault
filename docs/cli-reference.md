@@ -1516,6 +1516,7 @@ The `--phone` flag is required and must be in E.164 format (e.g., `+447700900000
 | `--media-dir` | No | Path to decrypted Media folder for attachments |
 | `--limit` | No | Limit number of messages (for testing) |
 | `--display-name` | No | Display name for the phone owner |
+| `--full` | No | Apple only: compare every message, including chats unchanged since the last import |
 | `--no-default-identity` | No | Do not auto-confirm the phone number as this source's "me" identity |
 
 See [Text Messages](/docs/usage/text-messages/) for usage examples.

@@ -21,6 +21,7 @@ var (
 	importContacts                  string
 	importLimit                     int
 	importDisplayName               string
+	importFull                      bool
 	noDefaultIdentityImportWhatsApp bool
 )
 
@@ -99,6 +100,7 @@ func runWhatsAppImport(cmd *cobra.Command, sourcePath string) error {
 	opts.MediaDir = importMediaDir
 	opts.AttachmentsDir = cfg.AttachmentsDir()
 	opts.Limit = importLimit
+	opts.Full = importFull
 
 	// Create importer with CLI progress.
 	progress := &ImportCLIProgress{}
@@ -263,6 +265,7 @@ func init() {
 	importWhatsappCmd.Flags().StringVar(&importContacts, "contacts", "", "path to contacts .vcf file for name resolution (optional)")
 	importWhatsappCmd.Flags().IntVar(&importLimit, "limit", 0, "limit number of messages (for testing)")
 	importWhatsappCmd.Flags().StringVar(&importDisplayName, "display-name", "", "display name for the phone owner")
+	importWhatsappCmd.Flags().BoolVar(&importFull, "full", false, "Apple only: compare every message, including chats unchanged since the last import")
 	importWhatsappCmd.Flags().BoolVar(&noDefaultIdentityImportWhatsApp, "no-default-identity", false, noDefaultIdentityHelp)
 	_ = importWhatsappCmd.MarkFlagRequired("phone")
 	rootCmd.AddCommand(importWhatsappCmd)

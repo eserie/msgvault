@@ -1,5 +1,5 @@
 ---
-last_edited: "2026-10-03"
+last_edited: "2026-10-04"
 title: Changelog
 description: Release history for msgvault
 ---
@@ -11,6 +11,10 @@ All notable changes to msgvault, grouped by release.
 - Rerunning `import-whatsapp` on an Apple `ChatStorage.sqlite` writes only new
   and changed messages instead of rewriting the whole archive, and picks up
   edits and senders that `LID.sqlite` resolves later.
+- Rerunning `import-whatsapp` on an Apple `ChatStorage.sqlite` reads only the
+  chats that changed since the last successful import, so a rerun with no new
+  messages no longer compares every archived message. `--full` compares every
+  message.
 
 - [Calendar event control](usage/calendar.md#control-events-unreleased) adds
   create, update, delete, move, self RSVP, and availability commands, plus HTTP

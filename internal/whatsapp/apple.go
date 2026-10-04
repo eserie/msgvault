@@ -171,6 +171,39 @@ func (imp *Importer) importApple(
 		return nil, fmt.Errorf("fetch Apple chats: %w", err)
 	}
 
+	aggregates, markersAvailable, err := fetchAppleChatAggregates(ctx, db)
+	if err != nil {
+		return nil, fmt.Errorf("read Apple chat change markers: %w", err)
+	}
+	// Without a store identity, markers cannot tell one database from another,
+	// so every chat is read.
+	storeIdentity, err := fetchAppleStoreIdentity(ctx, db)
+	if err != nil {
+		return nil, fmt.Errorf("read Apple chat change markers: %w", err)
+	}
+	if storeIdentity == "" {
+		markersAvailable, aggregates = false, nil
+	}
+	importContext, err := appleImportContext(
+		opts.Phone, storeIdentity, selfParticipantID, lidMap, pushNames, duplicateStanzas,
+	)
+	if err != nil {
+		return nil, err
+	}
+	var previousMarkers map[int64]string
+	if !opts.Full && markersAvailable {
+		previousMarkers, err = imp.previousAppleChatMarkers(ctx, source, syncID, importContext)
+		if err != nil {
+			return nil, err
+		}
+	}
+	nextMarkers := make(map[int64]string, len(chats))
+	for _, chat := range chats {
+		if marker, ok := previousMarkers[chat.RowID]; ok {
+			nextMarkers[chat.RowID] = marker
+		}
+	}
+
 	batchSize := opts.BatchSize
 	if batchSize <= 0 {
 		batchSize = 1000
@@ -263,6 +296,13 @@ func (imp *Importer) importApple(
 				return summary, fmt.Errorf("add Apple direct participant: %w", err)
 			}
 		}
+
+		marker := appleChatMarker(aggregates, chat, conversationID)
+		if marker != "" && previousMarkers[chat.RowID] == marker {
+			imp.progress.OnChatComplete(canonicalChatJID, 0)
+			continue
+		}
+		delete(nextMarkers, chat.RowID)
 
 		var afterRowID int64
 		var chatAdded int64
@@ -386,6 +426,10 @@ func (imp *Importer) importApple(
 				break
 			}
 		}
+		// A chat cut short by --limit may still hold unread changes.
+		if marker != "" && (totalLimit == 0 || totalAdded < totalLimit) {
+			nextMarkers[chat.RowID] = marker
+		}
 		imp.progress.OnChatComplete(canonicalChatJID, chatAdded)
 	}
 	for phone, pushName := range pendingPushNames {
@@ -398,6 +442,13 @@ func (imp *Importer) importApple(
 
 	if err := imp.store.RecomputeConversationStats(source.ID); err != nil {
 		return summary, fmt.Errorf("recompute Apple conversation stats: %w", err)
+	}
+	if markersAvailable {
+		if err := imp.saveAppleChatMarkers(
+			ctx, source.ID, syncID, importContext, nextMarkers,
+		); err != nil {
+			return summary, err
+		}
 	}
 	summary.Duration = time.Since(startedAt)
 	imp.progress.OnComplete(summary)

@@ -1531,6 +1531,27 @@ func (s *Store) getLastSuccessfulSyncContext(ctx context.Context, sourceID int64
 	return run, err
 }
 
+// GetLatestSyncExcluding returns the most recently started sync run of a
+// source in any status, leaving out excludeID. Failed and interrupted runs
+// count: they may have committed writes before stopping.
+func (s *Store) GetLatestSyncExcluding(ctx context.Context, sourceID, excludeID int64) (*SyncRun, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, source_id, started_at, completed_at, status,
+		       messages_processed, messages_added, messages_updated, errors_count,
+		       error_message, cursor_before, cursor_after, request_fingerprint
+		FROM sync_runs
+		WHERE source_id = ? AND id <> ?
+		ORDER BY id DESC
+		LIMIT 1
+	`, sourceID, excludeID)
+
+	run, err := scanSyncRun(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("latest sync for source %d: %w", sourceID, ErrSyncRunNotFound)
+	}
+	return run, err
+}
+
 // Source represents a Gmail account or other message source.
 type Source struct {
 	ID           int64
