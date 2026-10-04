@@ -89,6 +89,20 @@ in between (even one that failed), or when the database lacks those counters or
 that ID. Pass `--full` to compare every message regardless, for example after
 restoring an older WhatsApp backup or editing archived messages by other means.
 
+A first import of a large database can take minutes. To get recent messages
+first, add `--after` (YYYY-MM-DD, local time; `--before` also works), then run
+the command again without it:
+
+```bash
+msgvault import-whatsapp --phone +447700900000 --after 2026-01-01 \
+  "$HOME/Library/Group Containers/group.net.whatsapp.WhatsApp.shared/ChatStorage.sqlite"
+```
+
+`--after` includes that day and `--before` excludes it. A dated run writes only
+messages inside the window and leaves everything else in your archive alone, so
+the later full run adds the older messages. Android `msgstore.db` imports reject
+`--after` and `--before`.
+
 ### Format limits
 
 | Format                     | Imported today                                                                                                            | Not included                  |
