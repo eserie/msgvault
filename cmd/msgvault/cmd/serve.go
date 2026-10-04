@@ -40,6 +40,8 @@ import (
 	"go.kenn.io/msgvault/internal/personenrichment"
 	"go.kenn.io/msgvault/internal/personfacts"
 	"go.kenn.io/msgvault/internal/personmatch"
+	"go.kenn.io/msgvault/internal/plaud"
+	"go.kenn.io/msgvault/internal/provideridentity"
 	"go.kenn.io/msgvault/internal/query"
 	"go.kenn.io/msgvault/internal/scheduler"
 	"go.kenn.io/msgvault/internal/search"
@@ -584,7 +586,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Meeting sources (Granola/Circleback) mirror the gcal treatment: warn
+	// Meeting sources mirror the gcal treatment: warn
 	// when enabled but unscheduled, then register the scheduled ones.
 	for _, src := range cfg.Granola {
 		if src.Enabled && src.Schedule == "" {
@@ -642,6 +644,32 @@ func runServe(cmd *cobra.Command, args []string) error {
 			logger.Error("failed to schedule circleback source", "source", source.Identifier, "error", err)
 		} else {
 			logger.Info("scheduled circleback source", "source", source.Identifier, "schedule", source.Schedule)
+		}
+	}
+	for _, src := range cfg.Plaud {
+		if src.Enabled && src.Schedule == "" {
+			logger.Warn("plaud source is enabled but has no schedule — the daemon will not sync it; its freshness will eventually go stale",
+				"source", src.Identifier,
+				"hint", `set a cron schedule (e.g. "30 */6 * * *") on the [[plaud]] entry`)
+		}
+	}
+	for _, src := range cfg.ScheduledPlaudSources() {
+		source := src
+		jobName, ok := api.SchedulerJobNameForSource(plaud.SourceType, source.Identifier)
+		if !ok {
+			logger.Error("no scheduler job mapping for plaud source", "source", source.Identifier)
+			continue
+		}
+		if err := sched.AddJob(scheduler.Job{
+			Name:     jobName,
+			Schedule: source.Schedule,
+			Run: invocationBoundJobRun(state, func(ctx context.Context) error {
+				return runConfiguredPlaudSync(ctx, s, source)
+			}),
+		}); err != nil {
+			logger.Error("failed to schedule plaud source", "source", source.Identifier, "error", err)
+		} else {
+			logger.Info("scheduled plaud source", "source", source.Identifier, "schedule", source.Schedule)
 		}
 	}
 	for _, src := range cfg.NotionMeetings {
@@ -765,6 +793,24 @@ func runServe(cmd *cobra.Command, args []string) error {
 		OperationGate:                 operationGate,
 		OperationHistoryReader:        storeAdapter,
 		BlobStore:                     blobStore,
+	}
+	apiOpts.GmailProfileAddress = func(ctx context.Context, source *store.Source) (string, error) {
+		client, serviceAccount, err := newDaemonGmailClient(
+			ctx, source.Identifier, source, getOAuthMgr, state,
+		)
+		if err != nil {
+			return "", err
+		}
+		defer func() { _ = client.Close() }()
+		profile, err := client.GetProfile(ctx)
+		if err != nil {
+			classified := provideridentity.ClassifyGmailProfileError(err, serviceAccount)
+			return "", fmt.Errorf("read authenticated Gmail profile: %w", classified)
+		}
+		if profile == nil {
+			return "", errors.New("authenticated Gmail profile is missing")
+		}
+		return profile.EmailAddress, nil
 	}
 	applyServerRuntimeConfig(&apiOpts, cfg)
 	if cfg.Vector.AnyLaneEnabled() {
@@ -4013,6 +4059,86 @@ func scheduledSyncPreemptible(s *store.Store, identifier string, logger *slog.Lo
 	return true
 }
 
+// newDaemonGmailClient reuses source-bound credentials without interactive reauth.
+// serviceAccount reports which credentials the returned client uses.
+func newDaemonGmailClient(
+	ctx context.Context, email string, src *store.Source,
+	getOAuthMgr func(string) (*oauth.Manager, error), state *invocation,
+) (client gmail.API, serviceAccount bool, err error) {
+	if state == nil {
+		state = invocationFromContext(ctx)
+	}
+	if state == nil || state.cfg == nil || state.logger == nil {
+		return nil, false, errors.New("configuration is unavailable")
+	}
+	cfg := state.cfg
+	logger := state.logger
+	appName := ""
+	if src != nil {
+		appName = sourceOAuthApp(src)
+	}
+
+	var tokenSource oauth2.TokenSource
+	var tsErr error
+
+	saKeyPath := cfg.OAuth.ServiceAccountKeyFor(appName)
+	if saKeyPath != "" {
+		saMgr, saErr := oauth.NewServiceAccountManager(saKeyPath, oauth.Scopes)
+		if saErr != nil {
+			return nil, false, provideridentity.NewGmailCredentialError(
+				provideridentity.GmailServiceAccountConfiguration,
+				fmt.Errorf("service account for %s: %w", email, saErr),
+			)
+		}
+		tokenSource, tsErr = saMgr.TokenSource(ctx, email)
+		if tsErr != nil {
+			return nil, false, provideridentity.NewGmailCredentialError(
+				provideridentity.GmailServiceAccountConfiguration,
+				fmt.Errorf("service account token for %s: %w", email, tsErr),
+			)
+		}
+	} else {
+		oauthMgr, oaErr := getOAuthMgr(appName)
+		if oaErr != nil {
+			return nil, false, provideridentity.NewGmailCredentialError(
+				provideridentity.GmailOAuthConfiguration,
+				fmt.Errorf("resolve OAuth credentials for %s: %w", email, oaErr),
+			)
+		}
+		tokenSource, tsErr = oauthMgr.TokenSource(ctx, email)
+		if tsErr != nil {
+			// Distinguish transient network failures (DNS lookup timeout,
+			// dial timeout after laptop sleep/wake, Wi-Fi flap) from real
+			// auth errors. Suggesting reauth on every network blip sends
+			// the user down the wrong path.
+			if syncerr.IsTransientNetwork(tsErr) {
+				return nil, false, fmt.Errorf(
+					"get token source: %w (transient network error; will retry on next schedule)", tsErr,
+				)
+			}
+			if oauthMgr.HasToken(email) {
+				return nil, false, provideridentity.ClassifyGmailProfileError(fmt.Errorf(
+					"get token source: %w (token may be expired; %s)",
+					tsErr, gmailReauthHint(email, accountIsNarrowed(oauthMgr, email)),
+				), false)
+			}
+			missing := fmt.Errorf("get token source: %w (run 'msgvault add-account %s' first)", tsErr, email)
+			if errors.Is(tsErr, os.ErrNotExist) {
+				return nil, false, provideridentity.NewGmailCredentialError(
+					provideridentity.GmailTokenMissing, missing,
+				)
+			}
+			return nil, false, missing
+		}
+	}
+
+	rateLimiter := gmail.NewRateLimiter(float64(cfg.Sync.RateLimitQPS))
+	return gmail.NewClient(tokenSource,
+		gmail.WithLogger(logger),
+		gmail.WithRateLimiter(rateLimiter),
+	), saKeyPath != "", nil
+}
+
 // runScheduledGmailSync runs an incremental Gmail sync for the daemon.
 // Token-source lookup uses oauthMgr.TokenSource directly (not
 // getTokenSourceWithReauth) because serve runs as a daemon and cannot
@@ -4027,49 +4153,10 @@ func runScheduledGmailSync(ctx context.Context, email string, src *store.Source,
 	}
 	cfg := state.cfg
 	logger := state.logger
-	appName := ""
-	if src != nil {
-		appName = sourceOAuthApp(src)
+	client, _, err := newDaemonGmailClient(ctx, email, src, getOAuthMgr, state)
+	if err != nil {
+		return nil, err
 	}
-
-	var tokenSource oauth2.TokenSource
-	var tsErr error
-
-	if saKeyPath := cfg.OAuth.ServiceAccountKeyFor(appName); saKeyPath != "" {
-		saMgr, saErr := oauth.NewServiceAccountManager(saKeyPath, oauth.Scopes)
-		if saErr != nil {
-			return nil, fmt.Errorf("service account for %s: %w", email, saErr)
-		}
-		tokenSource, tsErr = saMgr.TokenSource(ctx, email)
-		if tsErr != nil {
-			return nil, fmt.Errorf("service account token for %s: %w", email, tsErr)
-		}
-	} else {
-		oauthMgr, oaErr := getOAuthMgr(appName)
-		if oaErr != nil {
-			return nil, fmt.Errorf("resolve OAuth credentials for %s: %w", email, oaErr)
-		}
-		tokenSource, tsErr = oauthMgr.TokenSource(ctx, email)
-		if tsErr != nil {
-			// Distinguish transient network failures (DNS lookup timeout,
-			// dial timeout after laptop sleep/wake, Wi-Fi flap) from real
-			// auth errors. Suggesting reauth on every network blip sends
-			// the user down the wrong path.
-			if syncerr.IsTransientNetwork(tsErr) {
-				return nil, fmt.Errorf("get token source: %w (transient network error; will retry on next schedule)", tsErr)
-			}
-			if oauthMgr.HasToken(email) {
-				return nil, fmt.Errorf("get token source: %w (token may be expired; %s)", tsErr, gmailReauthHint(email, accountIsNarrowed(oauthMgr, email)))
-			}
-			return nil, fmt.Errorf("get token source: %w (run 'msgvault add-account %s' first)", tsErr, email)
-		}
-	}
-
-	rateLimiter := gmail.NewRateLimiter(float64(cfg.Sync.RateLimitQPS))
-	client := gmail.NewClient(tokenSource,
-		gmail.WithLogger(logger),
-		gmail.WithRateLimiter(rateLimiter),
-	)
 	defer func() { _ = client.Close() }()
 
 	opts := sync.DefaultOptions()

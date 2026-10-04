@@ -6,6 +6,12 @@ description: Release history for msgvault
 
 All notable changes to msgvault, grouped by release.
 
+## Unreleased
+
+- Rerunning `import-whatsapp` on an Apple `ChatStorage.sqlite` writes only new
+  and changed messages instead of rewriting the whole archive, and picks up
+  edits and senders that `LID.sqlite` resolves later.
+
 ## 0.21.0
 <small>2026-10-02</small>
 

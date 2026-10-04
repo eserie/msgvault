@@ -447,25 +447,49 @@ func truncateBytesRuneSafe(s string) string {
 // callers treat the returned error as warn-only on the sync path (search_fts
 // stays NULL), so a bad input can never wedge FTS.
 func (d *PostgreSQLDialect) FTSUpsert(q querier, doc FTSDoc) error {
-	subject := truncateBytesRuneSafe(doc.Subject)
-	body := truncateBytesRuneSafe(doc.Body)
-	fromAddr := truncateBytesRuneSafe(doc.FromAddr)
-	toAddrs := truncateBytesRuneSafe(doc.ToAddrs)
-	ccAddrs := truncateBytesRuneSafe(doc.CcAddrs)
-	charCap := strconv.Itoa(maxFTSBodyChars)
+	vector, args := pgFTSVector(doc)
 	_, err := q.Exec(
-		`UPDATE messages SET search_fts =
-			setweight(to_tsvector('simple', LEFT(COALESCE($2, ''), `+charCap+`)), 'A') ||
-			setweight(to_tsvector('simple', LEFT(COALESCE($4, ''), `+charCap+`)), 'B') ||
-			setweight(to_tsvector('simple', LEFT(COALESCE($5, ''), `+charCap+`)), 'C') ||
-			setweight(to_tsvector('simple', LEFT(COALESCE($6, ''), `+charCap+`)), 'C') ||
-			setweight(to_tsvector('simple', LEFT(COALESCE($3, ''), `+charCap+`)), 'D'),
+		`UPDATE messages SET search_fts = `+vector+`,
 			indexing_version = `+strconv.Itoa(CurrentFTSIndexingVersion)+`
 		WHERE id = $1`,
-		doc.MessageID, subject, body,
-		fromAddr, toAddrs, ccAddrs,
+		args...,
 	)
 	return err
+}
+
+// FTSMatches compares the stored tsvector with the one FTSUpsert would write.
+func (d *PostgreSQLDialect) FTSMatches(q querier, doc FTSDoc) (bool, error) {
+	vector, args := pgFTSVector(doc)
+	var matches bool
+	err := q.QueryRow(
+		`SELECT COALESCE(search_fts = `+vector+`
+			AND indexing_version = `+strconv.Itoa(CurrentFTSIndexingVersion)+`, FALSE)
+		FROM messages WHERE id = $1`,
+		args...,
+	).Scan(&matches)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return matches, err
+}
+
+// pgFTSVector returns the bounded tsvector expression for doc and its
+// arguments, with $1 bound to doc.MessageID.
+func pgFTSVector(doc FTSDoc) (string, []any) {
+	charCap := strconv.Itoa(maxFTSBodyChars)
+	vector := `setweight(to_tsvector('simple', LEFT(COALESCE($2, ''), ` + charCap + `)), 'A') ||
+			setweight(to_tsvector('simple', LEFT(COALESCE($4, ''), ` + charCap + `)), 'B') ||
+			setweight(to_tsvector('simple', LEFT(COALESCE($5, ''), ` + charCap + `)), 'C') ||
+			setweight(to_tsvector('simple', LEFT(COALESCE($6, ''), ` + charCap + `)), 'C') ||
+			setweight(to_tsvector('simple', LEFT(COALESCE($3, ''), ` + charCap + `)), 'D')`
+	return vector, []any{
+		doc.MessageID,
+		truncateBytesRuneSafe(doc.Subject),
+		truncateBytesRuneSafe(doc.Body),
+		truncateBytesRuneSafe(doc.FromAddr),
+		truncateBytesRuneSafe(doc.ToAddrs),
+		truncateBytesRuneSafe(doc.CcAddrs),
+	}
 }
 
 // FTSSearchClause returns SQL fragments for tsvector full-text search.
