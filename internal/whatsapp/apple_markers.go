@@ -34,7 +34,10 @@ type appleChatMarkerState struct {
 type appleChatAggregate struct {
 	Messages int64
 	MaxRowID int64
-	OptSum   int64
+	// LatestDate catches a new message that reuses the Z_PK and Z_OPT of one
+	// lost when WhatsApp was restored from an older backup.
+	LatestDate float64
+	OptSum     int64
 	// OptMix weights each Z_OPT by its row's mix, so revisions that shift
 	// between rows without changing their total still change the marker.
 	OptMix int64
@@ -74,7 +77,7 @@ func fetchAppleChatAggregates(
 	// sums of Z_PK.
 	rows, err := db.QueryContext(ctx, `
 		WITH scrambled AS (
-			SELECT ZCHATSESSION, Z_PK, Z_OPT, ZGROUPMEMBER,
+			SELECT ZCHATSESSION, Z_PK, Z_OPT, ZGROUPMEMBER, ZMESSAGEDATE,
 			       (Z_PK * 2654435761) % 4294967291 AS x
 			FROM ZWAMESSAGE
 			WHERE ZCHATSESSION IS NOT NULL
@@ -82,7 +85,8 @@ func fetchAppleChatAggregates(
 			SELECT *, ((x | (x >> 16)) - (x & (x >> 16))) * 73244475 % 4294967291 AS mix
 			FROM scrambled
 		)
-		SELECT m.ZCHATSESSION, COUNT(*), MAX(m.Z_PK), COUNT(m.Z_OPT),
+		SELECT m.ZCHATSESSION, COUNT(*), MAX(m.Z_PK),
+		       COALESCE(MAX(m.ZMESSAGEDATE), 0), COUNT(m.Z_OPT),
 		       COALESCE(SUM(m.Z_OPT), 0), COALESCE(SUM(m.mix * m.Z_OPT), 0),
 		       SUM(m.Z_PK), SUM(m.mix), COUNT(gm.Z_PK),
 		       COALESCE(SUM(gm.Z_PK), 0), COUNT(gm.Z_OPT),
@@ -101,7 +105,8 @@ func fetchAppleChatAggregates(
 		var chatRowID, messagesWithOpt, membersWithOpt int64
 		var aggregate appleChatAggregate
 		if err := rows.Scan(
-			&chatRowID, &aggregate.Messages, &aggregate.MaxRowID, &messagesWithOpt,
+			&chatRowID, &aggregate.Messages, &aggregate.MaxRowID, &aggregate.LatestDate,
+			&messagesWithOpt,
 			&aggregate.OptSum, &aggregate.OptMix, &aggregate.RowSum, &aggregate.RowMix,
 			&aggregate.Members, &aggregate.MemberRowSum,
 			&membersWithOpt, &aggregate.MemberOptSum,
@@ -158,8 +163,9 @@ func appleChatMarker(
 	}
 	// Stored as a short digest: the cursor is read with every source and
 	// shouldn't carry contact names.
-	sum := sha256.Sum256(fmt.Appendf(nil, "%d %q %q %d %d %d %d %d %d %d %d %d",
+	sum := sha256.Sum256(fmt.Appendf(nil, "%d %q %q %d %d %v %d %d %d %d %d %d %d",
 		conversationID, chat.RawJID, chat.Name, aggregate.Messages, aggregate.MaxRowID,
+		aggregate.LatestDate,
 		aggregate.OptSum, aggregate.OptMix, aggregate.RowSum, aggregate.RowMix,
 		aggregate.Members, aggregate.MemberRowSum, aggregate.MemberOptSum,
 	))

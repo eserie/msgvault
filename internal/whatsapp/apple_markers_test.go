@@ -327,6 +327,29 @@ func TestImportAppleRerunReadsChatsAfterBalancedMoves(t *testing.T) {
 	}
 }
 
+func TestImportAppleRerunReadsChatAfterBackupRestore(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+
+	chatDBPath := createAppleMarkerFixture(t)
+	execAppleFixture(t, chatDBPath, `
+		INSERT INTO ZWAMESSAGE VALUES (30, 1, NULL, 'lost', 1, 700000030, 'lost', 0, '', 1)
+	`)
+	st := testutil.NewTestStore(t)
+	importer := NewImporter(st, nil)
+	_, err := importer.Import(context.Background(), chatDBPath, appleTestOptions())
+	require.NoError(err)
+
+	// The restored store drops row 30 and hands its Z_PK to a newer message.
+	execAppleFixture(t, chatDBPath, `
+		DELETE FROM ZWAMESSAGE WHERE Z_PK = 30;
+		INSERT INTO ZWAMESSAGE VALUES (30, 1, NULL, 'after-restore', 1, 700000040, 'after restore', 0, '', 1);
+	`)
+	_, err = importer.Import(context.Background(), chatDBPath, appleTestOptions())
+	require.NoError(err)
+	assert.Equal("after restore", appleBodyText(t, st, "after-restore"))
+}
+
 func TestImportAppleRerunReadsChatsWithoutMarkers(t *testing.T) {
 	tests := []struct {
 		name    string
