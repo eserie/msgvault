@@ -14,13 +14,13 @@ import (
 	"go.kenn.io/msgvault/internal/testutil"
 )
 
-func execAppleFixture(t *testing.T, path, statements string) {
-	t.Helper()
+func execAppleFixture(tb testing.TB, path, statements string) {
+	tb.Helper()
 	db, err := sql.Open("sqlite3", path)
-	require.NoError(t, err)
+	require.NoError(tb, err)
 	_, err = db.Exec(statements)
-	require.NoError(t, err)
-	require.NoError(t, db.Close())
+	require.NoError(tb, err)
+	require.NoError(tb, db.Close())
 }
 
 var appleRerunSentinel = time.Date(2001, 2, 3, 4, 5, 6, 0, time.UTC)

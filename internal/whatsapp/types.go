@@ -111,6 +111,10 @@ type ImportOptions struct {
 
 	// BatchSize is the number of messages to process per batch (default: 1000).
 	BatchSize int
+
+	// Full makes an Apple import compare every message, including chats whose
+	// change markers match the last successful import.
+	Full bool
 }
 
 // DefaultOptions returns ImportOptions with sensible defaults.
