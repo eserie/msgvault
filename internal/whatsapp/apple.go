@@ -326,7 +326,8 @@ func (imp *Importer) importApple(
 
 			var stanzaIDs []string
 			for _, sourceMessage := range messages {
-				if isImportableAppleMessage(sourceMessage, duplicateStanzas) {
+				if appleMessageInWindow(sourceMessage, opts) &&
+					isImportableAppleMessage(sourceMessage, duplicateStanzas) {
 					stanzaIDs = append(stanzaIDs, sourceMessage.StanzaID)
 				}
 			}

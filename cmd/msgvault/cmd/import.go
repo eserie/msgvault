@@ -208,6 +208,9 @@ func parseWhatsAppDateWindow(afterFlag, beforeFlag string) (after, before time.T
 			return after, before, fmt.Errorf("invalid --before date: %w (use YYYY-MM-DD format)", err)
 		}
 	}
+	if !after.IsZero() && !before.IsZero() && !after.Before(before) {
+		return after, before, fmt.Errorf("--after %s must be earlier than --before %s", afterFlag, beforeFlag)
+	}
 	return after, before, nil
 }
 

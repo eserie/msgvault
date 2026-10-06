@@ -1,5 +1,5 @@
 ---
-last_edited: "2026-10-04"
+last_edited: "2026-10-06"
 title: Text Messages
 description: Import chats and texts from common exports, and browse synchronized Teams and Discord conversations in msgvault.
 ---
@@ -98,10 +98,12 @@ msgvault import-whatsapp --phone +447700900000 --after 2026-01-01 \
   "$HOME/Library/Group Containers/group.net.whatsapp.WhatsApp.shared/ChatStorage.sqlite"
 ```
 
-`--after` includes that day and `--before` excludes it. A dated run writes only
-messages inside the window and leaves everything else in your archive alone, so
-the later full run adds the older messages. Android `msgstore.db` imports reject
-`--after` and `--before`.
+`--after` includes that day and `--before` excludes it, and `--after` must be
+earlier than `--before`. A dated run imports only messages inside the window and
+never removes messages already in your archive, so the later full run adds the
+rest. It still creates every chat, so chats with no messages in the window
+appear empty until the full run. Android `msgstore.db` imports reject `--after`
+and `--before`.
 
 ### Format limits
 

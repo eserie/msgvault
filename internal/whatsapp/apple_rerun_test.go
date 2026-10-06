@@ -579,6 +579,31 @@ func TestImportAppleBeforeWindowIsExclusiveAndDoesNotRemove(t *testing.T) {
 	assertStoreCount(t, st.DB(), "messages", 4)
 }
 
+func TestImportAppleDateWindowSkipsUndatedMessage(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+
+	chatDBPath := createAppleChatFixture(t)
+	createAppleLIDFixture(t, filepath.Dir(chatDBPath))
+	execAppleFixture(t, chatDBPath, `UPDATE ZWAMESSAGE SET ZMESSAGEDATE = NULL WHERE Z_PK = 1`)
+	st := testutil.NewTestStore(t)
+	importer := NewImporter(st, nil)
+
+	windowed := appleTestOptions()
+	windowed.Before = appleFixtureTime(800000000)
+	_, err := importer.Import(context.Background(), chatDBPath, windowed)
+	require.NoError(err)
+	assert.Equal([]string{"direct-out", "group-in", "lid-in"}, appleStoredSourceIDs(t, st))
+
+	full, err := importer.Import(context.Background(), chatDBPath, appleTestOptions())
+	require.NoError(err)
+	assert.Equal(int64(1), full.MessagesAdded)
+	assert.Equal(
+		[]string{"direct-in", "direct-out", "group-in", "lid-in"},
+		appleStoredSourceIDs(t, st),
+	)
+}
+
 func TestImportAndroidRejectsDateWindow(t *testing.T) {
 	waDBPath := createGroupParticipantsImportFixture(t, func(*sql.DB) {})
 	st := testutil.NewTestStore(t)

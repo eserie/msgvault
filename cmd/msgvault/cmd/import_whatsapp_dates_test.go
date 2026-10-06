@@ -26,4 +26,8 @@ func TestParseWhatsAppDateWindow(t *testing.T) {
 	require.ErrorContains(err, "invalid --after date")
 	_, _, err = parseWhatsAppDateWindow("", "tomorrow")
 	require.ErrorContains(err, "invalid --before date")
+	_, _, err = parseWhatsAppDateWindow("2026-02-03", "2026-02-03")
+	require.ErrorContains(err, "must be earlier than --before")
+	_, _, err = parseWhatsAppDateWindow("2026-02-03", "2026-01-02")
+	require.ErrorContains(err, "must be earlier than --before")
 }
