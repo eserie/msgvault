@@ -143,11 +143,14 @@ func appleChatMarker(
 	if aggregate.Ambiguous {
 		return ""
 	}
-	return fmt.Sprintf("%d %q %q %d %d %d %d %d %d %d %d %d",
+	// Stored as a short digest: the cursor is read with every source and
+	// shouldn't carry contact names.
+	sum := sha256.Sum256(fmt.Appendf(nil, "%d %q %q %d %d %d %d %d %d %d %d %d",
 		conversationID, chat.RawJID, chat.Name, aggregate.Messages, aggregate.MaxRowID,
 		aggregate.OptSum, aggregate.OptMix, aggregate.RowSum, aggregate.RowMix,
 		aggregate.Members, aggregate.MemberRowSum, aggregate.MemberOptSum,
-	)
+	))
+	return hex.EncodeToString(sum[:8])
 }
 
 // appleImportContext fingerprints the inputs outside a chat's own rows that
@@ -161,7 +164,6 @@ func appleImportContext(
 	duplicateStanzas map[string]struct{},
 ) (string, error) {
 	encoded, err := json.Marshal(struct {
-		Version    int                 `json:"v"`
 		Phone      string              `json:"phone"`
 		Store      string              `json:"store"`
 		Self       int64               `json:"self"`
@@ -169,7 +171,7 @@ func appleImportContext(
 		PushNames  map[string]string   `json:"push_names"`
 		Duplicates map[string]struct{} `json:"duplicates"`
 	}{
-		appleChatMarkerVersion, phone, storeIdentity, selfParticipantID,
+		phone, storeIdentity, selfParticipantID,
 		lidMap, pushNames, duplicateStanzas,
 	}, json.Deterministic(true))
 	if err != nil {

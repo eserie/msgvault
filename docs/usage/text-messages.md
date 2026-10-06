@@ -80,14 +80,14 @@ After an interrupted run, rerun the command to finish. Messages deleted in
 WhatsApp stay in your archive.
 
 A rerun reads only the chats that changed since the last successful import.
-WhatsApp's database records a revision counter on every message and group
-member row, and msgvault compares each chat's name, message count, row IDs,
-and revision totals with what it recorded last time. Every chat is read again when
+WhatsApp's database records a revision counter on every message and group member
+row, and msgvault compares each chat's name, message count, row IDs, and
+revision totals with what it recorded last time. Every chat is read again when
 `LID.sqlite`, the profile push names, the phone number, or the database itself
-(its Core Data store ID) changes, when another import of the same source
-completed in between, or when the database lacks those counters or that ID.
-Pass `--full` to compare every message regardless, for example after editing
-archived WhatsApp messages by other means.
+(its Core Data store ID) changes, when any other import of the same source ran
+in between (even one that failed), or when the database lacks those counters or
+that ID. Pass `--full` to compare every message regardless, for example after
+restoring an older WhatsApp backup or editing archived messages by other means.
 
 ### Format limits
 
