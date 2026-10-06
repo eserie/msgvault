@@ -174,23 +174,22 @@ func appleChatMarker(
 
 // appleImportContext fingerprints the inputs outside a chat's own rows that
 // shape its derived messages and sender names, including which database they
-// came from: two databases imported under one phone can have equal aggregates.
+// came from: two databases imported into one source can have equal aggregates.
 // Markers recorded under another context are ignored.
 func appleImportContext(
-	phone, storeIdentity string,
+	storeIdentity string,
 	selfParticipantID int64,
 	lidMap, pushNames map[string]string,
 	duplicateStanzas map[string]struct{},
 ) (string, error) {
 	encoded, err := json.Marshal(struct {
-		Phone      string              `json:"phone"`
 		Store      string              `json:"store"`
 		Self       int64               `json:"self"`
 		LID        map[string]string   `json:"lid"`
 		PushNames  map[string]string   `json:"push_names"`
 		Duplicates map[string]struct{} `json:"duplicates"`
 	}{
-		phone, storeIdentity, selfParticipantID,
+		storeIdentity, selfParticipantID,
 		lidMap, pushNames, duplicateStanzas,
 	}, json.Deterministic(true))
 	if err != nil {

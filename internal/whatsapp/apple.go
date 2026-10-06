@@ -185,7 +185,7 @@ func (imp *Importer) importApple(
 		markersAvailable, aggregates = false, nil
 	}
 	importContext, err := appleImportContext(
-		opts.Phone, storeIdentity, selfParticipantID, lidMap, pushNames, duplicateStanzas,
+		storeIdentity, selfParticipantID, lidMap, pushNames, duplicateStanzas,
 	)
 	if err != nil {
 		return nil, err
