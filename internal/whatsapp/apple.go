@@ -751,6 +751,9 @@ func ensureAppleParticipant(
 	return participantID, nil
 }
 
+// mapAppleMessage derives a stored message from an Apple row. Bump
+// appleChatMarkerVersion when it or isImportableAppleMessage changes, or
+// unchanged chats keep the old derivation.
 func mapAppleMessage(
 	message appleMessage,
 	conversationID, sourceID int64,
