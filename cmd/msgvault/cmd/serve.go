@@ -3847,7 +3847,7 @@ func (a *schedulerAdapter) TriggerJob(name string) error {
 	return a.jobScheduler(name).TriggerJob(name)
 }
 
-func (a *schedulerAdapter) StartJob(name string) error {
+func (a *schedulerAdapter) StartJob(name string) (scheduler.JobDisposition, error) {
 	return a.jobScheduler(name).StartJob(name)
 }
 
