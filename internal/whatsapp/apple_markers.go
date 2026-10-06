@@ -35,11 +35,13 @@ type appleChatAggregate struct {
 	Messages int64
 	MaxRowID int64
 	OptSum   int64
-	// OptMix weights each Z_OPT by its Z_PK, so revisions that shift between
-	// rows without changing their total still change the marker.
+	// OptMix weights each Z_OPT by its row's mix, so revisions that shift
+	// between rows without changing their total still change the marker.
 	OptMix int64
 	// RowSum and RowMix fingerprint which rows belong to the chat. Count, highest
 	// Z_PK and Z_OPT total alone cannot tell that rows moved between chats.
+	// RowMix sums a hash of each Z_PK, so two row sets with equal sums still
+	// differ.
 	RowSum       int64
 	RowMix       int64
 	Members      int64
@@ -67,15 +69,26 @@ func fetchAppleChatAggregates(
 		}
 	}
 
+	// mix scrambles Z_PK with a multiply, an xor-shift (SQLite has no xor
+	// operator) and a second multiply, so sums of it share no algebra with
+	// sums of Z_PK.
 	rows, err := db.QueryContext(ctx, `
+		WITH scrambled AS (
+			SELECT ZCHATSESSION, Z_PK, Z_OPT, ZGROUPMEMBER,
+			       (Z_PK * 2654435761) % 4294967291 AS x
+			FROM ZWAMESSAGE
+			WHERE ZCHATSESSION IS NOT NULL
+		), mixed AS (
+			SELECT *, ((x | (x >> 16)) - (x & (x >> 16))) * 73244475 % 4294967291 AS mix
+			FROM scrambled
+		)
 		SELECT m.ZCHATSESSION, COUNT(*), MAX(m.Z_PK), COUNT(m.Z_OPT),
-		       COALESCE(SUM(m.Z_OPT), 0), COALESCE(SUM(m.Z_PK * m.Z_OPT), 0), SUM(m.Z_PK),
-		       SUM((m.Z_PK * m.Z_PK) % 1000000007), COUNT(gm.Z_PK),
+		       COALESCE(SUM(m.Z_OPT), 0), COALESCE(SUM(m.mix * m.Z_OPT), 0),
+		       SUM(m.Z_PK), SUM(m.mix), COUNT(gm.Z_PK),
 		       COALESCE(SUM(gm.Z_PK), 0), COUNT(gm.Z_OPT),
 		       COALESCE(SUM(gm.Z_OPT), 0)
-		FROM ZWAMESSAGE m
+		FROM mixed m
 		LEFT JOIN ZWAGROUPMEMBER gm ON gm.Z_PK = m.ZGROUPMEMBER
-		WHERE m.ZCHATSESSION IS NOT NULL
 		GROUP BY m.ZCHATSESSION
 	`)
 	if err != nil {

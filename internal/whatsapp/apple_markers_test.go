@@ -268,6 +268,65 @@ func TestImportAppleRerunReadsChatsAfterRowSwap(t *testing.T) {
 	assert.Contains(rewrittenAppleMessages(t, st), "group-in")
 }
 
+func TestImportAppleRerunReadsChatsAfterBalancedMoves(t *testing.T) {
+	// Each swap leaves chat 1's count, highest Z_PK, Z_PK sum and Z_OPT sum
+	// unchanged, and defeats any hash of Z_PK that is linear mod a prime.
+	tests := []struct {
+		name, setup, move string
+	}{
+		{
+			name: "equal sums of squares",
+			setup: `
+				(101, 1, NULL, 'm101', 1, 700000101, 'm101', 0, '', 2),
+				(105, 1, NULL, 'm105', 1, 700000105, 'm105', 0, '', 2),
+				(106, 1, NULL, 'm106', 1, 700000106, 'm106', 0, '', 2),
+				(102, 2, NULL, 'm102', 1, 700000102, 'm102', 0, '', 1),
+				(103, 2, NULL, 'm103', 1, 700000103, 'm103', 0, '', 1),
+				(107, 2, NULL, 'm107', 1, 700000107, 'm107', 0, '', 1),
+				(300, 1, NULL, 'pin-direct', 1, 700000300, 'pin direct', 0, '', 1),
+				(301, 2, NULL, 'pin-group', 1, 700000301, 'pin group', 0, '', 1)`,
+			move: `
+				UPDATE ZWAMESSAGE SET ZCHATSESSION = 2, Z_OPT = 3 WHERE Z_PK IN (101, 105, 106);
+				UPDATE ZWAMESSAGE SET ZCHATSESSION = 1, Z_OPT = 2 WHERE Z_PK IN (102, 103, 107);`,
+		},
+		{
+			name: "equal revision-weighted sums",
+			setup: `
+				(101, 1, NULL, 'm101', 1, 700000101, 'm101', 0, '', 2),
+				(104, 1, NULL, 'm104', 1, 700000104, 'm104', 0, '', 2),
+				(102, 2, NULL, 'm102', 1, 700000102, 'm102', 0, '', 1),
+				(103, 2, NULL, 'm103', 1, 700000103, 'm103', 0, '', 1),
+				(300, 1, NULL, 'pin-direct', 1, 700000300, 'pin direct', 0, '', 1),
+				(301, 2, NULL, 'pin-group', 1, 700000301, 'pin group', 0, '', 1)`,
+			move: `
+				UPDATE ZWAMESSAGE SET ZCHATSESSION = 2, Z_OPT = 3 WHERE Z_PK IN (101, 104);
+				UPDATE ZWAMESSAGE SET ZCHATSESSION = 1, Z_OPT = 2 WHERE Z_PK IN (102, 103);`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require := require.New(t)
+			assert := assert.New(t)
+
+			chatDBPath := createAppleMarkerFixture(t)
+			execAppleFixture(t, chatDBPath, `INSERT INTO ZWAMESSAGE VALUES `+tt.setup)
+			st := testutil.NewTestStore(t)
+			importer := NewImporter(st, nil)
+			_, err := importer.Import(context.Background(), chatDBPath, appleTestOptions())
+			require.NoError(err)
+
+			execAppleFixture(t, chatDBPath, tt.move)
+			_, err = importer.Import(context.Background(), chatDBPath, appleTestOptions())
+			require.NoError(err)
+			var moved, direct int64
+			query := st.Rebind(`SELECT conversation_id FROM messages WHERE source_message_id = ?`)
+			require.NoError(st.DB().QueryRow(query, "m102").Scan(&moved))
+			require.NoError(st.DB().QueryRow(query, "direct-in").Scan(&direct))
+			assert.Equal(direct, moved)
+		})
+	}
+}
+
 func TestImportAppleRerunReadsChatsWithoutMarkers(t *testing.T) {
 	tests := []struct {
 		name    string
