@@ -86,7 +86,7 @@ func fetchAppleChatAggregates(
 			FROM scrambled
 		)
 		SELECT m.ZCHATSESSION, COUNT(*), MAX(m.Z_PK),
-		       COALESCE(MAX(m.ZMESSAGEDATE), 0), COUNT(m.Z_OPT),
+		       COALESCE(MAX(CAST(m.ZMESSAGEDATE AS REAL)), 0), COUNT(m.Z_OPT),
 		       COALESCE(SUM(m.Z_OPT), 0), COALESCE(SUM(m.mix * m.Z_OPT), 0),
 		       SUM(m.Z_PK), SUM(m.mix), COUNT(gm.Z_PK),
 		       COALESCE(SUM(gm.Z_PK), 0), COUNT(gm.Z_OPT),

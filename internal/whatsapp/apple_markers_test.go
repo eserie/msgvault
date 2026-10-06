@@ -350,6 +350,16 @@ func TestImportAppleRerunReadsChatAfterBackupRestore(t *testing.T) {
 	assert.Equal("after restore", appleBodyText(t, st, "after-restore"))
 }
 
+func TestImportAppleMarkersAcceptTextDates(t *testing.T) {
+	chatDBPath := createAppleMarkerFixture(t)
+	execAppleFixture(t, chatDBPath, `UPDATE ZWAMESSAGE SET ZMESSAGEDATE = '' WHERE Z_PK = 2`)
+	summary, err := NewImporter(testutil.NewTestStore(t), nil).Import(
+		context.Background(), chatDBPath, appleTestOptions(),
+	)
+	require.NoError(t, err)
+	assert.Equal(t, int64(4), summary.MessagesAdded)
+}
+
 func TestImportAppleRerunReadsChatsWithoutMarkers(t *testing.T) {
 	tests := []struct {
 		name    string
