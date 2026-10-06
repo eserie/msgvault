@@ -15,7 +15,7 @@ import (
 // appleChatMarkerVersion names the marker layout and the message derivation
 // it vouches for. Bump it when either changes so the next import compares
 // every chat again.
-const appleChatMarkerVersion = 2
+const appleChatMarkerVersion = 1
 
 // appleChatMarkerState is the Apple import's source sync cursor: one change
 // marker per chat, valid only after the sync run that wrote it and under the
@@ -35,6 +35,9 @@ type appleChatAggregate struct {
 	Messages int64
 	MaxRowID int64
 	OptSum   int64
+	// OptMix weights each Z_OPT by its Z_PK, so revisions that shift between
+	// rows without changing their total still change the marker.
+	OptMix int64
 	// RowSum and RowMix fingerprint which rows belong to the chat. Count, highest
 	// Z_PK and Z_OPT total alone cannot tell that rows moved between chats.
 	RowSum       int64
@@ -66,7 +69,7 @@ func fetchAppleChatAggregates(
 
 	rows, err := db.QueryContext(ctx, `
 		SELECT m.ZCHATSESSION, COUNT(*), MAX(m.Z_PK), COUNT(m.Z_OPT),
-		       COALESCE(SUM(m.Z_OPT), 0), SUM(m.Z_PK),
+		       COALESCE(SUM(m.Z_OPT), 0), COALESCE(SUM(m.Z_PK * m.Z_OPT), 0), SUM(m.Z_PK),
 		       SUM((m.Z_PK * m.Z_PK) % 1000000007), COUNT(gm.Z_PK),
 		       COALESCE(SUM(gm.Z_PK), 0), COUNT(gm.Z_OPT),
 		       COALESCE(SUM(gm.Z_OPT), 0)
@@ -86,7 +89,7 @@ func fetchAppleChatAggregates(
 		var aggregate appleChatAggregate
 		if err := rows.Scan(
 			&chatRowID, &aggregate.Messages, &aggregate.MaxRowID, &messagesWithOpt,
-			&aggregate.OptSum, &aggregate.RowSum, &aggregate.RowMix,
+			&aggregate.OptSum, &aggregate.OptMix, &aggregate.RowSum, &aggregate.RowMix,
 			&aggregate.Members, &aggregate.MemberRowSum,
 			&membersWithOpt, &aggregate.MemberOptSum,
 		); err != nil {
@@ -127,7 +130,8 @@ func fetchAppleStoreIdentity(ctx context.Context, db *sql.DB) (string, error) {
 }
 
 // appleChatMarker returns the change marker for one chat, or "" when the chat
-// has no usable marker and must be read.
+// has no usable marker and must be read. It includes the chat's name because a
+// direct chat's sender takes it when the message row carries none.
 func appleChatMarker(
 	aggregates map[int64]appleChatAggregate, chat appleChat, conversationID int64,
 ) string {
@@ -139,10 +143,10 @@ func appleChatMarker(
 	if aggregate.Ambiguous {
 		return ""
 	}
-	return fmt.Sprintf("%d %q %d %d %d %d %d %d %d %d",
-		conversationID, chat.RawJID, aggregate.Messages, aggregate.MaxRowID,
-		aggregate.OptSum, aggregate.RowSum, aggregate.RowMix, aggregate.Members, aggregate.MemberRowSum,
-		aggregate.MemberOptSum,
+	return fmt.Sprintf("%d %q %q %d %d %d %d %d %d %d %d %d",
+		conversationID, chat.RawJID, chat.Name, aggregate.Messages, aggregate.MaxRowID,
+		aggregate.OptSum, aggregate.OptMix, aggregate.RowSum, aggregate.RowMix,
+		aggregate.Members, aggregate.MemberRowSum, aggregate.MemberOptSum,
 	)
 }
 
@@ -194,7 +198,7 @@ func (imp *Importer) previousAppleChatMarkers(
 	if !decoded || state.Version != appleChatMarkerVersion || state.Context != importContext {
 		return none, nil
 	}
-	last, err := imp.store.GetLatestSyncExcluding(ctx, source.ID, currentSyncID)
+	last, err := imp.store.GetLatestSyncContext(ctx, source.ID, currentSyncID)
 	if err != nil && !errors.Is(err, store.ErrSyncRunNotFound) {
 		return nil, fmt.Errorf("read latest sync: %w", err)
 	}

@@ -14,7 +14,7 @@ import (
 	"go.kenn.io/msgvault/internal/testutil"
 )
 
-func execAppleFixture(t *testing.T, path, statements string) {
+func execAppleFixture(t testing.TB, path, statements string) {
 	t.Helper()
 	db, err := sql.Open("sqlite3", path)
 	require.NoError(t, err)

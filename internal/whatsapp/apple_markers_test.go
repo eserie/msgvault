@@ -2,7 +2,6 @@ package whatsapp
 
 import (
 	"context"
-	"database/sql"
 	"path/filepath"
 	"testing"
 
@@ -17,27 +16,18 @@ import (
 func createAppleMarkerFixture(t *testing.T) string {
 	t.Helper()
 	path := createAppleChatFixture(t)
-	execAppleFixture(t, path, `
-		ALTER TABLE ZWAMESSAGE ADD COLUMN Z_OPT INTEGER DEFAULT 1;
-		ALTER TABLE ZWAGROUPMEMBER ADD COLUMN Z_OPT INTEGER DEFAULT 1;
-		UPDATE ZWAMESSAGE SET Z_OPT = 1;
-		UPDATE ZWAGROUPMEMBER SET Z_OPT = 1;
-		CREATE TABLE Z_METADATA (Z_VERSION INTEGER PRIMARY KEY, Z_UUID VARCHAR(255), Z_PLIST BLOB);
+	execAppleFixture(t, path, appleMarkerSchema+`
 		INSERT INTO Z_METADATA VALUES (1, 'store-uuid-a', NULL);
 	`)
 	return path
 }
 
-// stealthEditApple changes a message's text without bumping Z_OPT, so the
-// edit is visible only to an import that reads the row.
-func stealthEditApple(t *testing.T, path string, rowID int, text string) {
-	t.Helper()
-	db, err := sql.Open("sqlite3", path)
-	require.NoError(t, err)
-	_, err = db.Exec(`UPDATE ZWAMESSAGE SET ZTEXT = ? WHERE Z_PK = ?`, text, rowID)
-	require.NoError(t, err)
-	require.NoError(t, db.Close())
-}
+// appleMarkerSchema extends appleFixtureSchema with the change-marker inputs.
+const appleMarkerSchema = `
+	ALTER TABLE ZWAMESSAGE ADD COLUMN Z_OPT INTEGER DEFAULT 1;
+	ALTER TABLE ZWAGROUPMEMBER ADD COLUMN Z_OPT INTEGER DEFAULT 1;
+	CREATE TABLE Z_METADATA (Z_VERSION INTEGER PRIMARY KEY, Z_UUID VARCHAR(255), Z_PLIST BLOB);
+`
 
 func TestImportAppleRerunSkipsUnchangedChats(t *testing.T) {
 	require := require.New(t)
@@ -52,8 +42,9 @@ func TestImportAppleRerunSkipsUnchangedChats(t *testing.T) {
 	require.Equal(int64(4), first.MessagesAdded)
 	markAppleMessagesUnwritten(t, st)
 
-	// The rerun must not read chat 1: had it read the row, it would rewrite it.
-	stealthEditApple(t, chatDBPath, 1, "unseen edit")
+	// The rerun must not read chat 1: had it read this edit, which leaves
+	// Z_OPT alone, it would rewrite the row.
+	execAppleFixture(t, chatDBPath, `UPDATE ZWAMESSAGE SET ZTEXT = 'unseen edit' WHERE Z_PK = 1`)
 	second, err := importer.Import(context.Background(), chatDBPath, appleTestOptions())
 	require.NoError(err)
 	assert.Zero(second.MessagesProcessed)
@@ -133,6 +124,54 @@ func TestImportAppleRerunReadsChatsWithGroupMemberChange(t *testing.T) {
 	assert.Equal([]string{"group-in"}, rewrittenAppleMessages(t, st))
 }
 
+func TestImportAppleRerunAppliesLateChatName(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+
+	// Without LID.sqlite, chat 3's own JID stays unresolved, so only its
+	// messages name the sender, from the chat's name.
+	chatDBPath := createAppleMarkerFixture(t)
+	execAppleFixture(t, chatDBPath, `
+		UPDATE ZWACHATSESSION SET ZPARTNERNAME = '' WHERE Z_PK = 3;
+		UPDATE ZWAMESSAGE SET ZFROMJID = '15555550103@s.whatsapp.net' WHERE Z_PK = 5;
+	`)
+	st := testutil.NewTestStore(t)
+	importer := NewImporter(st, nil)
+	_, err := importer.Import(context.Background(), chatDBPath, appleTestOptions())
+	require.NoError(err)
+
+	execAppleFixture(t, chatDBPath, `UPDATE ZWACHATSESSION SET ZPARTNERNAME = 'Late Name' WHERE Z_PK = 3`)
+	_, err = importer.Import(context.Background(), chatDBPath, appleTestOptions())
+	require.NoError(err)
+	var name string
+	require.NoError(st.DB().QueryRow(
+		`SELECT COALESCE(display_name, '') FROM participants WHERE phone_number = '+15555550103'`,
+	).Scan(&name))
+	assert.Equal("Late Name", name)
+}
+
+func TestImportAppleRerunReadsChatAfterRevisionsShift(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+
+	// A restored copy of the store can hold the same revision total spread
+	// differently: row 1 at 2 and row 2 at 1, then row 1 at 1 and row 2 at 2.
+	chatDBPath := createAppleMarkerFixture(t)
+	execAppleFixture(t, chatDBPath, `UPDATE ZWAMESSAGE SET Z_OPT = 2 WHERE Z_PK = 1`)
+	st := testutil.NewTestStore(t)
+	importer := NewImporter(st, nil)
+	_, err := importer.Import(context.Background(), chatDBPath, appleTestOptions())
+	require.NoError(err)
+
+	execAppleFixture(t, chatDBPath, `
+		UPDATE ZWAMESSAGE SET Z_OPT = 1 WHERE Z_PK = 1;
+		UPDATE ZWAMESSAGE SET Z_OPT = 2, ZTEXT = 'restored edit' WHERE Z_PK = 2;
+	`)
+	_, err = importer.Import(context.Background(), chatDBPath, appleTestOptions())
+	require.NoError(err)
+	assert.Equal("restored edit", appleBodyText(t, st, "direct-out"))
+}
+
 func TestImportAppleRerunInvalidatesMarkers(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -168,7 +207,7 @@ func TestImportAppleRerunInvalidatesMarkers(t *testing.T) {
 			markAppleMessagesUnwritten(t, st)
 
 			tt.change(t, chatDBPath, first.SourceID, importer)
-			stealthEditApple(t, chatDBPath, 2, "outbound read again")
+			execAppleFixture(t, chatDBPath, `UPDATE ZWAMESSAGE SET ZTEXT = 'outbound read again' WHERE Z_PK = 2`)
 			summary, err := importer.Import(context.Background(), chatDBPath, appleTestOptions())
 			require.NoError(err)
 			assert.Contains(rewrittenAppleMessages(t, st), "direct-out")
@@ -267,7 +306,7 @@ func TestImportAppleRerunReadsChatsWithoutMarkers(t *testing.T) {
 			require.NoError(err)
 			markAppleMessagesUnwritten(t, st)
 
-			stealthEditApple(t, chatDBPath, 1, "edit without marker")
+			execAppleFixture(t, chatDBPath, `UPDATE ZWAMESSAGE SET ZTEXT = 'edit without marker' WHERE Z_PK = 1`)
 			summary, err := importer.Import(context.Background(), chatDBPath, appleTestOptions())
 			require.NoError(err)
 			assert.Equal(int64(1), summary.MessagesAdded)

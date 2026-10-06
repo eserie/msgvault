@@ -3531,7 +3531,7 @@ func (a *storeAPIAdapter) GetActiveSyncReadOnly(ctx context.Context, sourceID in
 }
 
 func (a *storeAPIAdapter) GetLatestSyncContext(ctx context.Context, sourceID int64) (*store.SyncRun, error) {
-	return a.store.GetLatestSyncContext(ctx, sourceID)
+	return a.store.GetLatestSyncContext(ctx, sourceID, 0)
 }
 
 func (a *storeAPIAdapter) GetSyncOperation(operationID string) (*store.SyncOperation, error) {

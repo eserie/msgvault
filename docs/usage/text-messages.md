@@ -81,12 +81,13 @@ WhatsApp stay in your archive.
 
 A rerun reads only the chats that changed since the last successful import.
 WhatsApp's database records a revision counter on every message and group
-member row, and msgvault compares each chat's message count, row IDs, and
-revision totals with what it recorded last time. Every chat is read again when
+member row, and msgvault compares each chat's name, message count, row IDs,
+and revision totals with what it recorded last time. Every chat is read again when
 `LID.sqlite`, the profile push names, the phone number, or the database itself
 (its Core Data store ID) changes, when another import of the same source
-completed in between, or when the database lacks those counters or that ID. Pass `--full` to compare every message regardless, for
-example after editing archived WhatsApp messages by other means.
+completed in between, or when the database lacks those counters or that ID.
+Pass `--full` to compare every message regardless, for example after editing
+archived WhatsApp messages by other means.
 
 ### Format limits
 

@@ -16,40 +16,25 @@ import (
 func createAppleBenchmarkFixture(b *testing.B, chats, messagesPerChat int) string {
 	b.Helper()
 	path := filepath.Join(b.TempDir(), "ChatStorage.sqlite")
+	execAppleFixture(b, path, appleFixtureSchema+appleMarkerSchema+`
+		CREATE INDEX ZWAMESSAGE_ZCHATSESSION_INDEX ON ZWAMESSAGE (ZCHATSESSION);
+		INSERT INTO Z_METADATA VALUES (1, 'benchmark-store-uuid', NULL);
+	`)
 	db, err := sql.Open("sqlite3", path)
 	require.NoError(b, err)
 	defer func() { require.NoError(b, db.Close()) }()
-	_, err = db.Exec(`
-		CREATE TABLE ZWACHATSESSION (
-			Z_PK INTEGER PRIMARY KEY, Z_OPT INTEGER, ZCONTACTJID TEXT,
-			ZPARTNERNAME TEXT, ZSESSIONTYPE INTEGER, ZLASTMESSAGEDATE TIMESTAMP
-		);
-		CREATE TABLE ZWAGROUPMEMBER (
-			Z_PK INTEGER PRIMARY KEY, Z_OPT INTEGER, ZCHATSESSION INTEGER,
-			ZMEMBERJID TEXT, ZCONTACTNAME TEXT, ZFIRSTNAME TEXT, ZISADMIN INTEGER
-		);
-		CREATE TABLE ZWAMESSAGE (
-			Z_PK INTEGER PRIMARY KEY, Z_OPT INTEGER, ZCHATSESSION INTEGER,
-			ZGROUPMEMBER INTEGER, ZSTANZAID TEXT, ZISFROMME INTEGER,
-			ZMESSAGEDATE TIMESTAMP, ZTEXT TEXT, ZMESSAGETYPE INTEGER, ZFROMJID TEXT
-		);
-		CREATE INDEX ZWAMESSAGE_ZCHATSESSION_INDEX ON ZWAMESSAGE (ZCHATSESSION);
-		CREATE TABLE Z_METADATA (Z_VERSION INTEGER PRIMARY KEY, Z_UUID VARCHAR(255), Z_PLIST BLOB);
-		INSERT INTO Z_METADATA VALUES (1, 'benchmark-store-uuid', NULL);
-	`)
-	require.NoError(b, err)
 
 	tx, err := db.Begin()
 	require.NoError(b, err)
 	rowID := 0
 	for chat := 1; chat <= chats; chat++ {
 		jid := fmt.Sprintf("1555%07d@s.whatsapp.net", chat)
-		_, err := tx.Exec(`INSERT INTO ZWACHATSESSION VALUES (?, 1, ?, ?, 0, ?)`,
+		_, err := tx.Exec(`INSERT INTO ZWACHATSESSION VALUES (?, ?, ?, 0, ?)`,
 			chat, jid, fmt.Sprintf("Chat %d", chat), 700000000+chat)
 		require.NoError(b, err)
 		for range messagesPerChat {
 			rowID++
-			_, err := tx.Exec(`INSERT INTO ZWAMESSAGE VALUES (?, 1, ?, NULL, ?, ?, ?, ?, 0, ?)`,
+			_, err := tx.Exec(`INSERT INTO ZWAMESSAGE VALUES (?, ?, NULL, ?, ?, ?, ?, 0, ?, 1)`,
 				rowID, chat, fmt.Sprintf("bench-%d", rowID), rowID%2,
 				600000000+rowID, fmt.Sprintf("benchmark message %d", rowID), jid)
 			require.NoError(b, err)

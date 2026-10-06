@@ -1311,20 +1311,21 @@ func (s *Store) getActiveSyncContext(ctx context.Context, sourceID int64) (*Sync
 
 // GetLatestSync returns the most recent sync run for a source, if any.
 func (s *Store) GetLatestSync(sourceID int64) (*SyncRun, error) {
-	return s.GetLatestSyncContext(context.Background(), sourceID)
+	return s.GetLatestSyncContext(context.Background(), sourceID, 0)
 }
 
-// GetLatestSyncContext is the request-aware form of GetLatestSync.
-func (s *Store) GetLatestSyncContext(ctx context.Context, sourceID int64) (*SyncRun, error) {
+// GetLatestSyncContext is the request-aware form of GetLatestSync. A nonzero
+// excludeID leaves that run out, so a running sync can find the one before it.
+func (s *Store) GetLatestSyncContext(ctx context.Context, sourceID, excludeID int64) (*SyncRun, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, source_id, started_at, completed_at, status,
 		       messages_processed, messages_added, messages_updated, errors_count,
 		       error_message, cursor_before, cursor_after, request_fingerprint
 		FROM sync_runs
-		WHERE source_id = ?
+		WHERE source_id = ? AND id <> ?
 		ORDER BY started_at DESC, id DESC
 		LIMIT 1
-	`, sourceID)
+	`, sourceID, excludeID)
 
 	run, err := scanSyncRun(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -1527,27 +1528,6 @@ func (s *Store) getLastSuccessfulSyncContext(ctx context.Context, sourceID int64
 			return nil, fmt.Errorf("last successful %s sync for source %d: %w", syncType, sourceID, ErrSyncRunNotFound)
 		}
 		return nil, fmt.Errorf("last successful sync for source %d: %w", sourceID, ErrSyncRunNotFound)
-	}
-	return run, err
-}
-
-// GetLatestSyncExcluding returns the most recently started sync run of a
-// source in any status, leaving out excludeID. Failed and interrupted runs
-// count: they may have committed writes before stopping.
-func (s *Store) GetLatestSyncExcluding(ctx context.Context, sourceID, excludeID int64) (*SyncRun, error) {
-	row := s.db.QueryRowContext(ctx, `
-		SELECT id, source_id, started_at, completed_at, status,
-		       messages_processed, messages_added, messages_updated, errors_count,
-		       error_message, cursor_before, cursor_after, request_fingerprint
-		FROM sync_runs
-		WHERE source_id = ? AND id <> ?
-		ORDER BY id DESC
-		LIMIT 1
-	`, sourceID, excludeID)
-
-	run, err := scanSyncRun(row)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("latest sync for source %d: %w", sourceID, ErrSyncRunNotFound)
 	}
 	return run, err
 }
