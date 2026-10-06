@@ -1,5 +1,5 @@
 ---
-last_edited: "2026-10-04"
+last_edited: "2026-10-05"
 title: Changelog
 description: Release history for msgvault
 ---
@@ -12,7 +12,9 @@ All notable changes to msgvault, grouped by release.
   chats that changed since the last successful import and writes only new and
   changed messages, instead of rewriting the whole archive. It picks up edits
   and senders that `LID.sqlite` resolves later. `--full` compares every message.
-
+- `import-whatsapp` accepts `--after` and `--before` for Apple databases, so a
+  first import can fetch recent messages before the full run. Android imports
+  reject both flags.
 - [Calendar event control](usage/calendar.md#control-events-unreleased) adds
   create, update, delete, move, self RSVP, and availability commands, plus HTTP
   and MCP interfaces. Write consent and exact source permissions are opt-in;

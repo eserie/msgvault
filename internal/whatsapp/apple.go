@@ -326,7 +326,8 @@ func (imp *Importer) importApple(
 
 			var stanzaIDs []string
 			for _, sourceMessage := range messages {
-				if isImportableAppleMessage(sourceMessage, duplicateStanzas) {
+				if appleMessageInWindow(sourceMessage, opts) &&
+					isImportableAppleMessage(sourceMessage, duplicateStanzas) {
 					stanzaIDs = append(stanzaIDs, sourceMessage.StanzaID)
 				}
 			}
@@ -342,6 +343,9 @@ func (imp *Importer) importApple(
 					break
 				}
 				afterRowID = sourceMessage.RowID
+				if !appleMessageInWindow(sourceMessage, opts) {
+					continue
+				}
 				summary.MessagesProcessed++
 				if !isImportableAppleMessage(sourceMessage, duplicateStanzas) {
 					summary.MessagesSkipped++
@@ -426,8 +430,11 @@ func (imp *Importer) importApple(
 				break
 			}
 		}
-		// A chat cut short by --limit may still hold unread changes.
-		if marker != "" && (totalLimit == 0 || totalAdded < totalLimit) {
+		// A chat cut short by --limit may still hold unread changes. A date
+		// window leaves older messages unwritten on purpose, so those chats
+		// stay unmarked and a later unfiltered run still imports them.
+		windowed := !opts.After.IsZero() || !opts.Before.IsZero()
+		if marker != "" && !windowed && (totalLimit == 0 || totalAdded < totalLimit) {
 			nextMarkers[chat.RowID] = marker
 		}
 		imp.progress.OnChatComplete(canonicalChatJID, chatAdded)
@@ -823,6 +830,26 @@ func appleMessageTimestamp(value appleTimestampValue) sql.NullTime {
 		Time:  time.Unix(int64(seconds)+appleEpochOffset, nanoseconds).UTC(),
 		Valid: true,
 	}
+}
+
+// appleMessageInWindow reports whether the message falls within the optional
+// [After, Before) window. A message without a valid timestamp is outside any
+// bounded window.
+func appleMessageInWindow(message appleMessage, opts ImportOptions) bool {
+	if opts.After.IsZero() && opts.Before.IsZero() {
+		return true
+	}
+	sent := appleMessageTimestamp(message.MessageDate)
+	if !sent.Valid {
+		return false
+	}
+	if !opts.After.IsZero() && sent.Time.Before(opts.After) {
+		return false
+	}
+	if !opts.Before.IsZero() && !sent.Time.Before(opts.Before) {
+		return false
+	}
+	return true
 }
 
 func appleMessageSnippet(text sql.NullString) sql.NullString {

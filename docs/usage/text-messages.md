@@ -1,5 +1,5 @@
 ---
-last_edited: "2026-10-04"
+last_edited: "2026-10-06"
 title: Text Messages
 description: Import chats and texts from common exports, and browse synchronized Teams and Discord conversations in msgvault.
 ---
@@ -88,6 +88,22 @@ revision totals with what it recorded last time. Every chat is read again when
 in between (even one that failed), or when the database lacks those counters or
 that ID. Pass `--full` to compare every message regardless, for example after
 restoring an older WhatsApp backup or editing archived messages by other means.
+
+A first import of a large database can take minutes. To get recent messages
+first, add `--after` (YYYY-MM-DD, local time; `--before` also works), then run
+the command again without it:
+
+```bash
+msgvault import-whatsapp --phone +447700900000 --after 2026-01-01 \
+  "$HOME/Library/Group Containers/group.net.whatsapp.WhatsApp.shared/ChatStorage.sqlite"
+```
+
+`--after` includes that day and `--before` excludes it, and `--after` must be
+earlier than `--before`. A dated run imports only messages inside the window and
+never removes messages already in your archive, so the later full run adds the
+rest. It still creates every chat, so chats with no messages in the window
+appear empty until the full run. Android `msgstore.db` imports reject `--after`
+and `--before`.
 
 ### Format limits
 
