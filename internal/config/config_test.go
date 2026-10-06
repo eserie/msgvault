@@ -2577,3 +2577,67 @@ trusted_imap_sent_mailboxes = { "imaps://alice@example.com@imap.example.com:993"
 	assert.Empty(cfg.Sync.TrustedIMAPSentMailboxes,
 		"unconfigured archives carry no explicit Sent-folder trust")
 }
+
+func TestLoadExplicitPathAppleDatabasePaths(t *testing.T) {
+	home, err := os.UserHomeDir()
+	require.NoError(t, err)
+
+	t.Run("tilde and relative paths are normalized", func(t *testing.T) {
+		require := require.New(t)
+		assert := assert.New(t)
+		tmpDir := t.TempDir()
+		configPath := filepath.Join(tmpDir, "config.toml")
+		require.NoError(os.WriteFile(configPath, []byte(`
+[imessage]
+enabled = true
+db_path = "~/Library/Messages/chat.db"
+
+[[whatsapp_apple]]
+name = "tilde"
+path = "~/wa/ChatStorage.sqlite"
+
+[[whatsapp_apple]]
+name = "relative"
+path = "wa/ChatStorage.sqlite"
+
+[[whatsapp_apple]]
+name = "absolute"
+path = "/abs/ChatStorage.sqlite"
+
+[[whatsapp_apple]]
+name = "default"
+`), 0o644))
+
+		cfg, err := Load(configPath, "")
+		require.NoError(err)
+
+		assert.Equal(filepath.Join(home, "Library", "Messages", "chat.db"), cfg.IMessage.DBPath)
+		require.Len(cfg.WhatsAppApple, 4)
+		assert.Equal(filepath.Join(home, "wa", "ChatStorage.sqlite"), cfg.WhatsAppApple[0].Path)
+		assert.Equal(filepath.Join(tmpDir, "wa", "ChatStorage.sqlite"), cfg.WhatsAppApple[1].Path)
+		assert.Equal("/abs/ChatStorage.sqlite", cfg.WhatsAppApple[2].Path)
+		assert.Empty(cfg.WhatsAppApple[3].Path, "an empty path keeps meaning the default")
+	})
+
+	t.Run("relative db_path resolves against the config directory", func(t *testing.T) {
+		require := require.New(t)
+		tmpDir := t.TempDir()
+		configPath := filepath.Join(tmpDir, "config.toml")
+		require.NoError(os.WriteFile(configPath, []byte("[imessage]\ndb_path = \"chat.db\"\n"), 0o644))
+
+		cfg, err := Load(configPath, "")
+		require.NoError(err)
+		assert.Equal(t, filepath.Join(tmpDir, "chat.db"), cfg.IMessage.DBPath)
+	})
+
+	t.Run("empty db_path stays empty", func(t *testing.T) {
+		require := require.New(t)
+		tmpDir := t.TempDir()
+		configPath := filepath.Join(tmpDir, "config.toml")
+		require.NoError(os.WriteFile(configPath, []byte("[imessage]\nenabled = true\n"), 0o644))
+
+		cfg, err := Load(configPath, "")
+		require.NoError(err)
+		assert.Empty(t, cfg.IMessage.DBPath)
+	})
+}
