@@ -424,6 +424,7 @@ import type {
   TotalStatsResponse,
   TriggerSyncParams,
   TriggerSyncPathParameters,
+  TriggerSyncResponse,
   UnlinkMessageTaskPathParameters,
   UnlinkPersonAgendaItemPathParameters,
   UnpublishCardDAVPersonPathParameters,
@@ -4003,9 +4004,9 @@ export const getTotalStats = (
 export const triggerSync = (
   { account }: TriggerSyncPathParameters,
   params?: TriggerSyncParams,
-  options?: SecondParameter<typeof orvalFetch<StatusMessageResponse>>,
+  options?: SecondParameter<typeof orvalFetch<TriggerSyncResponse>>,
 ) => {
-  return orvalFetch<StatusMessageResponse>(
+  return orvalFetch<TriggerSyncResponse>(
     {
       url: `/api/v1/sync/${encodeURIComponent(String(account))}`,
       method: "POST",

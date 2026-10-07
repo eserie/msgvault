@@ -3323,7 +3323,7 @@ type GetTotalStatsResponse = TotalStatsResponse
 
 type GetTotalStatsErrorResponse = ErrorResponse
 
-type TriggerSyncResponse = StatusMessageResponse
+type TriggerSyncResponseJSON = TriggerSyncResponse
 
 type TriggerSyncErrorResponse = ErrorResponse
 
@@ -6421,7 +6421,7 @@ type TriggerSyncResp struct {
 	HTTPResponse *http.Response
 	Body         []byte
 	StatusCode   int
-	JSON202      *TriggerSyncResponse
+	JSON202      *TriggerSyncResponseJSON
 }
 
 type CaptureTelemetryEventResp struct {
