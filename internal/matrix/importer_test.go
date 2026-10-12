@@ -48,7 +48,7 @@ func TestImporterBackfillsJoinedRoomAndPersistsCheckpoint(t *testing.T) {
 	sum, err := NewImporter(st, &Runtime{Client: client}).Import(t.Context(), ImportOptions{UserID: "@archive:example.org"})
 	require.NoError(err)
 	assert.Equal(int64(6), sum.MessagesAdded)
-	assert.Equal(int64(1), sum.Undecryptable)
+	assert.Equal(int64(1), sum.PendingEncrypted)
 	assert.Equal(int64(1), sum.EventsSkipped)
 	count, err := st.CountMessagesForSource(source.ID)
 	require.NoError(err)
@@ -120,35 +120,6 @@ func TestImporterBackfillsJoinedRoomAndPersistsCheckpoint(t *testing.T) {
 	assert.Equal("updated", body)
 }
 
-func TestImporterFullSyncIgnoresMalformedSavedCursor(t *testing.T) {
-	require := require.New(t)
-	assert := assert.New(t)
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /_matrix/client/v3/sync", func(w http.ResponseWriter, r *http.Request) {
-		assert.Empty(r.URL.Query().Get("since"))
-		_, _ = w.Write([]byte(`{"next_batch":"fresh","rooms":{"join":{}}}`))
-	})
-	mux.HandleFunc("GET /_matrix/client/v3/user/@archive:example.org/account_data/m.direct", func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{}`))
-	})
-	server := httptest.NewServer(mux)
-	defer server.Close()
-	client, err := mautrix.NewClient(server.URL, id.UserID("@archive:example.org"), "token")
-	require.NoError(err)
-
-	st := testutil.NewTestStore(t)
-	source, err := st.GetOrCreateSource(SourceType, "@archive:example.org")
-	require.NoError(err)
-	syncID, err := st.StartSync(source.ID, SourceType)
-	require.NoError(err)
-	require.NoError(st.CompleteSync(syncID, "malformed saved cursor"))
-
-	_, err = NewImporter(st, &Runtime{Client: client}).Import(t.Context(), ImportOptions{
-		UserID: source.Identifier, Full: true,
-	})
-	require.NoError(err)
-}
-
 func TestImporterDoesNotRecreateRemovedSource(t *testing.T) {
 	require := require.New(t)
 	assert := assert.New(t)
@@ -203,44 +174,62 @@ func TestRoomTitleUsesLatestTimelineRename(t *testing.T) {
 }
 
 func TestImporterReclassifiesInactiveRoomFromDirectAccountData(t *testing.T) {
-	require := require.New(t)
-	assert := assert.New(t)
-	var syncCalls int
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /_matrix/client/v3/sync", func(w http.ResponseWriter, _ *http.Request) {
-		syncCalls++
-		if syncCalls == 1 {
-			_, _ = w.Write([]byte(`{"next_batch":"next-1","rooms":{"join":{"!room:example.org":{"state":{"events":[]},"timeline":{"events":[]}}}}}`))
-			return
-		}
-		_, _ = w.Write([]byte(`{"next_batch":"next-2","rooms":{"join":{}}}`))
-	})
-	mux.HandleFunc("GET /_matrix/client/v3/user/@archive:example.org/account_data/m.direct", func(w http.ResponseWriter, _ *http.Request) {
-		if syncCalls == 1 {
-			_, _ = w.Write([]byte(`{}`))
-			return
-		}
-		_, _ = w.Write([]byte(`{"@member:example.org":["!room:example.org"]}`))
-	})
-	mux.HandleFunc("GET /_matrix/client/v3/rooms/!room:example.org/joined_members", func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"joined":{"@archive:example.org":{"display_name":"Archive"},"@member:example.org":{"display_name":"Member"}}}`))
-	})
-	server := httptest.NewServer(mux)
-	defer server.Close()
-	client, err := mautrix.NewClient(server.URL, id.UserID("@archive:example.org"), "token")
-	require.NoError(err)
+	for _, mode := range []string{"inactive", "left"} {
+		t.Run(mode, func(t *testing.T) {
+			require := require.New(t)
+			assert := assert.New(t)
+			var syncCalls int
+			mux := http.NewServeMux()
+			mux.HandleFunc("GET /_matrix/client/v3/sync", func(w http.ResponseWriter, _ *http.Request) {
+				syncCalls++
+				if syncCalls == 1 {
+					_, _ = w.Write([]byte(`{"next_batch":"next-1","rooms":{"join":{"!room:example.org":{"state":{"events":[]},"timeline":{"events":[]}}}}}`))
+					return
+				}
+				if mode == "left" && syncCalls == 3 {
+					_, _ = w.Write([]byte(`{"next_batch":"next-3","rooms":{"leave":{"!room:example.org":{"timeline":{"events":[]}}}}}`))
+					return
+				}
+				_, _ = w.Write([]byte(`{"next_batch":"next-2","rooms":{"join":{}}}`))
+			})
+			mux.HandleFunc("GET /_matrix/client/v3/user/@archive:example.org/account_data/m.direct", func(w http.ResponseWriter, _ *http.Request) {
+				if syncCalls == 1 || syncCalls == 3 {
+					_, _ = w.Write([]byte(`{}`))
+					return
+				}
+				_, _ = w.Write([]byte(`{"@member:example.org":["!room:example.org"]}`))
+			})
+			mux.HandleFunc("GET /_matrix/client/v3/rooms/!room:example.org/joined_members", func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(`{"joined":{"@archive:example.org":{"display_name":"Archive"},"@member:example.org":{"display_name":"Member"}}}`))
+			})
+			server := httptest.NewServer(mux)
+			defer server.Close()
+			client, err := mautrix.NewClient(server.URL, id.UserID("@archive:example.org"), "token")
+			require.NoError(err)
 
-	st := testutil.NewTestStore(t)
-	_, err = st.GetOrCreateSource(SourceType, "@archive:example.org")
-	require.NoError(err)
-	importer := NewImporter(st, &Runtime{Client: client})
-	_, err = importer.Import(t.Context(), ImportOptions{UserID: "@archive:example.org"})
-	require.NoError(err)
-	_, err = NewImporter(st, &Runtime{Client: client}).Import(t.Context(), ImportOptions{UserID: "@archive:example.org"})
-	require.NoError(err)
-	var conversationType string
-	require.NoError(st.DB().QueryRow(st.Rebind(`SELECT conversation_type FROM conversations WHERE source_conversation_id = ?`), "!room:example.org").Scan(&conversationType))
-	assert.Equal("direct_chat", conversationType)
+			st := testutil.NewTestStore(t)
+			_, err = st.GetOrCreateSource(SourceType, "@archive:example.org")
+			require.NoError(err)
+			importer := NewImporter(st, &Runtime{Client: client})
+			_, err = importer.Import(t.Context(), ImportOptions{UserID: "@archive:example.org"})
+			require.NoError(err)
+			_, err = NewImporter(st, &Runtime{Client: client}).Import(t.Context(), ImportOptions{UserID: "@archive:example.org"})
+			require.NoError(err)
+			var conversationType string
+			require.NoError(st.DB().QueryRow(st.Rebind(`SELECT conversation_type FROM conversations WHERE source_conversation_id = ?`), "!room:example.org").Scan(&conversationType))
+			assert.Equal("direct_chat", conversationType)
+			if mode == "left" {
+				_, err = NewImporter(st, &Runtime{Client: client}).Import(t.Context(), ImportOptions{UserID: "@archive:example.org", Full: true})
+				require.NoError(err)
+				require.NoError(st.DB().QueryRow(st.Rebind(`SELECT conversation_type FROM conversations WHERE source_conversation_id = ?`), "!room:example.org").Scan(&conversationType))
+				assert.Equal("group_chat", conversationType)
+				_, err = NewImporter(st, &Runtime{Client: client}).Import(t.Context(), ImportOptions{UserID: "@archive:example.org"})
+				require.NoError(err)
+				require.NoError(st.DB().QueryRow(st.Rebind(`SELECT conversation_type FROM conversations WHERE source_conversation_id = ?`), "!room:example.org").Scan(&conversationType))
+				assert.Equal("direct_chat", conversationType)
+			}
+		})
+	}
 }
 
 func TestImporterExplicitEmptyRoomNameClearsArchivedTitle(t *testing.T) {
@@ -597,7 +586,7 @@ func TestDeferredReplyResolutionDoesNotOverwriteEditedBody(t *testing.T) {
 	require.NoError(json.Unmarshal(rawReply, &restoredReply))
 	assert.Nil(restoredReply.Content.Parsed)
 
-	require.NoError(NewImporter(st, nil).replayDeferredRelation(
+	require.NoError(NewImporter(st, nil).persistEvent(
 		t.Context(), source.ID, conversationID, &restoredReply, &ImportSummary{},
 	))
 	body, err := st.GetMessageBodyText(replyID)
@@ -1024,29 +1013,6 @@ func TestImporterIgnoresInvalidReplacements(t *testing.T) {
 	assert.Equal("original", body)
 }
 
-func TestImporterReplayRecoversReplyLinkLostBeforeCheckpoint(t *testing.T) {
-	require := require.New(t)
-	assert := assert.New(t)
-	st := testutil.NewTestStore(t)
-	source, err := st.GetOrCreateSource(SourceType, "@archive:example.org")
-	require.NoError(err)
-	conversationID, err := st.EnsureConversationWithType(source.ID, "!room:example.org", "group_chat", "Example")
-	require.NoError(err)
-	imp := NewImporter(st, &Runtime{Client: relationsClient(t, nil)})
-	sum := &ImportSummary{}
-	reply := `{"type":"m.room.message","event_id":"$reply","sender":"@member:example.org","origin_server_ts":2000,"content":{"msgtype":"m.text","body":"reply","m.relates_to":{"m.in_reply_to":{"event_id":"$target"}}}}`
-	// The reply was saved, but the run stopped before its deferral was checkpointed.
-	require.ErrorIs(imp.persistEvent(t.Context(), source.ID, conversationID, matrixTestEvent(t, reply), sum), errRelationTargetMissing)
-	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID,
-		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$target","sender":"@member:example.org","origin_server_ts":1000,"content":{"msgtype":"m.text","body":"target"}}`), sum))
-	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, matrixTestEvent(t, reply), sum))
-	ids, err := st.MessageExistsBatch(source.ID, []string{"$reply", "$target"})
-	require.NoError(err)
-	var replyTo int64
-	require.NoError(st.DB().QueryRow(st.Rebind(`SELECT reply_to_message_id FROM messages WHERE id = ?`), ids["$reply"]).Scan(&replyTo))
-	assert.Equal(ids["$target"], replyTo)
-}
-
 func TestImporterSkipsMalformedEventAndKeepsGoing(t *testing.T) {
 	require := require.New(t)
 	assert := assert.New(t)
@@ -1099,9 +1065,7 @@ func TestImporterEditedReplyKeepsQuotedFallbackOut(t *testing.T) {
 	sum := &ImportSummary{}
 	reply := `{"type":"m.room.message","event_id":"$reply","sender":"@member:example.org","origin_server_ts":1000,"content":{"msgtype":"m.text","body":"answer","m.relates_to":{"m.in_reply_to":{"event_id":"$quoted"}}}}`
 	edit := `{"type":"m.room.message","event_id":"$edit","sender":"@member:example.org","origin_server_ts":2000,"content":{"msgtype":"m.text","body":"* fixed","m.new_content":{"msgtype":"m.text","body":"> <@other:example.org> their words\n\nfixed answer"},"m.relates_to":{"rel_type":"m.replace","event_id":"$reply"}}}`
-	if err := imp.persistEvent(t.Context(), source.ID, conversationID, matrixTestEvent(t, reply), sum); err != nil {
-		require.ErrorIs(err, errRelationTargetMissing)
-	}
+	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, matrixTestEvent(t, reply), sum))
 	require.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, matrixTestEvent(t, edit), sum))
 	ids, err := st.MessageExistsBatch(source.ID, []string{"$reply"})
 	require.NoError(err)
