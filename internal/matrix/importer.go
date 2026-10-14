@@ -1071,10 +1071,12 @@ func decodeArchivedEvent(raw []byte) (*event.Event, error) {
 	return &evt, nil
 }
 
+var errReadArchivedEvent = errors.New("read archived Matrix event")
+
 func (imp *Importer) archivedEvent(messageID int64) (*event.Event, error) {
 	raw, err := imp.store.GetMessageRaw(messageID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w %d: %w", errReadArchivedEvent, messageID, err)
 	}
 	original, err := decodeArchivedEvent(raw)
 	if err != nil {

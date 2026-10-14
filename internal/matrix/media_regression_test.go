@@ -1646,6 +1646,38 @@ func TestImportLegacyMediaDiscoveryResumesBudget(t *testing.T) {
 	}
 }
 
+func TestImportLegacyMediaDiscoverySkipsMalformedEvents(t *testing.T) {
+	for _, raw := range []string{`malformed`, `{"type":"m.room.message","event_id":"$media","content":{"msgtype":42}}`} {
+		t.Run(raw, func(t *testing.T) {
+			req, check := require.New(t), assert.New(t)
+			f := newRecoveryFixture(t)
+			f.timeline = []*event.Event{matrixTestEvent(t, `{"type":"m.room.message","event_id":"$media","sender":"@member:example.org","content":{"msgtype":"m.text","body":"text"}}`)}
+			runtime := backupRuntime(t, f.server.URL, f.backup)
+			opts := ImportOptions{UserID: "@archive:example.org", NoMedia: true}
+			_, err := NewImporter(f.store, runtime).Import(t.Context(), opts)
+			req.NoError(err)
+			ids, err := f.store.MessageExistsBatch(f.sourceID, []string{"$media"})
+			req.NoError(err)
+			req.NoError(f.store.UpsertMessageRawWithFormat(ids["$media"], []byte(raw), rawFormat))
+			f.quiet, f.left = true, true
+			opts.Rooms = []string{"!room:example.org"}
+			_, err = NewImporter(f.store, runtime).Import(t.Context(), opts)
+			req.NoError(err)
+			previous, err := f.store.GetLastSuccessfulSyncByType(f.sourceID, SourceType)
+			req.NoError(err)
+			state, err := loadSyncState(previous.CursorAfter.String)
+			req.NoError(err)
+			check.Equal(mediaDiscoveryVersion, state.MediaDiscoveryVersion)
+			check.Zero(state.MediaDiscoveryAfter)
+			check.False(state.MediaDiscoveryIncomplete)
+			_, err = f.store.DB().Exec(f.store.Rebind(`DELETE FROM message_raw WHERE message_id = ?`), ids["$media"])
+			req.NoError(err)
+			_, _, _, err = NewImporter(f.store, runtime).archivedMediaContent(ids["$media"])
+			req.ErrorIs(err, errReadArchivedEvent)
+		})
+	}
+}
+
 func TestImportLegacyMediaDiscoveryRetriesIncompleteSync(t *testing.T) {
 	for _, scenario := range []string{"transient-edit", "forbidden-edit", "missing-edit", "malformed-edit", "wrong-sender", "wrong-target", "missing-content", "unsupported-encryption"} {
 		t.Run(scenario, func(t *testing.T) {
