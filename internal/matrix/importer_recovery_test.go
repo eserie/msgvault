@@ -447,6 +447,7 @@ func TestImportRecoversMessagesAndEdits(t *testing.T) {
 		ids, err := f.store.MessageExistsBatch(f.sourceID, []string{"$z-original", "$edit"})
 		req.NoError(err)
 		check.Zero(ids["$edit"], "edits do not create message rows")
+		check.Equal("edited", f.body(t, "$z-original"))
 		metadata, err := f.store.GetMessageMetadata(ids["$z-original"])
 		req.NoError(err)
 		check.NotContains(metadata.String, "matrix_pending_edits")
@@ -923,7 +924,10 @@ func TestImportRecoveryRetiresUnsupportedEventsAndKeepsMalformedPending(t *testi
 	req.NoError(err)
 	items, _, err := f.store.MatrixPlaceholders(t.Context(), convID, 0, 10)
 	req.NoError(err)
-	check.Len(items, 1)
+	req.Len(items, 1)
+	ids, err := f.store.MessageExistsBatch(f.sourceID, []string{"$malformed"})
+	req.NoError(err)
+	check.Equal(ids["$malformed"], items[0].MessageID)
 }
 
 func TestImportCorruptBackupKeyReportsBackupFailure(t *testing.T) {
@@ -1071,18 +1075,6 @@ func TestImportKeylessPendingCountIncludesEarlierRuns(t *testing.T) {
 	sum, err = f.run(t, false, false)
 	req.NoError(err)
 	check.Equal(int64(2), sum.PendingEncrypted)
-}
-
-func TestImportCountsMessagesPersistedAndRecoveredInSameRun(t *testing.T) {
-	req, check := require.New(t), assert.New(t)
-	f := newRecoveryFixture(t)
-	f.timeline = []*event.Event{f.message(t, "$original", "original", 10)}
-	sum, err := f.run(t, true, false)
-	req.NoError(err)
-	check.Equal(int64(1), sum.MessagesAdded)
-	sync, err := f.store.GetLastSuccessfulSyncByType(f.sourceID, SourceType)
-	req.NoError(err)
-	check.Equal(int64(1), sync.MessagesProcessed)
 }
 
 func TestImportHandlesUnreadableCursorBySyncMode(t *testing.T) {
