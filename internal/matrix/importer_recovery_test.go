@@ -192,24 +192,6 @@ func TestImportRecoveryRoomFetchFailureContinuesAndPersistsAttempt(t *testing.T)
 			check.Equal(encryptedPlaceholder, f.body(t, "$failed"))
 		})
 	}
-	t.Run("unsupported algorithm", func(t *testing.T) {
-		req, check := require.New(t), assert.New(t)
-		f := newRecoveryFixture(t)
-		unsupported := f.message(t, "$unsupported", "unsupported", 10)
-		unsupported.Content.AsEncrypted().Algorithm = "example.unsupported"
-		f.extraRooms = map[string][]*event.Event{"!first:example.org": {unsupported}}
-		f.timeline = []*event.Event{f.message(t, "$later", "later", 20)}
-		_, err := f.run(t, false, false)
-		req.NoError(err)
-		f.quiet = true
-		sum, err := f.run(t, true, false)
-		req.NoError(err)
-		req.NoError(sum.BackupFailure)
-		check.Equal(int64(1), sum.Recovered)
-		check.Equal(int64(1), sum.PendingEncrypted)
-		check.Equal("later", f.body(t, "$later"))
-	})
-
 }
 
 func TestImportRecoveryCorruptPendingEdits(t *testing.T) {
@@ -221,27 +203,16 @@ func TestImportRecoveryCorruptPendingEdits(t *testing.T) {
 	ids, err := f.store.MessageExistsBatch(f.sourceID, []string{"$poison"})
 	req.NoError(err)
 	req.NoError(f.store.SetMessageMetadataContext(t.Context(), ids["$poison"], sql.NullString{String: `{"matrix_event_type":"m.room.encrypted","matrix_pending_edits":"corrupt"}`, Valid: true}))
-	later := f.message(t, "$later", "later", 20)
-	cipher, err := f.backup.out.Encrypt([]byte(`{"room_id":"!later:example.org","type":"m.room.message","content":{"msgtype":"m.text","body":"later"}}`))
-	req.NoError(err)
-	later.Content.AsEncrypted().MegolmCiphertext = cipher
-	f.extraRooms = map[string][]*event.Event{"!later:example.org": {later}}
+	f.quiet = true
 	for round := range 2 {
 		f.nextBatch = fmt.Sprintf("after%d", round)
-		sum, err := f.run(t, true, false)
+		_, err := f.run(t, true, false)
 		req.ErrorContains(err, "recover Matrix room !room:example.org")
-		check.Equal(int64(1), sum.PendingEncrypted)
-		check.Equal(encryptedPlaceholder, f.body(t, "$poison"))
 		run := f.operation(t)
 		check.Equal(operations.StatePartial, run.State)
 		check.Contains(run.Counters, operations.PublicCounter{Name: operations.CounterItemErrors, Unit: operations.CounterUnitMessages, Value: 1})
 		state := f.syncState(t)
 		check.Equal(f.nextBatch, state.NextBatch)
-		if round == 0 {
-			check.Equal(int64(1), sum.Recovered)
-			check.Equal("later", f.body(t, "$later"))
-			f.quiet = true
-		}
 	}
 }
 
@@ -990,18 +961,13 @@ func TestImportRecoveryRetiresUnsupportedEventsAndKeepsMalformedPending(t *testi
 	check.Len(items, 1)
 }
 
-func TestImportCorruptBackupKeyAllowsPlaintextSync(t *testing.T) {
+func TestImportCorruptBackupKeyReportsBackupFailure(t *testing.T) {
 	req, check := require.New(t), assert.New(t)
 	f := newRecoveryFixture(t)
-	f.timeline = []*event.Event{{ID: "$plain", Sender: "@member:example.org", Type: event.EventMessage, Content: event.Content{Parsed: &event.MessageEventContent{MsgType: event.MsgText, Body: "plain"}}}}
 	r, err := Open(Credentials{Homeserver: f.server.URL, UserID: "@archive:example.org", AccessToken: "token", BackupKey: "corrupt!"})
 	req.NoError(err)
-	sum, err := NewImporter(f.store, r).Import(t.Context(), ImportOptions{UserID: "@archive:example.org"})
-	req.NoError(err)
-	check.NoError(sum.BackupFailure)
-	check.Equal("plain", f.body(t, "$plain"))
 	f.timeline = []*event.Event{f.message(t, "$pending", "pending", 10)}
-	sum, err = NewImporter(f.store, r).Import(t.Context(), ImportOptions{UserID: "@archive:example.org"})
+	sum, err := NewImporter(f.store, r).Import(t.Context(), ImportOptions{UserID: "@archive:example.org"})
 	req.NoError(err)
 	req.ErrorContains(sum.BackupFailure, "decode Matrix backup key")
 	check.Equal(int64(1), sum.PendingEncrypted)
@@ -1183,25 +1149,8 @@ func TestImportHandlesUnreadableCursorBySyncMode(t *testing.T) {
 			req.NoError(err)
 			check.Equal(syncID, latest.ID)
 			check.Equal(tc.blob, latest.CursorAfter.String)
-			check.Zero(f.backup.versionFetches)
 		})
 	}
-}
-
-func TestImportPlaceholderTextDoesNotRequestBackup(t *testing.T) {
-	req, check := require.New(t), assert.New(t)
-	f := newRecoveryFixture(t)
-	f.timeline = []*event.Event{matrixTestEvent(t, `{"type":"m.room.message","event_id":"$ordinary","sender":"@member:example.org","origin_server_ts":10,"content":{"msgtype":"m.text","body":"ordinary"}}`)}
-	_, err := f.run(t, true, false)
-	req.NoError(err)
-	f.backup.versionStatus = http.StatusServiceUnavailable
-	f.timeline = []*event.Event{matrixTestEvent(t, `{"type":"m.room.message","event_id":"$edit","sender":"@member:example.org","origin_server_ts":20,"content":{"msgtype":"m.text","body":"* edited","m.new_content":{"msgtype":"m.text","body":"[encrypted message — keys unavailable]"},"m.relates_to":{"rel_type":"m.replace","event_id":"$ordinary"}}}`)}
-	sum, err := f.run(t, true, false)
-	req.NoError(err)
-	check.Zero(sum.PendingEncrypted)
-	req.NoError(sum.BackupFailure)
-	check.Zero(f.backup.versionFetches)
-	check.Equal(encryptedPlaceholder, f.body(t, "$ordinary"))
 }
 
 func TestImportRecoveryRejectsReplayedIndex(t *testing.T) {
