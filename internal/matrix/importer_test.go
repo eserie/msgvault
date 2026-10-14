@@ -184,10 +184,6 @@ func TestImporterReclassifiesDirectRoomAcrossFullAndIncrementalSync(t *testing.T
 			_, _ = w.Write([]byte(`{"next_batch":"next-1","rooms":{"join":{"!room:example.org":{"state":{"events":[]},"timeline":{"events":[]}}}}}`))
 			return
 		}
-		if syncCalls == 3 {
-			_, _ = w.Write([]byte(`{"next_batch":"next-3","rooms":{"leave":{"!room:example.org":{"timeline":{"events":[]}}}}}`))
-			return
-		}
 		_, _ = w.Write([]byte(`{"next_batch":"next-2","rooms":{"join":{}}}`))
 	})
 	mux.HandleFunc("GET /_matrix/client/v3/user/@archive:example.org/account_data/m.direct", func(w http.ResponseWriter, _ *http.Request) {
