@@ -163,11 +163,6 @@ func (r *Runtime) fetchRoomBackup(ctx context.Context, room id.RoomID) error {
 	return nil
 }
 
-func (r *Runtime) decrypt(ctx context.Context, evt *event.Event) (*event.Event, error) {
-	plain, _, err := r.decryptWithIndex(ctx, evt)
-	return plain, err
-}
-
 func (r *Runtime) decryptWithIndex(ctx context.Context, evt *event.Event) (*event.Event, uint, error) {
 	if r.skipBackup || r.key == nil {
 		return nil, 0, errors.New("matrix backup key unavailable")
