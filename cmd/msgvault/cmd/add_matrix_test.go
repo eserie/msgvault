@@ -169,7 +169,10 @@ func TestReadMatrixRecoverySecret(t *testing.T) {
 			os.Stdin = stdin
 			t.Cleanup(func() { os.Stdin = previous; _ = stdin.Close() })
 			cmd := newAddMatrixCmd()
-			t.Cleanup(func() { _ = newAddMatrixCmd() })
+			t.Cleanup(func() {
+				addMatrixRecoveryFile = ""
+				addMatrixRecoveryIsPassphrase = false
+			})
 			args := []string{"--recovery-passphrase"}
 			if file {
 				path := filepath.Join(t.TempDir(), "recovery")
