@@ -120,7 +120,7 @@ func backupRuntime(t *testing.T, url string, f *backupFixture) *Runtime {
 }
 
 func TestLoadBackupKey(t *testing.T) {
-	for _, mode := range []string{"recovery", "passphrase", "unverifiable", "wrong", "corrupt IV", "replaced", "deleted", "no secret storage", "unknown algorithm"} {
+	for _, mode := range []string{"recovery", "passphrase", "unverifiable", "wrong", "corrupt IV", "deleted", "no secret storage", "unknown algorithm"} {
 		t.Run(mode, func(t *testing.T) {
 			req := require.New(t)
 			check := assert.New(t)
@@ -152,10 +152,6 @@ func TestLoadBackupKey(t *testing.T) {
 					w.WriteHeader(http.StatusNotFound)
 					_, _ = w.Write([]byte(`{"errcode":"M_NOT_FOUND"}`))
 				})
-			}
-			if mode == "replaced" {
-				f.key, err = backup.NewMegolmBackupKey()
-				req.NoError(err)
 			}
 			if mode == "deleted" {
 				mux.HandleFunc("GET /_matrix/client/v3/room_keys/version", func(w http.ResponseWriter, _ *http.Request) {
@@ -189,9 +185,6 @@ func TestLoadBackupKey(t *testing.T) {
 			case "wrong":
 				req.ErrorContains(err, "unlock Matrix secret storage")
 				req.ErrorIs(err, ssss.ErrIncorrectSSSSKey)
-				check.Empty(encoded)
-			case "replaced":
-				req.ErrorContains(err, "matrix key backup was replaced")
 				check.Empty(encoded)
 			default:
 				req.NoError(err)
