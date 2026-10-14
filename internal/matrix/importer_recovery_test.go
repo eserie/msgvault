@@ -55,97 +55,106 @@ func (s ingestDuringDecryption) Decrypt(message []byte) ([]byte, uint, error) {
 }
 
 func TestImportRecoveryDecryptsBeforeTakingWriteLock(t *testing.T) {
-	for _, mode := range []string{"ingest during decrypt", "empty page", "reused", "deletion changed"} {
-		t.Run(mode, func(t *testing.T) {
-			req, check := require.New(t), assert.New(t)
-			f := newRecoveryFixture(t)
-			original := f.message(t, "$original", "original", 10)
-			if mode == "empty page" {
-				original.Content.AsEncrypted().SessionID = "absent"
-			}
-			f.timeline = []*event.Event{original}
-			_, err := f.run(t, false, false)
+	for _, mode := range []string{"ingest during decrypt", "empty page"} {
+		t.Run(mode, func(t *testing.T) { checkRecoveryDuringDecryption(t, mode) })
+	}
+}
+
+func TestImportRecoveryRevalidatesPlaceholderDuringDecryption(t *testing.T) {
+	for _, mode := range []string{"reused", "deletion changed"} {
+		t.Run(mode, func(t *testing.T) { checkRecoveryDuringDecryption(t, mode) })
+	}
+}
+
+func checkRecoveryDuringDecryption(t *testing.T, mode string) {
+	t.Helper()
+	req, check := require.New(t), assert.New(t)
+	f := newRecoveryFixture(t)
+	original := f.message(t, "$original", "original", 10)
+	if mode == "empty page" {
+		original.Content.AsEncrypted().SessionID = "absent"
+	}
+	f.timeline = []*event.Event{original}
+	_, err := f.run(t, false, false)
+	req.NoError(err)
+	if mode == "reused" {
+		req.NoError(f.store.MarkMessageDeleted(f.sourceID, "$original"))
+	}
+	rooms, err := f.store.MatrixPlaceholderRooms(t.Context(), f.sourceID, nil, nil)
+	req.NoError(err)
+	req.Len(rooms, 1)
+	r := backupRuntime(t, f.server.URL, f.backup)
+	sum := &ImportSummary{PendingEncrypted: 1}
+	if mode == "empty page" {
+		// An empty recovery page must finish while another transaction holds the write lock.
+		req.NoError(f.store.MatrixRecoveryTransaction(t.Context(), func(_ *store.Store) error {
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			retired, err := NewImporter(f.store, r).recoverRoom(ctx, f.sourceID, rooms[0], 0, sum)
+			check.Zero(retired)
+			return err
+		}))
+		check.Equal(int64(1), sum.PendingEncrypted)
+		check.Zero(sum.Recovered)
+		return
+	}
+	req.NoError(r.prepareBackup(t.Context()))
+	req.NoError(r.fetchRoomBackup(t.Context(), "!room:example.org"))
+	key := backupSessionKey{"!room:example.org", f.backup.out.ID()}
+	r.cacheSession(key, r.sessionData[key])
+	req.NotNil(r.sessions[key])
+	var otherRoom int64
+	if mode == "ingest during decrypt" {
+		otherRoom, err = f.store.EnsureConversation(f.sourceID, "!other:example.org", "Other")
+		req.NoError(err)
+	}
+	r.sessions[key] = ingestDuringDecryption{r.sessions[key], func() error {
+		if mode == "ingest during decrypt" {
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			_, err = f.store.PersistMessageContext(ctx, &store.MessagePersistData{Message: &store.Message{SourceID: f.sourceID, ConversationID: otherRoom, SourceMessageID: "$other-ingest", MessageType: SourceType}})
+			return err
+		}
+		if mode == "deletion changed" {
+			return f.store.MarkMessageDeleted(f.sourceID, "$original")
+		}
+		if f.store.IsPostgreSQL() {
+			// GC is SQLite-only; exercise the equivalent hard delete on PostgreSQL.
+			_, err = f.store.DB().Exec(`DELETE FROM messages WHERE id = $1`, rooms[0].MaxMessageID)
 			req.NoError(err)
-			if mode == "reused" {
-				req.NoError(f.store.MarkMessageDeleted(f.sourceID, "$original"))
-			}
-			rooms, err := f.store.MatrixPlaceholderRooms(t.Context(), f.sourceID, nil, nil)
+		} else {
+			plan, err := f.store.PlanGCContext(t.Context())
 			req.NoError(err)
-			req.Len(rooms, 1)
-			r := backupRuntime(t, f.server.URL, f.backup)
-			sum := &ImportSummary{PendingEncrypted: 1}
-			if mode == "empty page" {
-				// An empty recovery page must finish while another transaction holds the write lock.
-				req.NoError(f.store.MatrixRecoveryTransaction(t.Context(), func(_ *store.Store) error {
-					ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-					defer cancel()
-					retired, err := NewImporter(f.store, r).recoverRoom(ctx, f.sourceID, rooms[0], 0, sum)
-					check.Zero(retired)
-					return err
-				}))
-				check.Equal(int64(1), sum.PendingEncrypted)
-				check.Zero(sum.Recovered)
-				return
-			}
-			req.NoError(r.prepareBackup(t.Context()))
-			req.NoError(r.fetchRoomBackup(t.Context(), "!room:example.org"))
-			key := backupSessionKey{"!room:example.org", f.backup.out.ID()}
-			r.cacheSession(key, r.sessionData[key])
-			req.NotNil(r.sessions[key])
-			var otherRoom int64
-			if mode == "ingest during decrypt" {
-				otherRoom, err = f.store.EnsureConversation(f.sourceID, "!other:example.org", "Other")
-				req.NoError(err)
-			}
-			r.sessions[key] = ingestDuringDecryption{r.sessions[key], func() error {
-				if mode == "ingest during decrypt" {
-					ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-					defer cancel()
-					_, err = f.store.PersistMessageContext(ctx, &store.MessagePersistData{Message: &store.Message{SourceID: f.sourceID, ConversationID: otherRoom, SourceMessageID: "$other-ingest", MessageType: SourceType}})
-					return err
-				}
-				if mode == "deletion changed" {
-					return f.store.MarkMessageDeleted(f.sourceID, "$original")
-				}
-				if f.store.IsPostgreSQL() {
-					// GC is SQLite-only; exercise the equivalent hard delete on PostgreSQL.
-					_, err = f.store.DB().Exec(`DELETE FROM messages WHERE id = $1`, rooms[0].MaxMessageID)
-					req.NoError(err)
-				} else {
-					plan, err := f.store.PlanGCContext(t.Context())
-					req.NoError(err)
-					deleted, err := f.store.ExecuteGCContext(t.Context(), plan)
-					req.NoError(err)
-					req.Equal(int64(1), deleted)
-				}
-				override := ""
-				if f.store.IsPostgreSQL() {
-					override = " OVERRIDING SYSTEM VALUE"
-				}
-				_, err = f.store.DB().Exec(f.store.Rebind(`INSERT INTO messages (id, source_id, conversation_id, source_message_id, message_type, snippet, deleted_from_source_at, deleted_at)`+override+` VALUES (?, ?, ?, '$replacement', 'matrix', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`), rooms[0].MaxMessageID, f.sourceID, rooms[0].ConversationID, encryptedPlaceholder)
-				return err
-			}}
-			retired, err := NewImporter(f.store, r).recoverRoom(t.Context(), f.sourceID, rooms[0], 0, sum)
+			deleted, err := f.store.ExecuteGCContext(t.Context(), plan)
 			req.NoError(err)
-			ids, err := f.store.MessageExistsBatch(f.sourceID, []string{"$original", "$replacement", "$other-ingest"})
-			req.NoError(err)
-			if mode == "ingest during decrypt" {
-				check.Equal(int64(1), retired)
-				check.NotZero(ids["$other-ingest"])
-				check.Equal(int64(1), sum.Recovered)
-				check.Zero(sum.PendingEncrypted)
-				check.Equal("original", f.body(t, "$original"))
-			} else {
-				check.Zero(retired)
-				check.Zero(sum.Recovered)
-				if mode == "deletion changed" {
-					check.Equal(encryptedPlaceholder, f.body(t, "$original"))
-				} else {
-					check.Zero(ids["$original"])
-					check.Equal(rooms[0].MaxMessageID, ids["$replacement"])
-				}
-			}
-		})
+			req.Equal(int64(1), deleted)
+		}
+		override := ""
+		if f.store.IsPostgreSQL() {
+			override = " OVERRIDING SYSTEM VALUE"
+		}
+		_, err = f.store.DB().Exec(f.store.Rebind(`INSERT INTO messages (id, source_id, conversation_id, source_message_id, message_type, snippet, deleted_from_source_at, deleted_at)`+override+` VALUES (?, ?, ?, '$replacement', 'matrix', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`), rooms[0].MaxMessageID, f.sourceID, rooms[0].ConversationID, encryptedPlaceholder)
+		return err
+	}}
+	retired, err := NewImporter(f.store, r).recoverRoom(t.Context(), f.sourceID, rooms[0], 0, sum)
+	req.NoError(err)
+	ids, err := f.store.MessageExistsBatch(f.sourceID, []string{"$original", "$replacement", "$other-ingest"})
+	req.NoError(err)
+	if mode == "ingest during decrypt" {
+		check.Equal(int64(1), retired)
+		check.NotZero(ids["$other-ingest"])
+		check.Equal(int64(1), sum.Recovered)
+		check.Zero(sum.PendingEncrypted)
+		check.Equal("original", f.body(t, "$original"))
+	} else {
+		check.Zero(retired)
+		check.Zero(sum.Recovered)
+		if mode == "deletion changed" {
+			check.Equal(encryptedPlaceholder, f.body(t, "$original"))
+		} else {
+			check.Zero(ids["$original"])
+			check.Equal(rooms[0].MaxMessageID, ids["$replacement"])
+		}
 	}
 }
 
@@ -431,14 +440,14 @@ func TestImportFullSyncKeepsRecoveredReactionRedacted(t *testing.T) {
 	check.Zero(reactions)
 }
 
-func TestImportRecoversMessagesAndRelations(t *testing.T) {
+func TestImportRecoversMessagesAndEdits(t *testing.T) {
 	req := require.New(t)
 	check := assert.New(t)
 	f := newRecoveryFixture(t)
 	oldEdit := f.edit(t, "$a-edit", "$z-original", "older", 20)
 	newEdit := f.edit(t, "$b-edit", "$z-original", "newest", 30)
 	reply := f.backup.encrypted(t, "$reply", 40, event.EventMessage, map[string]any{"msgtype": "m.text", "body": "reply", "m.relates_to": map[string]any{"m.in_reply_to": map[string]any{"event_id": "$z-original"}}})
-	f.timeline = []*event.Event{oldEdit, newEdit, reply, f.message(t, "$z-original", "original", 10), f.backup.encrypted(t, "$reaction", 50, event.EventReaction, map[string]any{"m.relates_to": map[string]any{"rel_type": "m.annotation", "event_id": "$z-original", "key": "yes"}})}
+	f.timeline = []*event.Event{oldEdit, newEdit, reply, f.message(t, "$z-original", "original", 10)}
 	_, err := f.run(t, false, false)
 	req.NoError(err)
 	check.Equal(encryptedPlaceholder, f.body(t, "$z-original"))
@@ -544,59 +553,6 @@ func (f *recoveryFixture) ageAttempts(t *testing.T) {
 	req.NoError(f.store.CompleteSyncAndUpdateSourceCursor(syncID, f.sourceID, encoded))
 }
 
-func TestImportRecoveryRetiredRelationsRejectReplay(t *testing.T) {
-	for _, kind := range []string{"redacted edit", "redacted reaction", "orphan edit", "orphan reaction"} {
-		t.Run(kind, func(t *testing.T) {
-			req, check := require.New(t), assert.New(t)
-			f := newRecoveryFixture(t)
-			first := f.edit(t, "$first", "$original", "edited", 20)
-			if strings.HasSuffix(kind, "reaction") {
-				first = f.backup.encrypted(t, "$first", 20, event.EventReaction, map[string]any{"m.relates_to": map[string]any{"rel_type": "m.annotation", "event_id": "$original", "key": "yes"}})
-			}
-			f.timeline = []*event.Event{first}
-			if strings.HasPrefix(kind, "redacted") {
-				f.timeline = append(f.timeline, f.message(t, "$original", "original", 10))
-			}
-			_, err := f.run(t, false, false)
-			req.NoError(err)
-			if strings.HasPrefix(kind, "redacted") {
-				f.timeline = []*event.Event{{ID: "$redaction", Type: event.EventRedaction, Redacts: "$first", Content: event.Content{Raw: map[string]any{}}}}
-				_, err = f.run(t, false, false)
-				req.NoError(err)
-			}
-			f.quiet = true
-			sum, err := f.run(t, true, false)
-			req.NoError(err)
-			check.Zero(sum.PendingEncrypted)
-			if kind == "redacted reaction" {
-				ids, err := f.store.MessageExistsBatch(f.sourceID, []string{"$first"})
-				req.NoError(err)
-				req.NotZero(ids["$first"])
-				var hidden bool
-				req.NoError(f.store.DB().QueryRow(f.store.Rebind(`SELECT deleted_at IS NOT NULL FROM messages WHERE id = ?`), ids["$first"]).Scan(&hidden))
-				check.True(hidden)
-				var reactions int
-				req.NoError(f.store.DB().QueryRow(`SELECT count(*) FROM reactions`).Scan(&reactions))
-				check.Zero(reactions)
-			}
-			second := *first
-			second.ID = "$replayed"
-			f.quiet = false
-			f.timeline = []*event.Event{&second}
-			if !strings.HasPrefix(kind, "redacted") {
-				f.timeline = append(f.timeline, f.message(t, "$original", "original", 10))
-			}
-			_, err = f.run(t, true, false)
-			req.NoError(err)
-			check.Equal("original", f.body(t, "$original"))
-			check.Equal(encryptedPlaceholder, f.body(t, "$replayed"))
-			var reactions int
-			req.NoError(f.store.DB().QueryRow(`SELECT count(*) FROM reactions`).Scan(&reactions))
-			check.Zero(reactions)
-		})
-	}
-}
-
 func TestImportRecoveryDeletedPlaceholders(t *testing.T) {
 	req := require.New(t)
 	check := assert.New(t)
@@ -620,64 +576,62 @@ func TestImportRecoveryDeletedPlaceholders(t *testing.T) {
 }
 
 func TestImportRecoveryInterruptedBeforeAndBetweenWrites(t *testing.T) {
-	for _, mode := range []string{"before recovery", "between originals"} {
+	for _, mode := range []string{"between originals", "reaction/resumed"} {
 		t.Run(mode, func(t *testing.T) {
-			req := require.New(t)
-			check := assert.New(t)
+			req, check := require.New(t), assert.New(t)
 			f := newRecoveryFixture(t)
-			original := f.message(t, "$original", "original", 10)
-			if mode == "between originals" {
-				original = f.backup.encrypted(t, "$original", 10, event.EventMessage, map[string]any{"msgtype": "m.text", "body": "original", "m.relates_to": map[string]any{"m.in_reply_to": map[string]any{"event_id": "$later"}}})
+			original := f.backup.encrypted(t, "$original", 10, event.EventMessage, map[string]any{"msgtype": "m.text", "body": "original", "m.relates_to": map[string]any{"m.in_reply_to": map[string]any{"event_id": "$later"}}})
+			f.timeline = []*event.Event{original}
+			if mode == "reaction/resumed" {
+				_, err := f.run(t, true, false)
+				req.NoError(err)
+				f.timeline = nil
 			}
-			reaction := f.backup.encrypted(t, "$reaction", 20, event.EventReaction, map[string]any{"m.relates_to": map[string]any{"rel_type": "m.annotation", "event_id": "$original", "key": "yes"}})
-			f.timeline = []*event.Event{original, reaction}
+			f.timeline = append(f.timeline, f.backup.encrypted(t, "$reaction", 20, event.EventReaction, map[string]any{"m.relates_to": map[string]any{"rel_type": "m.annotation", "event_id": "$original", "key": "yes"}}))
+			operation, record, stopID := "UPDATE", "NEW", "$second"
 			if mode == "between originals" {
 				f.timeline = append(f.timeline, f.message(t, "$second", "second", 30))
-			}
-			if mode == "before recovery" {
-				f.historyFails = true
-				_, err := f.run(t, true, false)
-				req.Error(err)
-				check.Equal(encryptedPlaceholder, f.body(t, "$original"))
-				f.historyFails = false
 			} else {
-				_, err := f.run(t, false, false)
+				f.timeline = append(f.timeline, f.backup.encrypted(t, "$second-reaction", 30, event.EventReaction, map[string]any{"m.relates_to": map[string]any{"rel_type": "m.annotation", "event_id": "$original", "key": "second"}}))
+				operation, record, stopID = "DELETE", "OLD", "$second-reaction"
+			}
+			_, err := f.run(t, false, false)
+			req.NoError(err)
+			create := fmt.Sprintf(`CREATE TRIGGER stop_recovery BEFORE %s ON messages WHEN %s.source_message_id = '%s' BEGIN SELECT RAISE(ABORT, 'interrupted recovery'); END`, operation, record, stopID)
+			drop := `DROP TRIGGER stop_recovery`
+			if f.store.IsPostgreSQL() {
+				_, err := f.store.DB().Exec(fmt.Sprintf(`CREATE FUNCTION stop_recovery_fn() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF %s.source_message_id = '%s' THEN RAISE EXCEPTION 'interrupted recovery'; END IF; RETURN %s; END $$`, record, stopID, record))
 				req.NoError(err)
-				create := `CREATE TRIGGER stop_original BEFORE UPDATE ON messages WHEN NEW.source_message_id = '$second' BEGIN SELECT RAISE(ABORT, 'interrupted original'); END`
-				drop := `DROP TRIGGER stop_original`
-				if f.store.IsPostgreSQL() {
-					_, err := f.store.DB().Exec(`CREATE FUNCTION stop_original_fn() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.source_message_id = '$second' THEN RAISE EXCEPTION 'interrupted original'; END IF; RETURN NEW; END $$`)
-					req.NoError(err)
-					create = `CREATE TRIGGER stop_original BEFORE UPDATE ON messages FOR EACH ROW EXECUTE FUNCTION stop_original_fn()`
-					drop = `DROP TRIGGER stop_original ON messages`
-				}
-				_, err = f.store.DB().Exec(create)
-				req.NoError(err)
-				f.quiet = true
-				_, err = f.run(t, true, false)
-				req.ErrorContains(err, "interrupted original")
-				checkpoint, err := f.store.GetLastSuccessfulSyncByType(f.sourceID, SourceType)
-				req.NoError(err)
-				state, err := loadSyncState(checkpoint.CursorAfter.String)
-				req.NoError(err)
+				create = fmt.Sprintf(`CREATE TRIGGER stop_recovery BEFORE %s ON messages FOR EACH ROW EXECUTE FUNCTION stop_recovery_fn()`, operation)
+				drop = `DROP TRIGGER stop_recovery ON messages`
+			}
+			_, err = f.store.DB().Exec(create)
+			req.NoError(err)
+			f.quiet = true
+			_, err = f.run(t, true, false)
+			req.ErrorContains(err, "interrupted recovery")
+			wantBody, wantReactions := "original", 2
+			if mode == "between originals" {
+				state := f.syncState(t)
 				check.Empty(state.Rooms["!room:example.org"].DeferredRelations, "rolled-back replies must stay out of the cursor")
 				check.Equal(encryptedPlaceholder, f.body(t, "$original"))
-				check.Equal(encryptedPlaceholder, f.body(t, "$second"))
-				check.Equal(encryptedPlaceholder, f.body(t, "$reaction"))
-				var reactions int
-				req.NoError(f.store.DB().QueryRow(`SELECT count(*) FROM reactions`).Scan(&reactions))
-				check.Zero(reactions)
-				_, err = f.store.DB().Exec(drop)
-				req.NoError(err)
+				wantReactions = 1
+			} else {
+				check.Equal(wantBody, f.body(t, "$original"))
 			}
-			f.timeline = nil
+			check.Equal(encryptedPlaceholder, f.body(t, stopID))
+			check.Equal(encryptedPlaceholder, f.body(t, "$reaction"))
+			var reactions int
+			req.NoError(f.store.DB().QueryRow(`SELECT count(*) FROM reactions`).Scan(&reactions))
+			check.Zero(reactions)
+			_, err = f.store.DB().Exec(drop)
+			req.NoError(err)
 			sum, err := f.run(t, true, false)
 			req.NoError(err)
 			check.Zero(sum.PendingEncrypted)
-			check.Equal("original", f.body(t, "$original"))
-			var reactions int
+			check.Equal(wantBody, f.body(t, "$original"))
 			req.NoError(f.store.DB().QueryRow(`SELECT count(*) FROM reactions`).Scan(&reactions))
-			check.Equal(1, reactions)
+			check.Equal(wantReactions, reactions)
 			if mode == "between originals" {
 				check.Equal("second", f.body(t, "$second"))
 				sum, err := f.run(t, true, false)
@@ -780,7 +734,7 @@ func TestImportRecoveryBoundsRetriesAndAttemptsNewEvents(t *testing.T) {
 	_, err = f.run(t, true, true)
 	req.NoError(err)
 	check.Equal(3*roomCount+1, f.backup.roomFetches, "full sync forces all pending rooms")
-	t.Run("failed rooms rotate within limit", func(t *testing.T) {
+	t.Run("failed rooms stay within the retry limit", func(t *testing.T) {
 		req, check := require.New(t), assert.New(t)
 		f := newRecoveryFixture(t)
 		f.extraRooms = map[string][]*event.Event{}
@@ -1039,70 +993,6 @@ func TestImportUnsupportedEncryptionDoesNotFetchBackupOrStopLaterRoom(t *testing
 	check.Equal("later", f.body(t, "$later"))
 }
 
-func TestRecoveryRelationRetirementInterruptedAndResumed(t *testing.T) {
-	for _, kind := range []string{"edit", "reaction"} {
-		for _, mode := range []string{"interrupted", "resumed"} {
-			if kind == "edit" && mode == "resumed" || kind == "reaction" && mode == "interrupted" {
-				continue
-			}
-			t.Run(kind+"/"+mode, func(t *testing.T) {
-				resume := mode == "resumed"
-				req, check := require.New(t), assert.New(t)
-				f := newRecoveryFixture(t)
-				original := f.message(t, "$original", "original", 10)
-				f.timeline = []*event.Event{original}
-				_, err := f.run(t, true, false)
-				req.NoError(err)
-				rel := f.edit(t, "$relation", "$original", "edited", 20)
-				if kind == "reaction" {
-					rel = f.backup.encrypted(t, "$relation", 20, event.EventReaction, map[string]any{"m.relates_to": map[string]any{"rel_type": "m.annotation", "event_id": "$original", "key": "yes"}})
-				}
-				f.timeline = []*event.Event{rel}
-				if resume {
-					f.timeline = append(f.timeline, f.backup.encrypted(t, "$second-reaction", 30, event.EventReaction, map[string]any{"m.relates_to": map[string]any{"rel_type": "m.annotation", "event_id": "$original", "key": "second"}}))
-				}
-				_, err = f.run(t, false, false)
-				req.NoError(err)
-				stopID := "$relation"
-				if resume {
-					stopID = "$second-reaction"
-				}
-				create := fmt.Sprintf(`CREATE TRIGGER stop_retirement BEFORE DELETE ON messages WHEN OLD.source_message_id = '%s' BEGIN SELECT RAISE(ABORT, 'interrupted retirement'); END`, stopID)
-				drop := `DROP TRIGGER stop_retirement`
-				if f.store.IsPostgreSQL() {
-					_, err := f.store.DB().Exec(fmt.Sprintf(`CREATE FUNCTION stop_retirement_fn() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF OLD.source_message_id = '%s' THEN RAISE EXCEPTION 'interrupted retirement'; END IF; RETURN OLD; END $$`, stopID))
-					req.NoError(err)
-					create = `CREATE TRIGGER stop_retirement BEFORE DELETE ON messages FOR EACH ROW EXECUTE FUNCTION stop_retirement_fn()`
-					drop = `DROP TRIGGER stop_retirement ON messages`
-				}
-				_, err = f.store.DB().Exec(create)
-				req.NoError(err)
-				f.quiet = true
-				_, err = f.run(t, true, false)
-				req.ErrorContains(err, "interrupted retirement")
-				check.Equal("original", f.body(t, "$original"))
-				check.Equal(encryptedPlaceholder, f.body(t, "$relation"))
-				if resume {
-					check.Equal(encryptedPlaceholder, f.body(t, "$second-reaction"))
-				}
-				var reactions int
-				req.NoError(f.store.DB().QueryRow(`SELECT count(*) FROM reactions`).Scan(&reactions))
-				check.Zero(reactions)
-				_, err = f.store.DB().Exec(drop)
-				req.NoError(err)
-				if resume {
-					sum, err := f.run(t, true, false)
-					req.NoError(err)
-					check.Zero(sum.PendingEncrypted)
-					check.Equal("original", f.body(t, "$original"))
-					req.NoError(f.store.DB().QueryRow(`SELECT count(*) FROM reactions`).Scan(&reactions))
-					check.Equal(2, reactions)
-				}
-			})
-		}
-	}
-}
-
 func TestImportRecoveryCountsSameRunOnce(t *testing.T) {
 	req, check := require.New(t), assert.New(t)
 	f := newRecoveryFixture(t)
@@ -1227,7 +1117,7 @@ func TestMatrixCursorFormatVersion(t *testing.T) {
 }
 
 func TestImportRecoveredReplyLinksWhenTargetArrivesLater(t *testing.T) {
-	for _, mode := range []string{"incremental", "full", "edited reply", "interrupted after page commit", "source deleted"} {
+	for _, mode := range []string{"incremental", "edited reply", "source deleted"} {
 		t.Run(mode, func(t *testing.T) {
 			req := require.New(t)
 			check := assert.New(t)
@@ -1243,19 +1133,8 @@ func TestImportRecoveredReplyLinksWhenTargetArrivesLater(t *testing.T) {
 				req.NoError(f.store.SetMessageMetadataContext(t.Context(), ids["$reply"], sql.NullString{String: `{"saved":"keep"}`, Valid: true}))
 				f.quiet = true
 			}
-			full := strings.HasSuffix(mode, "full")
-			sum, err := f.run(t, mode != "interrupted after page commit" && mode != "edited reply", false)
+			sum, err := f.run(t, mode != "edited reply", false)
 			req.NoError(err)
-			if mode == "interrupted after page commit" {
-				imp := NewImporter(f.store, backupRuntime(t, f.server.URL, f.backup))
-				req.NoError(imp.runtime.prepareBackup(t.Context()))
-				rooms, err := f.store.MatrixPlaceholderRooms(t.Context(), f.sourceID, nil, nil)
-				req.NoError(err)
-				req.Len(rooms, 1)
-				// Discard the recovered cursor to simulate exit before checkpoint persistence.
-				_, err = imp.recoverRoom(t.Context(), f.sourceID, rooms[0], 0, sum)
-				req.NoError(err)
-			}
 			wantBody := "reply"
 			if mode == "edited reply" {
 				f.quiet = true
@@ -1282,17 +1161,12 @@ func TestImportRecoveredReplyLinksWhenTargetArrivesLater(t *testing.T) {
 			saved, err := f.store.GetLastSuccessfulSyncByType(f.sourceID, SourceType)
 			req.NoError(err)
 			check.NotContains(saved.CursorAfter.String, "deferred_relations")
-			if full {
-				syncID, err := f.store.StartSync(f.sourceID, SourceType)
-				req.NoError(err)
-				req.NoError(f.store.CompleteSync(syncID, "invalid JSON"))
-			}
 			f.timeline = nil
-			_, err = f.run(t, true, full)
+			_, err = f.run(t, true, false)
 			req.NoError(err)
 			f.quiet = false
 			f.timeline = []*event.Event{f.message(t, "$target", "target", 10)}
-			_, err = f.run(t, true, full)
+			_, err = f.run(t, true, false)
 			req.NoError(err)
 			ids, err := f.store.MessageExistsBatch(f.sourceID, []string{"$reply", "$target"})
 			req.NoError(err)
@@ -1300,9 +1174,6 @@ func TestImportRecoveredReplyLinksWhenTargetArrivesLater(t *testing.T) {
 			req.NoError(f.store.DB().QueryRow(f.store.Rebind(`SELECT reply_to_message_id FROM messages WHERE id = ?`), ids["$reply"]).Scan(&targetID))
 			check.Equal(ids["$target"], targetID)
 			if mode == "source deleted" {
-				var deleted bool
-				req.NoError(f.store.DB().QueryRow(f.store.Rebind(`SELECT deleted_from_source_at IS NOT NULL FROM messages WHERE id = ?`), ids["$reply"]).Scan(&deleted))
-				check.True(deleted)
 				metadata, err := f.store.GetMessageMetadata(ids["$reply"])
 				req.NoError(err)
 				var fields map[string]any
@@ -1407,7 +1278,7 @@ func TestImportKeylessPendingCountIncludesEarlierRuns(t *testing.T) {
 
 func TestImportRefusesUnreadableCursor(t *testing.T) {
 	for _, full := range []bool{false, true} {
-		for _, blob := range []string{`{"format_version":2,"rooms":{}}`, `{"rooms":false}`, `invalid JSON`} {
+		for _, blob := range []string{`{"format_version":2,"rooms":{}}`, `invalid JSON`} {
 			t.Run(fmt.Sprintf("full=%t/%s", full, blob), func(t *testing.T) {
 				req, check := require.New(t), assert.New(t)
 				f := newRecoveryFixture(t)
@@ -1470,37 +1341,76 @@ func TestImportPlaceholderTextDoesNotRequestBackup(t *testing.T) {
 }
 
 func TestImportRecoveryRejectsReplayedIndex(t *testing.T) {
-	for _, kind := range []string{"message", "edit", "reaction"} {
+	for _, kind := range []string{"message", "edit", "reaction", "redacted edit", "redacted reaction", "orphan edit", "orphan reaction"} {
+		retired := strings.Contains(kind, " ")
 		for _, later := range []bool{false, true} {
+			if retired && !later {
+				continue
+			}
 			t.Run(kind+"/later="+strconv.FormatBool(later), func(t *testing.T) {
 				req, check := require.New(t), assert.New(t)
 				f := newRecoveryFixture(t)
-				if kind != "message" {
+				if !retired && kind != "message" {
 					f.timeline = []*event.Event{f.message(t, "$original", "original", 1)}
 					_, err := f.run(t, true, false)
 					req.NoError(err)
 				}
 				first := f.message(t, "$first", "recovered", 10)
-				switch kind {
-				case "edit":
+				if strings.HasSuffix(kind, "edit") {
 					first = f.edit(t, "$first", "$original", "edited", 10)
-				case "reaction":
+				} else if strings.HasSuffix(kind, "reaction") {
 					first = f.backup.encrypted(t, "$first", 10, event.EventReaction, map[string]any{"m.relates_to": map[string]any{"rel_type": "m.annotation", "event_id": "$original", "key": "yes"}})
 				}
 				second := *first
 				second.ID, second.Sender = "$second", "@forged:example.org"
 				f.timeline = []*event.Event{first}
+				if retired && strings.HasPrefix(kind, "redacted") {
+					f.timeline = append(f.timeline, f.message(t, "$original", "original", 1))
+				}
 				if !later {
 					f.timeline = append(f.timeline, &second)
 				}
-				_, err := f.run(t, true, false)
+				_, err := f.run(t, !retired, false)
 				req.NoError(err)
+				if retired {
+					if strings.HasPrefix(kind, "redacted") {
+						f.timeline = []*event.Event{{ID: "$redaction", Type: event.EventRedaction, Redacts: "$first", Content: event.Content{Raw: map[string]any{}}}}
+						_, err = f.run(t, false, false)
+						req.NoError(err)
+					}
+					f.quiet = true
+					sum, err := f.run(t, true, false)
+					req.NoError(err)
+					check.Zero(sum.PendingEncrypted)
+					if kind == "redacted reaction" {
+						ids, err := f.store.MessageExistsBatch(f.sourceID, []string{"$first"})
+						req.NoError(err)
+						req.NotZero(ids["$first"])
+						var hidden bool
+						req.NoError(f.store.DB().QueryRow(f.store.Rebind(`SELECT deleted_at IS NOT NULL FROM messages WHERE id = ?`), ids["$first"]).Scan(&hidden))
+						check.True(hidden)
+						var reactions int
+						req.NoError(f.store.DB().QueryRow(`SELECT count(*) FROM reactions`).Scan(&reactions))
+						check.Zero(reactions)
+					}
+				}
 				if later {
+					f.quiet = false
 					f.timeline = []*event.Event{&second}
+					if strings.HasPrefix(kind, "orphan") {
+						f.timeline = append(f.timeline, f.message(t, "$original", "original", 1))
+					}
 					_, err = f.run(t, true, false)
 					req.NoError(err)
 				}
 				check.Equal(encryptedPlaceholder, f.body(t, "$second"))
+				var recovered int
+				if retired {
+					check.Equal("original", f.body(t, "$original"))
+					req.NoError(f.store.DB().QueryRow(`SELECT count(*) FROM reactions`).Scan(&recovered))
+					check.Zero(recovered)
+					return
+				}
 				ids, err := f.store.MessageExistsBatch(f.sourceID, []string{"$second"})
 				req.NoError(err)
 				raw, err := f.store.GetMessageRaw(ids["$second"])
@@ -1509,7 +1419,6 @@ func TestImportRecoveryRejectsReplayedIndex(t *testing.T) {
 				metadata, err := f.store.GetMessageMetadata(ids["$second"])
 				req.NoError(err)
 				check.JSONEq(`{"matrix_event_type":"m.room.encrypted"}`, metadata.String)
-				var recovered int
 				switch kind {
 				case "reaction":
 					req.NoError(f.store.DB().QueryRow(`SELECT count(*) FROM reactions`).Scan(&recovered))

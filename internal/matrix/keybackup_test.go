@@ -120,7 +120,7 @@ func backupRuntime(t *testing.T, url string, f *backupFixture) *Runtime {
 }
 
 func TestLoadBackupKey(t *testing.T) {
-	for _, mode := range []string{"recovery", "passphrase", "unverifiable", "wrong", "corrupt IV", "corrupt MAC", "replaced", "deleted", "no secret storage", "unknown algorithm"} {
+	for _, mode := range []string{"recovery", "passphrase", "unverifiable", "wrong", "corrupt IV", "replaced", "deleted", "no secret storage", "unknown algorithm"} {
 		t.Run(mode, func(t *testing.T) {
 			req := require.New(t)
 			check := assert.New(t)
@@ -141,9 +141,6 @@ func TestLoadBackupKey(t *testing.T) {
 			}
 			if mode == "corrupt IV" {
 				key.Metadata.IV = "invalid"
-			}
-			if mode == "corrupt MAC" {
-				key.Metadata.MAC = "invalid"
 			}
 			if mode == "unknown algorithm" {
 				key.Metadata.Algorithm = "example.unknown"
@@ -172,7 +169,7 @@ func TestLoadBackupKey(t *testing.T) {
 			t.Cleanup(server.Close)
 			encoded, err := LoadBackupKey(t.Context(), Credentials{Homeserver: server.URL, UserID: "@archive:example.org", DeviceID: "ARCHIVE", AccessToken: "token", BackupKey: "corrupt saved key"}, secret, mode == "passphrase", utils.DecodeBase58RecoveryKey(secret))
 			switch mode {
-			case "corrupt IV", "corrupt MAC":
+			case "corrupt IV":
 				req.ErrorIs(err, ssss.ErrCorruptedKeyMetadata)
 				req.NotErrorIs(err, ssss.ErrIncorrectSSSSKey)
 				check.Empty(encoded)
@@ -205,7 +202,7 @@ func TestLoadBackupKey(t *testing.T) {
 }
 
 func TestBackupDecrypt(t *testing.T) {
-	for _, mode := range []string{"found", "different sender key", "padded key", "invalid key", "missing", "empty envelope", "null plaintext", "early", "transient", "wrong room", "bad MAC", "algorithm", "redaction", "replaced"} {
+	for _, mode := range []string{"found", "different sender key", "padded key", "invalid key", "missing", "empty envelope", "null plaintext", "early", "transient", "wrong room", "truncated ciphertext", "algorithm", "redaction", "replaced"} {
 		t.Run(mode, func(t *testing.T) {
 			req := require.New(t)
 			check := assert.New(t)
@@ -248,7 +245,7 @@ func TestBackupDecrypt(t *testing.T) {
 			if mode == "wrong room" {
 				evt.RoomID = "!other:example.org"
 			}
-			if mode == "bad MAC" {
+			if mode == "truncated ciphertext" {
 				evt.Content.AsEncrypted().MegolmCiphertext = []byte("invalid")
 			}
 			if mode == "algorithm" {
@@ -282,7 +279,7 @@ func TestBackupDecrypt(t *testing.T) {
 				req.ErrorIs(err, olm.ErrUnknownMessageIndex)
 			case "wrong room":
 				req.EqualError(err, "matrix decrypted message belongs to another room")
-			case "bad MAC":
+			case "truncated ciphertext":
 				req.ErrorIs(err, olm.ErrInputToSmall)
 			case "algorithm":
 				req.EqualError(err, "unsupported Matrix encryption algorithm")

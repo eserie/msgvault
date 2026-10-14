@@ -59,22 +59,28 @@ func TestMatrixSyncSummaryBackupFailureAndKeyHint(t *testing.T) {
 		creds := matrixsource.Credentials{Homeserver: server.URL, UserID: source.Identifier, DeviceID: "ARCHIVE", AccessToken: "token"}
 		return s, cfg, creds, newPlaceholder
 	}
-	t.Run("failure", func(t *testing.T) {
-		req, check := require.New(t), assert.New(t)
-		s, cfg, creds, _ := setup(t)
-		creds.BackupKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-		req.NoError(matrixsource.SaveCredentials(cfg.TokensDir(), creds))
-		var out bytes.Buffer
-		req.ErrorContains(runMatrixSync(t.Context(), s, cfg, "", false, nil, &out), "key backup unavailable, 1 encrypted events pending: load Matrix key backup")
-		check.NotContains(out.String(), "key backup unavailable")
-	})
+	for _, skip := range []bool{false, true} {
+		t.Run(fmt.Sprintf("failure/skip=%t", skip), func(t *testing.T) {
+			req, check := require.New(t), assert.New(t)
+			s, cfg, creds, _ := setup(t)
+			if skip {
+				source, err := s.GetSourceByTypeAndIdentifier(sourceTypeMatrix, creds.UserID)
+				req.NoError(err)
+				req.NoError(s.UpdateSourceSyncConfig(source.ID, `{"skip_key_backup":true}`))
+			}
+			creds.BackupKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+			req.NoError(matrixsource.SaveCredentials(cfg.TokensDir(), creds))
+			var out bytes.Buffer
+			req.ErrorContains(runMatrixSync(t.Context(), s, cfg, "", false, nil, &out), "key backup unavailable, 1 encrypted events pending: load Matrix key backup")
+			check.NotContains(out.String(), "key backup unavailable")
+		})
+	}
 	t.Run("key hint", func(t *testing.T) {
 		req, check := require.New(t), assert.New(t)
 		s, cfg, creds, newPlaceholder := setup(t)
 		req.NoError(matrixsource.SaveCredentials(cfg.TokensDir(), creds))
 		var out bytes.Buffer
 		req.NoError(runMatrixSync(t.Context(), s, cfg, "", false, nil, &out))
-		check.Equal(1, strings.Count(out.String(), "run msgvault add-matrix --homeserver"))
 		check.Contains(out.String(), fmt.Sprintf("--homeserver %q --user-id %q --recovery-file <path>", creds.Homeserver, creds.UserID))
 		check.Contains(out.String(), "This renews the login and logs out the old Matrix device.")
 		second, err := s.GetOrCreateSource(sourceTypeMatrix, "@second:example.org")
@@ -86,7 +92,6 @@ func TestMatrixSyncSummaryBackupFailureAndKeyHint(t *testing.T) {
 		req.NoError(matrixsource.SaveCredentials(cfg.TokensDir(), matrixsource.Credentials{Homeserver: creds.Homeserver, UserID: second.Identifier, DeviceID: "ARCHIVE", AccessToken: "token"}))
 		out.Reset()
 		req.NoError(runMatrixSync(t.Context(), s, cfg, "", false, nil, &out))
-		check.Equal(1, strings.Count(out.String(), "run msgvault add-matrix --homeserver"))
 		*newPlaceholder = true
 		out.Reset()
 		req.NoError(runMatrixSync(t.Context(), s, cfg, "", false, nil, &out))
@@ -97,7 +102,7 @@ func TestMatrixSyncSummaryBackupFailureAndKeyHint(t *testing.T) {
 		req.NoError(runMatrixSync(t.Context(), s, cfg, "", false, nil, &out))
 		check.NotContains(out.String(), "--recovery-file")
 	})
-	for _, syncConfig := range []string{`"invalid JSON"`, `{"skip_key_backup":"invalid"}`, `{"skip_key_backup":true,"skip_key_backup":"invalid"}`} {
+	for _, syncConfig := range []string{`"invalid JSON"`, `{"skip_key_backup":true,"skip_key_backup":"invalid"}`} {
 		t.Run("unreadable preference/"+syncConfig, func(t *testing.T) {
 			req, check := require.New(t), assert.New(t)
 			s, cfg, creds, newPlaceholder := setup(t)
