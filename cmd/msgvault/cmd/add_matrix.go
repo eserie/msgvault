@@ -151,6 +151,9 @@ func addMatrixAccount(cmd *cobra.Command, state *invocation, tokensDir, loginSec
 				return fmt.Errorf("remove revoked pending Matrix login: %w", err)
 			}
 			resumed = false
+			if recoverySecret == "" && !addMatrixSkipKeyBackup {
+				creds.BackupKey = previous.BackupKey
+			}
 		case err != nil:
 			return fmt.Errorf("%w (login unchanged, retry add-matrix)", err)
 		}

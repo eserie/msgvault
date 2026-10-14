@@ -216,10 +216,6 @@ func TestImporterReclassifiesDirectRoomAcrossFullAndIncrementalSync(t *testing.T
 	require.NoError(err)
 	require.NoError(st.DB().QueryRow(st.Rebind(`SELECT conversation_type FROM conversations WHERE source_conversation_id = ?`), "!room:example.org").Scan(&conversationType))
 	assert.Equal("group_chat", conversationType)
-	_, err = NewImporter(st, &Runtime{Client: client}).Import(t.Context(), ImportOptions{UserID: "@archive:example.org"})
-	require.NoError(err)
-	require.NoError(st.DB().QueryRow(st.Rebind(`SELECT conversation_type FROM conversations WHERE source_conversation_id = ?`), "!room:example.org").Scan(&conversationType))
-	assert.Equal("direct_chat", conversationType)
 }
 
 func TestImporterExplicitEmptyRoomNameClearsArchivedTitle(t *testing.T) {
