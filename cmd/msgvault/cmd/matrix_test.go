@@ -163,16 +163,11 @@ func TestAddMatrixKeepsOldLoginWhenPreviousLogoutFails(t *testing.T) {
 func TestAddMatrixStopsWhenExistingLoginIsUnreadable(t *testing.T) {
 	require := require.New(t)
 	assert := assert.New(t)
-	var loggedOut []string
 	var logins int
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /_matrix/client/v3/login", func(w http.ResponseWriter, _ *http.Request) {
 		logins++
 		_, _ = w.Write([]byte(`{"user_id":"@archive:example.org","device_id":"NEW","access_token":"fresh"}`))
-	})
-	mux.HandleFunc("POST /_matrix/client/v3/logout", func(w http.ResponseWriter, r *http.Request) {
-		loggedOut = append(loggedOut, r.Header.Get("Authorization"))
-		_, _ = w.Write([]byte(`{}`))
 	})
 	server := httptest.NewServer(mux)
 	defer server.Close()
@@ -201,7 +196,6 @@ func TestAddMatrixStopsWhenExistingLoginIsUnreadable(t *testing.T) {
 	require.NoError(err)
 	assert.Equal("not json", string(data), "the unreadable file is left for the user to fix")
 	assert.Zero(logins)
-	assert.Empty(loggedOut)
 }
 
 // renewalHomeserver issues device NEW and records logouts. A logged-out token

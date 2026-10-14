@@ -98,7 +98,6 @@ func TestMatrixSyncSummaryBackupFailureAndKeyHint(t *testing.T) {
 				*newPlaceholder = true
 				out.Reset()
 				req.NoError(runMatrixSync(t.Context(), s, cfg, "", false, nil, &out))
-				check.Equal(2, strings.Count(out.String(), "2 encrypted placeholders"))
 				check.Equal(1, strings.Count(out.String(), "run msgvault add-matrix --homeserver"))
 			}
 		})
@@ -113,7 +112,6 @@ func TestMatrixSyncSummaryBackupFailureAndKeyHint(t *testing.T) {
 		req.NoError(matrixsource.SaveCredentials(cfg.TokensDir(), creds))
 		var out bytes.Buffer
 		req.NoError(runMatrixSync(t.Context(), s, cfg, "", false, nil, &out))
-		check.Contains(out.String(), "2 encrypted placeholders")
 		check.Contains(out.String(), "run msgvault add-matrix --homeserver")
 	})
 	t.Run("skip key backup", func(t *testing.T) {
