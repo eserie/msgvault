@@ -1410,6 +1410,8 @@ func TestMatrixCursorFormatVersion(t *testing.T) {
 	}
 	_, err := loadSyncState(`{"format_version":2,"rooms":{}}`)
 	req.ErrorContains(err, "unsupported Matrix cursor format version 2")
+	_, err = loadSyncState(`{"format_version":1,"media_discovery_version":2,"rooms":{}}`)
+	check.ErrorIs(err, errCursorVersion)
 }
 
 func TestImportRecoveredReplyLinksWhenTargetArrivesLater(t *testing.T) {
