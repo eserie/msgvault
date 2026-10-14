@@ -98,9 +98,9 @@ available to keyword, semantic, and people workflows enabled for the archive.
 
 ## Media behavior and limits
 
-After upgrading, each sync scans up to 100 previously archived messages without media markers and saves its progress. Later syncs resume the scan until it completes for the account and configured room scope. Temporary lookup failures get another scan pass. Changing `rooms` or `exclude_rooms` restarts discovery. `sync-matrix --full` restarts discovery and re-fetches complete joined-room history.
+After upgrading, each sync scans up to 10,000 previously archived message rows without media markers, including text-only messages, and saves its progress. Later syncs resume the scan until it completes for the account and configured room scope. Temporary lookup failures and unavailable decryption keys get another scan pass. Invalid or permanently unavailable edits are skipped for that pass. Changing `rooms` or `exclude_rooms` restarts discovery. `sync-matrix --full` restarts discovery and re-fetches complete joined-room history.
 
-By default, eligible media is downloaded for direct chats and groups with at most 20 participants, with a 250 MiB per-file cap. `--no-media` records eligible media as pending without downloading bytes. Excluded media is skipped. The summary separates media downloaded this sync from outstanding pending and failed media for the selected account and rooms. Each media item is attempted once per run; content-addressed storage avoids duplicate files.
+By default, eligible media is downloaded for direct chats and groups with at most 20 participants, with a 250 MiB per-file cap. `--no-media` records eligible media as pending without downloading bytes. Pending and failed media excluded by current policy becomes skipped, including during `--no-media` runs and retry backoff. The summary separates media downloaded this sync from outstanding pending and failed media for the selected account and rooms. Each media item is attempted once per run; content-addressed storage avoids duplicate files.
 
 ### Retry timing
 

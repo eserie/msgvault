@@ -80,7 +80,8 @@ func pendingMediaOptions(opts ImportOptions) ImportOptions {
 	return opts
 }
 
-const legacyMediaDiscoveryBudget = 100
+// Count archived message rows, including text-only messages, rather than media downloads.
+const legacyMediaDiscoveryBudget = 10_000
 
 func (imp *Importer) discoverLegacyMedia(ctx context.Context, sourceID int64, state *SyncState, opts ImportOptions) (bool, error) {
 	after := state.MediaDiscoveryAfter
@@ -130,6 +131,9 @@ func (imp *Importer) discoverLegacyMedia(ctx context.Context, sourceID int64, st
 					continue
 				}
 				if edit.Type == event.EventEncrypted {
+					if !parseContent(edit) || edit.Content.AsEncrypted().Algorithm != id.AlgorithmMegolmV1 {
+						continue
+					}
 					edit, err = imp.runtime.decrypt(ctx, edit)
 					if err != nil {
 						complete = false
@@ -137,12 +141,10 @@ func (imp *Importer) discoverLegacyMedia(ctx context.Context, sourceID int64, st
 					}
 				}
 				if !parseContent(edit) || !validReplacement(archived, edit) || edit.Content.AsMessage().RelatesTo.GetReplaceID() != archived.ID {
-					complete = false
 					continue
 				}
 				content = mediaContent(edit).NewContent
 				if content == nil {
-					complete = false
 					continue
 				}
 				saved, err := imp.mergedMetadata(item.MessageID, map[string]any{"matrix_media_content": content, "matrix_media_content_version": 1})
@@ -202,9 +204,6 @@ func (imp *Importer) applyMedia(ctx context.Context, messageID int64, content *e
 }
 
 func (imp *Importer) retryArchivedMedia(ctx context.Context, sourceID int64, opts ImportOptions, sum *ImportSummary) error {
-	if opts.NoMedia || opts.AttachmentsDir == "" {
-		return nil
-	}
 	var after int64
 	for {
 		items, err := imp.store.ListMatrixRetryableAttachmentMessagesContext(ctx, sourceID, after, 100, opts.MediaPolicy)
@@ -216,21 +215,21 @@ func (imp *Importer) retryArchivedMedia(ctx context.Context, sourceID int64, opt
 			if !roomIncluded(item.ChatID, opts.Rooms, opts.ExcludeRooms) {
 				continue
 			}
-			if !opts.Full {
-				refs, err := imp.existingMediaAttachments(item.MessageID)
-				if err != nil {
-					return err
-				}
-				backoff := len(refs) > 0
-				for _, ref := range refs {
-					var metadata matrixMediaMetadata
-					backoff = backoff &&
-						(ref.State == attachmentpolicy.StatePending || ref.State == attachmentpolicy.StateFailed) &&
-						json.Unmarshal([]byte(ref.Metadata), &metadata) == nil && time.Now().Before(metadata.RetryAfter)
-				}
-				if backoff {
-					continue
-				}
+			refs, err := imp.existingMediaAttachments(item.MessageID)
+			if err != nil {
+				return err
+			}
+			conversation := attachmentpolicy.Conversation{Type: item.ConversationType, ParticipantCount: item.ParticipantCount}
+			excluded, backoff := false, !opts.Full && len(refs) > 0
+			for _, ref := range refs {
+				excluded = excluded || opts.MediaPolicy.Evaluate(store.MediaConversation(conversation), int64(ref.Size)) != ""
+				var metadata matrixMediaMetadata
+				backoff = backoff &&
+					(ref.State == attachmentpolicy.StatePending || ref.State == attachmentpolicy.StateFailed) &&
+					json.Unmarshal([]byte(ref.Metadata), &metadata) == nil && time.Now().Before(metadata.RetryAfter)
+			}
+			if !excluded && (opts.NoMedia || opts.AttachmentsDir == "" || backoff) {
+				continue
 			}
 			archived, content, _, err := imp.archivedMediaContent(item.MessageID)
 			if err != nil {
@@ -240,7 +239,6 @@ func (imp *Importer) retryArchivedMedia(ctx context.Context, sourceID int64, opt
 				slog.Warn("skip unreadable Matrix media event", "message_id", item.MessageID, "error", err)
 				continue
 			}
-			conversation := attachmentpolicy.Conversation{Type: item.ConversationType, ParticipantCount: item.ParticipantCount}
 			if err := imp.applyMedia(ctx, item.MessageID, content, archived.Type, conversation, opts, sum); err != nil {
 				return err
 			}
@@ -401,6 +399,7 @@ func (imp *Importer) prepareMedia(ctx context.Context, messageID int64, content 
 		ref.Size = archived.Size
 	}
 	if seen && archived.ContentHash != "" && archived.StoragePath != "" {
+		// Empty encrypted fields can share a plain-media fingerprint.
 		if content.File != nil {
 			if err := content.File.PrepareForDecryption(); err != nil {
 				return imp.persistMediaFailure(ctx, messageID, ref, metadata, pendingMediaOptions(opts))
