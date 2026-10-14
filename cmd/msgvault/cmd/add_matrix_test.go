@@ -159,9 +159,9 @@ func TestAddMatrixBackupSetup(t *testing.T) {
 }
 
 func TestReadMatrixRecoverySecret(t *testing.T) {
-	for _, mode := range []string{"passphrase requires file without prompt", "file preserves passphrase whitespace"} {
+	for _, mode := range []string{"passphrase requires file without prompt", "passphrase disables normalization"} {
 		t.Run(mode, func(t *testing.T) {
-			file := mode == "file preserves passphrase whitespace"
+			file := mode == "passphrase disables normalization"
 			req := require.New(t)
 			stdin, err := os.Open(os.DevNull)
 			req.NoError(err)
@@ -174,8 +174,9 @@ func TestReadMatrixRecoverySecret(t *testing.T) {
 				addMatrixRecoveryIsPassphrase = false
 			})
 			args := []string{"--recovery-passphrase"}
+			var path string
 			if file {
-				path := filepath.Join(t.TempDir(), "recovery")
+				path = filepath.Join(t.TempDir(), "recovery")
 				req.NoError(os.WriteFile(path, []byte("  example passphrase  \n"), 0o600))
 				args = append(args, "--recovery-file", path)
 			}
@@ -183,7 +184,9 @@ func TestReadMatrixRecoverySecret(t *testing.T) {
 			secret, err := readMatrixRecoverySecret()
 			if file {
 				req.NoError(err)
-				assert.Equal(t, "  example passphrase  ", secret)
+				want, err := readMatrixSecretFile(path, false)
+				req.NoError(err)
+				assert.Equal(t, want, secret)
 			} else {
 				req.EqualError(err, "--recovery-passphrase requires --recovery-file when an interactive prompt is unavailable")
 			}

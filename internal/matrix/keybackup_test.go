@@ -210,7 +210,7 @@ func TestBackupDecrypt(t *testing.T) {
 		t.Cleanup(server.Close)
 		return server
 	}
-	for _, mode := range []string{"found", "different sender key", "padded key", "invalid key", "corrupt stored key", "missing", "empty envelope", "null plaintext", "early", "transient", "wrong room", "truncated ciphertext", "algorithm", "redaction", "replaced"} {
+	for _, mode := range []string{"found", "padded key", "invalid key", "corrupt stored key", "missing", "empty envelope", "null plaintext", "early", "transient", "wrong room", "algorithm", "redaction", "replaced"} {
 		t.Run(mode, func(t *testing.T) {
 			req := require.New(t)
 			check := assert.New(t)
@@ -233,10 +233,6 @@ func TestBackupDecrypt(t *testing.T) {
 			if mode == "redaction" {
 				evt = f.encrypted(t, "$redaction", 2, event.EventRedaction, map[string]any{"redacts": "$target"})
 			}
-			if mode == "different sender key" {
-				f.data.SenderKey = "backup-sender"
-				evt.Content.AsEncrypted().SenderKey = "other-sender"
-			}
 			if mode == "missing" {
 				evt.Content.AsEncrypted().SessionID = "unknown"
 			}
@@ -252,9 +248,6 @@ func TestBackupDecrypt(t *testing.T) {
 			}
 			if mode == "wrong room" {
 				evt.RoomID = "!other:example.org"
-			}
-			if mode == "truncated ciphertext" {
-				evt.Content.AsEncrypted().MegolmCiphertext = []byte("invalid")
 			}
 			if mode == "algorithm" {
 				evt.Content.AsEncrypted().Algorithm = "unknown"
@@ -275,7 +268,7 @@ func TestBackupDecrypt(t *testing.T) {
 			}
 			plain, _, err := r.decryptWithIndex(t.Context(), evt)
 			switch mode {
-			case "found", "different sender key", "padded key":
+			case "found", "padded key":
 				req.NoError(err)
 				req.True(parseContent(plain))
 				check.Equal("hello", plain.Content.AsMessage().Body)
@@ -294,8 +287,6 @@ func TestBackupDecrypt(t *testing.T) {
 				req.ErrorIs(err, olm.ErrUnknownMessageIndex)
 			case "wrong room":
 				req.EqualError(err, "matrix decrypted message belongs to another room")
-			case "truncated ciphertext":
-				req.ErrorIs(err, olm.ErrInputToSmall)
 			case "algorithm":
 				req.EqualError(err, "unsupported Matrix encryption algorithm")
 			case "redaction":

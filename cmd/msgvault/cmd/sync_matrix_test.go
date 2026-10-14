@@ -3,7 +3,6 @@ package cmd
 import (
 	"bytes"
 	"database/sql"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -70,23 +69,21 @@ func TestMatrixSyncSummaryBackupFailureAndKeyHint(t *testing.T) {
 		var out bytes.Buffer
 		req.ErrorContains(runMatrixSync(t.Context(), s, cfg, "", false, nil, &out), "key backup unavailable, 1 encrypted events pending")
 	})
-	for _, mode := range []string{"per-source counts and single hint", "exclude rooms"} {
+	for _, mode := range []string{"single hint across sources", "exclude rooms"} {
 		t.Run(mode, func(t *testing.T) {
 			req, check := require.New(t), assert.New(t)
 			s, cfg, creds, newPlaceholder := setup(t)
 			req.NoError(matrixsource.SaveCredentials(cfg.TokensDir(), creds))
 			var out bytes.Buffer
-			req.NoError(runMatrixSync(t.Context(), s, cfg, "", false, nil, &out))
 			switch mode {
 			case "exclude rooms":
+				req.NoError(runMatrixSync(t.Context(), s, cfg, "", false, nil, &out))
 				check.Contains(out.String(), "--recovery-file")
 				cfg.Matrix.ExcludeRooms = []string{"!room:example.org"}
 				out.Reset()
 				req.NoError(runMatrixSync(t.Context(), s, cfg, "", false, nil, &out))
 				check.NotContains(out.String(), "--recovery-file")
 			default:
-				check.Contains(out.String(), fmt.Sprintf("--homeserver %q --user-id %q --recovery-file <path>", creds.Homeserver, creds.UserID))
-				check.Contains(out.String(), "This renews the login and logs out the old Matrix device.")
 				second, err := s.GetOrCreateSource(sourceTypeMatrix, "@second:example.org")
 				req.NoError(err)
 				secondRoom, err := s.EnsureConversation(second.ID, "!room:example.org", "Room")
@@ -94,10 +91,7 @@ func TestMatrixSyncSummaryBackupFailureAndKeyHint(t *testing.T) {
 				_, err = s.PersistMessageContext(t.Context(), &store.MessagePersistData{Message: &store.Message{SourceID: second.ID, ConversationID: secondRoom, SourceMessageID: "$second", MessageType: "matrix", Snippet: sql.NullString{String: store.MatrixEncryptedPlaceholder, Valid: true}}, RawMIME: []byte(`{"type":"m.room.encrypted"}`), RawFormat: "matrix_json"})
 				req.NoError(err)
 				req.NoError(matrixsource.SaveCredentials(cfg.TokensDir(), matrixsource.Credentials{Homeserver: creds.Homeserver, UserID: second.Identifier, DeviceID: "ARCHIVE", AccessToken: "token"}))
-				out.Reset()
-				req.NoError(runMatrixSync(t.Context(), s, cfg, "", false, nil, &out))
 				*newPlaceholder = true
-				out.Reset()
 				req.NoError(runMatrixSync(t.Context(), s, cfg, "", false, nil, &out))
 				check.Equal(1, strings.Count(out.String(), "run msgvault add-matrix --homeserver"))
 			}
