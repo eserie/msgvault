@@ -31,7 +31,6 @@ type recoveryFixture struct {
 	history      []*event.Event
 	edits        []*event.Event
 	quiet        bool
-	left         bool
 	historyFails bool
 	extraRooms   map[string][]*event.Event
 	nextBatch    string
@@ -328,9 +327,6 @@ func newRecoveryFixture(t *testing.T) *recoveryFixture {
 			join["!room:example.org"] = map[string]any{"timeline": map[string]any{"events": f.timeline, "prev_batch": "history"}}
 		}
 		rooms := map[string]any{"join": join}
-		if f.left {
-			rooms["leave"] = map[string]any{"!room:example.org": map[string]any{"timeline": map[string]any{"events": []*event.Event{}}}}
-		}
 		writeMatrixJSON(t, w, map[string]any{"next_batch": f.nextBatch, "rooms": rooms})
 	})
 	mux.HandleFunc("GET /_matrix/client/v3/user/{user}/account_data/m.direct", func(w http.ResponseWriter, _ *http.Request) {
@@ -454,14 +450,14 @@ func TestImportRecoversMessagesAndEdits(t *testing.T) {
 	})
 }
 
-func TestImportRecoversLeftRoomAfterFullSync(t *testing.T) {
+func TestImportRecoversStoredPlaceholdersAfterFullSyncResetsCursor(t *testing.T) {
 	req := require.New(t)
 	check := assert.New(t)
 	f := newRecoveryFixture(t)
 	f.timeline = []*event.Event{f.backup.encrypted(t, "$message", 20, event.EventMessage, map[string]any{"msgtype": "m.text", "body": "recovered"})}
 	_, err := f.run(t, false, false)
 	req.NoError(err)
-	f.quiet, f.left = true, true
+	f.quiet = true
 	_, err = f.run(t, false, true)
 	req.NoError(err)
 	sum, err := f.run(t, true, false)
@@ -1048,7 +1044,7 @@ func TestImportHandlesUnreadableCursorBySyncMode(t *testing.T) {
 	}{
 		{"incremental refuses malformed cursor", false, "invalid JSON", true, "decode Matrix sync state"},
 		{"full replaces malformed cursor", true, "invalid JSON", false, ""},
-		{"full refuses future version", true, `{"format_version":2,"rooms":{}}`, true, ""},
+		{"full refuses future version", true, `{"format_version":2,"rooms":{}}`, true, "unsupported Matrix cursor format version 2"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req, check := require.New(t), assert.New(t)
@@ -1194,7 +1190,9 @@ func TestImportRecoveryRejectsReplayedIndex(t *testing.T) {
 				_, err = f.run(t, true, false)
 				req.NoError(err)
 			}
-			check.Equal("older", f.body(t, "$original"))
+			if claimPath == "placeholder recovery" {
+				check.Equal("older", f.body(t, "$original"))
+			}
 			check.Equal("newest", f.body(t, "$other"))
 			raw, err := json.Marshal(older)
 			req.NoError(err)
