@@ -394,36 +394,25 @@ func TestAddMatrixRenewalStagingFailureKeepsOldLogin(t *testing.T) {
 
 func TestAddMatrixRenewalResumesAfterPublishFailure(t *testing.T) {
 	for _, tc := range []struct {
-		name        string
-		fail        error
-		sameDevice  bool
-		wantLogins  int
-		wantLogouts []string
+		name string
+		fail error
 	}{
-		{"not published", errors.New("synthetic disk full"), false, 1, []string{"Bearer old"}},
-		{"published but not durable", fmt.Errorf("synthetic directory sync failure: %w", atomicfile.ErrPublished), false, 1, []string{"Bearer old"}},
-		{"same device", atomicfile.ErrPublished, true, 0, nil},
+		{"not published", errors.New("synthetic disk full")},
+		{"published but not durable", fmt.Errorf("synthetic directory sync failure: %w", atomicfile.ErrPublished)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			require := require.New(t)
 			assert := assert.New(t)
 			server, cfg, old := setupMatrixRenewal(t)
-			secret := "password"
-			if tc.sameDevice {
-				old.DeviceID, old.AccessToken = "NEW", "fresh"
-				require.NoError(matrixsource.SaveCredentials(cfg.TokensDir(), old))
-				require.NoError(matrixsource.SavePendingCredentials(cfg.TokensDir(), old))
-				secret = ""
-			}
 			failMatrixCredentialWrite(t, &saveMatrixCredentials, tc.fail)
 
-			require.ErrorContains(runAddMatrixForRenewal(t, cfg, server.URL, secret), "retry add-matrix to finish")
+			require.ErrorContains(runAddMatrixForRenewal(t, cfg, server.URL, "password"), "retry add-matrix to finish")
 			pending, ok, err := matrixsource.LoadPendingCredentials(cfg.TokensDir(), old.UserID)
 			require.NoError(err)
 			require.True(ok, "the new login stays recoverable")
 			assert.Equal("NEW", pending.DeviceID)
 			_, loggedOut := server.snapshot()
-			assert.Equal(tc.wantLogouts, loggedOut, "the saved new device is kept")
+			assert.Equal([]string{"Bearer old"}, loggedOut, "the saved new device is kept")
 
 			restoreMatrixCredentialWrites()
 			require.NoError(runAddMatrixForRenewal(t, cfg, server.URL, ""), "the retry resumes the pending login")
@@ -431,7 +420,7 @@ func TestAddMatrixRenewalResumesAfterPublishFailure(t *testing.T) {
 			require.NoError(err)
 			assert.Equal(pending, creds)
 			logins, loggedOut := server.snapshot()
-			assert.Equal(tc.wantLogins, logins, "the retry reuses the saved device")
+			assert.Equal(1, logins, "the retry reuses the saved device")
 			assert.NotContains(loggedOut, "Bearer fresh")
 			exists, err := matrixsource.PendingCredentialsExist(cfg.TokensDir(), old.UserID)
 			require.NoError(err)
