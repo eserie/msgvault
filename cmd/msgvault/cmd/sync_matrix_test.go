@@ -74,33 +74,43 @@ func TestMatrixSyncSummaryBackupFailureAndKeyHint(t *testing.T) {
 			req.ErrorContains(runMatrixSync(t.Context(), s, cfg, "", false, nil, &out), "key backup unavailable, 1 encrypted events pending: load Matrix key backup")
 		})
 	}
-	t.Run("key hint", func(t *testing.T) {
-		req, check := require.New(t), assert.New(t)
-		s, cfg, creds, newPlaceholder := setup(t)
-		req.NoError(matrixsource.SaveCredentials(cfg.TokensDir(), creds))
-		var out bytes.Buffer
-		req.NoError(runMatrixSync(t.Context(), s, cfg, "", false, nil, &out))
-		check.Contains(out.String(), fmt.Sprintf("--homeserver %q --user-id %q --recovery-file <path>", creds.Homeserver, creds.UserID))
-		check.Contains(out.String(), "This renews the login and logs out the old Matrix device.")
-		second, err := s.GetOrCreateSource(sourceTypeMatrix, "@second:example.org")
-		req.NoError(err)
-		secondRoom, err := s.EnsureConversation(second.ID, "!room:example.org", "Room")
-		req.NoError(err)
-		_, err = s.PersistMessageContext(t.Context(), &store.MessagePersistData{Message: &store.Message{SourceID: second.ID, ConversationID: secondRoom, SourceMessageID: "$second", MessageType: "matrix", Snippet: sql.NullString{String: store.MatrixEncryptedPlaceholder, Valid: true}}, RawMIME: []byte(`{"type":"m.room.encrypted"}`), RawFormat: "matrix_json"})
-		req.NoError(err)
-		req.NoError(matrixsource.SaveCredentials(cfg.TokensDir(), matrixsource.Credentials{Homeserver: creds.Homeserver, UserID: second.Identifier, DeviceID: "ARCHIVE", AccessToken: "token"}))
-		out.Reset()
-		req.NoError(runMatrixSync(t.Context(), s, cfg, "", false, nil, &out))
-		*newPlaceholder = true
-		out.Reset()
-		req.NoError(runMatrixSync(t.Context(), s, cfg, "", false, nil, &out))
-		check.Equal(1, strings.Count(out.String(), "run msgvault add-matrix --homeserver"))
-		check.Equal(2, strings.Count(out.String(), "2 encrypted placeholders"))
-		cfg.Matrix.ExcludeRooms = []string{"!room:example.org"}
-		out.Reset()
-		req.NoError(runMatrixSync(t.Context(), s, cfg, "", false, nil, &out))
-		check.NotContains(out.String(), "--recovery-file")
-	})
+	for _, mode := range []string{"hint text", "per-source counts", "one hint for two sources", "exclude rooms"} {
+		t.Run(mode, func(t *testing.T) {
+			req, check := require.New(t), assert.New(t)
+			s, cfg, creds, newPlaceholder := setup(t)
+			req.NoError(matrixsource.SaveCredentials(cfg.TokensDir(), creds))
+			var out bytes.Buffer
+			req.NoError(runMatrixSync(t.Context(), s, cfg, "", false, nil, &out))
+			switch mode {
+			case "hint text":
+				check.Contains(out.String(), fmt.Sprintf("--homeserver %q --user-id %q --recovery-file <path>", creds.Homeserver, creds.UserID))
+				check.Contains(out.String(), "This renews the login and logs out the old Matrix device.")
+			case "exclude rooms":
+				cfg.Matrix.ExcludeRooms = []string{"!room:example.org"}
+				out.Reset()
+				req.NoError(runMatrixSync(t.Context(), s, cfg, "", false, nil, &out))
+				check.NotContains(out.String(), "--recovery-file")
+			default:
+				second, err := s.GetOrCreateSource(sourceTypeMatrix, "@second:example.org")
+				req.NoError(err)
+				secondRoom, err := s.EnsureConversation(second.ID, "!room:example.org", "Room")
+				req.NoError(err)
+				_, err = s.PersistMessageContext(t.Context(), &store.MessagePersistData{Message: &store.Message{SourceID: second.ID, ConversationID: secondRoom, SourceMessageID: "$second", MessageType: "matrix", Snippet: sql.NullString{String: store.MatrixEncryptedPlaceholder, Valid: true}}, RawMIME: []byte(`{"type":"m.room.encrypted"}`), RawFormat: "matrix_json"})
+				req.NoError(err)
+				req.NoError(matrixsource.SaveCredentials(cfg.TokensDir(), matrixsource.Credentials{Homeserver: creds.Homeserver, UserID: second.Identifier, DeviceID: "ARCHIVE", AccessToken: "token"}))
+				out.Reset()
+				req.NoError(runMatrixSync(t.Context(), s, cfg, "", false, nil, &out))
+				*newPlaceholder = true
+				out.Reset()
+				req.NoError(runMatrixSync(t.Context(), s, cfg, "", false, nil, &out))
+				if mode == "per-source counts" {
+					check.Equal(2, strings.Count(out.String(), "2 encrypted placeholders"))
+				} else {
+					check.Equal(1, strings.Count(out.String(), "run msgvault add-matrix --homeserver"))
+				}
+			}
+		})
+	}
 	for _, syncConfig := range []string{`"invalid JSON"`, `{"skip_key_backup":true,"skip_key_backup":"invalid"}`} {
 		t.Run("unreadable preference/"+syncConfig, func(t *testing.T) {
 			req, check := require.New(t), assert.New(t)

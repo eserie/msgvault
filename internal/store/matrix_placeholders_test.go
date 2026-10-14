@@ -63,9 +63,9 @@ func TestMatrixUnsupportedPlaceholderRetainsRawAndInvalidatesIndexes(t *testing.
 	check.Equal("$unsupported", claims["matrix_megolm_session_0"])
 }
 
-func TestMatrixPlaceholderDiscoveryBackfillPagingAndRetirement(t *testing.T) {
+func setupMatrixPlaceholders(t *testing.T) (*store.Store, int64, int64, []int64) {
+	t.Helper()
 	req := require.New(t)
-	check := assert.New(t)
 	s := testutil.NewTestStore(t)
 	source, err := s.GetOrCreateSource("matrix", "@archive:example.org")
 	req.NoError(err)
@@ -92,7 +92,13 @@ func TestMatrixPlaceholderDiscoveryBackfillPagingAndRetirement(t *testing.T) {
 		ids = append(ids, messageID)
 	}
 	req.NoError(s.MarkMessageDeleted(source.ID, "$second"))
-	rooms, err := s.MatrixPlaceholderRooms(t.Context(), source.ID, nil, nil)
+	return s, source.ID, convID, ids
+}
+
+func TestMatrixPlaceholderDiscoveryAndBackfill(t *testing.T) {
+	req, check := require.New(t), assert.New(t)
+	s, sourceID, _, ids := setupMatrixPlaceholders(t)
+	rooms, err := s.MatrixPlaceholderRooms(t.Context(), sourceID, nil, nil)
 	req.NoError(err)
 	req.Len(rooms, 1)
 	check.Equal(int64(4), rooms[0].Count)
@@ -105,17 +111,24 @@ func TestMatrixPlaceholderDiscoveryBackfillPagingAndRetirement(t *testing.T) {
 	}
 	_, err = s.DB().Exec(s.Rebind(`UPDATE message_raw SET raw_data = ? WHERE message_id = ?`), []byte("invalid JSON"), ids[0])
 	req.NoError(err)
-	rooms, err = s.MatrixPlaceholderRooms(t.Context(), source.ID, nil, nil)
+	rooms, err = s.MatrixPlaceholderRooms(t.Context(), sourceID, nil, nil)
 	req.NoError(err)
 	req.Len(rooms, 1)
 	check.Equal(int64(4), rooms[0].Count)
 	check.Equal("!room:example.org", rooms[0].RoomID)
-	rooms, err = s.MatrixPlaceholderRooms(t.Context(), source.ID, []string{"!other:example.org"}, nil)
+	rooms, err = s.MatrixPlaceholderRooms(t.Context(), sourceID, []string{"!other:example.org"}, nil)
 	req.NoError(err)
 	check.Empty(rooms)
-	rooms, err = s.MatrixPlaceholderRooms(t.Context(), source.ID, nil, []string{"!room:example.org"})
+	rooms, err = s.MatrixPlaceholderRooms(t.Context(), sourceID, nil, []string{"!room:example.org"})
 	req.NoError(err)
 	check.Empty(rooms)
+}
+
+func TestMatrixPlaceholderPaging(t *testing.T) {
+	req, check := require.New(t), assert.New(t)
+	s, sourceID, convID, ids := setupMatrixPlaceholders(t)
+	_, err := s.MatrixPlaceholderRooms(t.Context(), sourceID, nil, nil)
+	req.NoError(err)
 	page, scanned, err := s.MatrixPlaceholders(t.Context(), convID, ids[0], 1)
 	req.NoError(err)
 	req.Len(page, 1)
@@ -148,7 +161,7 @@ func TestMatrixPlaceholderDiscoveryBackfillPagingAndRetirement(t *testing.T) {
 	_, err = s.DB().Exec(s.Rebind(`UPDATE message_raw SET raw_data = ?, compression = 'zlib' WHERE message_id = ?`), []byte("invalid compressed data"), ids[4])
 	req.NoError(err)
 	req.NoError(s.SetMessageMetadataContext(t.Context(), ids[4], sql.NullString{String: `{"matrix_event_type":"m.room.encrypted"}`, Valid: true}))
-	rooms, err = s.MatrixPlaceholderRooms(t.Context(), source.ID, nil, nil)
+	rooms, err := s.MatrixPlaceholderRooms(t.Context(), sourceID, nil, nil)
 	req.NoError(err)
 	req.Len(rooms, 1)
 	check.Equal(int64(5), rooms[0].Count)
@@ -156,12 +169,17 @@ func TestMatrixPlaceholderDiscoveryBackfillPagingAndRetirement(t *testing.T) {
 	req.NoError(err)
 	check.Empty(page)
 	check.Equal(ids[4], scanned)
+}
+
+func TestDeleteMatrixPlaceholderRetiresRelatedData(t *testing.T) {
+	req, check := require.New(t), assert.New(t)
+	s, sourceID, convID, ids := setupMatrixPlaceholders(t)
 	req.NoError(s.SetMessageReplyContext(t.Context(), ids[0], ids[2]))
 	revision, err := s.DerivedDataRevision()
 	req.NoError(err)
-	req.NoError(s.DeleteMatrixPlaceholder(t.Context(), source.ID+1, ids[2]))
+	req.NoError(s.DeleteMatrixPlaceholder(t.Context(), sourceID+1, ids[2]))
 	req.NoError(s.SetConversationMetadata(convID, sql.NullString{String: `{"member_count":2}`, Valid: true}))
-	req.NoError(s.DeleteMatrixPlaceholder(t.Context(), source.ID, ids[2]))
+	req.NoError(s.DeleteMatrixPlaceholder(t.Context(), sourceID, ids[2]))
 	metadata, err := s.GetConversationMetadata(convID)
 	req.NoError(err)
 	check.JSONEq(`{"member_count":2}`, metadata.String)
@@ -181,7 +199,7 @@ func TestMatrixPlaceholderDiscoveryBackfillPagingAndRetirement(t *testing.T) {
 		req.NoError(s.DB().QueryRow(s.Rebind(`SELECT count(*) FROM `+table+` WHERE message_id = ?`), ids[2]).Scan(&count))
 		check.Zero(count)
 	}
-	req.NoError(s.DeleteMatrixPlaceholder(t.Context(), source.ID, ids[2]))
+	req.NoError(s.DeleteMatrixPlaceholder(t.Context(), sourceID, ids[2]))
 	updated, err = s.DerivedDataRevision()
 	req.NoError(err)
 	check.Equal(revision+1, updated)
