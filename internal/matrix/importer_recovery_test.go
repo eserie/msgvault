@@ -954,11 +954,12 @@ func TestImportHandlesUnreadableCursorBySyncMode(t *testing.T) {
 		full          bool
 		blob          string
 		wantError     bool
-		wantErrorText string
+		wantDecodeErr bool
+		wantCursorErr bool
 	}{
-		{"incremental refuses malformed cursor", false, "invalid JSON", true, "decode Matrix sync state"},
-		{"full replaces malformed cursor", true, "invalid JSON", false, ""},
-		{"full refuses future version", true, `{"format_version":2,"rooms":{}}`, true, "unsupported Matrix cursor format version 2"},
+		{"incremental refuses malformed cursor", false, "invalid JSON", true, true, false},
+		{"full replaces malformed cursor", true, "invalid JSON", false, false, false},
+		{"full refuses future version", true, `{"format_version":2,"rooms":{}}`, true, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req, check := require.New(t), assert.New(t)
@@ -981,10 +982,12 @@ func TestImportHandlesUnreadableCursorBySyncMode(t *testing.T) {
 				check.NotEqual(syncID, latest.ID)
 				return
 			}
-			if tc.wantErrorText != "" {
-				req.ErrorContains(err, tc.wantErrorText)
-			} else {
-				req.Error(err)
+			req.Error(err)
+			if tc.wantDecodeErr {
+				req.ErrorContains(err, "decode Matrix sync state")
+			}
+			if tc.wantCursorErr {
+				req.ErrorIs(err, errCursorVersion)
 			}
 			latest, err := f.store.GetLastSuccessfulSyncByType(f.sourceID, SourceType)
 			req.NoError(err)
