@@ -54,7 +54,7 @@ func (s ingestDuringDecryption) Decrypt(message []byte) ([]byte, uint, error) {
 	return plain, index, nil
 }
 
-func TestImportRecoveryDecryptsWithoutWriteLockAndRejectsStaleRows(t *testing.T) {
+func TestImportRecoveryLockTimingAndStaleRowRejection(t *testing.T) {
 	for _, mode := range []string{"ingest during decrypt", "empty recovery page avoids write lock", "reused", "deletion changed"} {
 		t.Run(mode, func(t *testing.T) {
 			req, check := require.New(t), assert.New(t)
@@ -1044,11 +1044,11 @@ func TestImportHandlesUnreadableCursorBySyncMode(t *testing.T) {
 		name      string
 		full      bool
 		blob      string
-		wantError bool
+		wantError string
 	}{
-		{"incremental refuses malformed cursor", false, "invalid JSON", true},
-		{"full replaces malformed cursor", true, "invalid JSON", false},
-		{"full refuses future version", true, `{"format_version":2,"rooms":{}}`, true},
+		{"incremental refuses malformed cursor", false, "invalid JSON", "decode Matrix sync state"},
+		{"full replaces malformed cursor", true, "invalid JSON", ""},
+		{"full refuses future version", true, `{"format_version":2,"rooms":{}}`, "unsupported Matrix cursor format version 2"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req, check := require.New(t), assert.New(t)
@@ -1064,14 +1064,14 @@ func TestImportHandlesUnreadableCursorBySyncMode(t *testing.T) {
 				handler.ServeHTTP(w, r)
 			})
 			_, err = f.run(t, true, tc.full)
-			if !tc.wantError {
+			if tc.wantError == "" {
 				req.NoError(err)
 				latest, err := f.store.GetLastSuccessfulSyncByType(f.sourceID, SourceType)
 				req.NoError(err)
 				check.NotEqual(syncID, latest.ID)
 				return
 			}
-			req.Error(err)
+			req.ErrorContains(err, tc.wantError)
 			latest, err := f.store.GetLastSuccessfulSyncByType(f.sourceID, SourceType)
 			req.NoError(err)
 			check.Equal(syncID, latest.ID)
