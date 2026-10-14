@@ -2830,6 +2830,7 @@ func TestHandleCLIRebuildFTSFlushesProgressThroughMiddleware(t *testing.T) {
 	respCh := make(chan *http.Response, 1)
 	errCh := make(chan error, 1)
 	go func() {
+		//nolint:bodyclose // The test closes the streaming body after decoding it.
 		resp, err := http.Post(httpSrv.URL+"/api/v1/cli/rebuild-fts", "application/json", nil)
 		if err != nil {
 			errCh <- err
