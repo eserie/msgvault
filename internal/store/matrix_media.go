@@ -62,6 +62,14 @@ func (s *Store) ListMatrixRetryableAttachmentMessagesContext(ctx context.Context
 		if policy.Scope == attachmentpolicy.ScopeDirect {
 			where += " AND (COALESCE(a.attachment_state, '') <> 'skipped' OR c.conversation_type = 'direct_chat')"
 		}
+		if policy.MaxParticipants > 0 {
+			count := `CASE WHEN json_valid(c.metadata) THEN json_extract(c.metadata, '$.member_count') END`
+			if s.IsPostgreSQL() {
+				count = `CASE WHEN jsonb_typeof(c.metadata->'member_count') = 'number' THEN (c.metadata->>'member_count')::numeric END`
+			}
+			where += " AND (COALESCE(a.attachment_state, '') <> 'skipped' OR COALESCE((" + count + ") <= ?, TRUE))"
+			args = append(args, policy.MaxParticipants)
+		}
 	}
 	query := `
 		SELECT m.id, m.source_message_id, c.source_conversation_id,
