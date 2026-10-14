@@ -291,12 +291,12 @@ func setupMatrixRenewal(t *testing.T) (*renewalHomeserver, *config.Config, matri
 	return server, cfg, old
 }
 
-func runAddMatrixForRenewal(t *testing.T, cfg *config.Config, homeserver, secret string, flags ...string) error {
+func runAddMatrixForRenewal(t *testing.T, cfg *config.Config, homeserver, secret string) error {
 	t.Helper()
 	t.Setenv(clirun.EnvMatrixLoginSecret, secret)
 	root := newTestRootCmd()
 	root.AddCommand(newAddMatrixCmd())
-	root.SetArgs(append([]string{"add-matrix", "--homeserver", homeserver, "--user-id", "@archive:example.org", "--no-default-identity"}, flags...))
+	root.SetArgs([]string{"add-matrix", "--homeserver", homeserver, "--user-id", "@archive:example.org", "--no-default-identity"})
 	root.SetContext(testInvocationContext(t.Context(), cfg, invocationOptions{}))
 	root.SetOut(io.Discard)
 	root.SetErr(io.Discard)

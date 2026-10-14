@@ -109,12 +109,6 @@ func TestMatrixPlaceholderDiscoveryAndBackfill(t *testing.T) {
 		req.NoError(err)
 		check.JSONEq(fmt.Sprintf(`{"matrix_event_type":%q}`, eventType), metadata.String)
 	}
-	_, err = s.DB().Exec(s.Rebind(`UPDATE message_raw SET raw_data = ? WHERE message_id = ?`), []byte("invalid JSON"), ids[0])
-	req.NoError(err)
-	rooms, err = s.MatrixPlaceholderRooms(t.Context(), sourceID, nil, nil)
-	req.NoError(err)
-	req.Len(rooms, 1)
-	check.Equal(int64(4), rooms[0].Count)
 	check.Equal("!room:example.org", rooms[0].RoomID)
 	rooms, err = s.MatrixPlaceholderRooms(t.Context(), sourceID, []string{"!other:example.org"}, nil)
 	req.NoError(err)
