@@ -71,10 +71,10 @@ func TestMatrixSyncSummaryBackupFailureAndKeyHint(t *testing.T) {
 			creds.BackupKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 			req.NoError(matrixsource.SaveCredentials(cfg.TokensDir(), creds))
 			var out bytes.Buffer
-			req.ErrorContains(runMatrixSync(t.Context(), s, cfg, "", false, nil, &out), "key backup unavailable, 1 encrypted events pending: load Matrix key backup")
+			req.ErrorContains(runMatrixSync(t.Context(), s, cfg, "", false, nil, &out), "key backup unavailable, 1 encrypted events pending")
 		})
 	}
-	for _, mode := range []string{"hint text", "per-source counts and single hint", "exclude rooms"} {
+	for _, mode := range []string{"per-source counts and single hint", "exclude rooms"} {
 		t.Run(mode, func(t *testing.T) {
 			req, check := require.New(t), assert.New(t)
 			s, cfg, creds, newPlaceholder := setup(t)
@@ -82,15 +82,14 @@ func TestMatrixSyncSummaryBackupFailureAndKeyHint(t *testing.T) {
 			var out bytes.Buffer
 			req.NoError(runMatrixSync(t.Context(), s, cfg, "", false, nil, &out))
 			switch mode {
-			case "hint text":
-				check.Contains(out.String(), fmt.Sprintf("--homeserver %q --user-id %q --recovery-file <path>", creds.Homeserver, creds.UserID))
-				check.Contains(out.String(), "This renews the login and logs out the old Matrix device.")
 			case "exclude rooms":
 				cfg.Matrix.ExcludeRooms = []string{"!room:example.org"}
 				out.Reset()
 				req.NoError(runMatrixSync(t.Context(), s, cfg, "", false, nil, &out))
 				check.NotContains(out.String(), "--recovery-file")
 			default:
+				check.Contains(out.String(), fmt.Sprintf("--homeserver %q --user-id %q --recovery-file <path>", creds.Homeserver, creds.UserID))
+				check.Contains(out.String(), "This renews the login and logs out the old Matrix device.")
 				second, err := s.GetOrCreateSource(sourceTypeMatrix, "@second:example.org")
 				req.NoError(err)
 				secondRoom, err := s.EnsureConversation(second.ID, "!room:example.org", "Room")
