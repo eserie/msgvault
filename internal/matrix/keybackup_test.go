@@ -202,6 +202,14 @@ func TestLoadBackupKey(t *testing.T) {
 }
 
 func TestBackupDecrypt(t *testing.T) {
+	serve := func(t *testing.T, f *backupFixture) *httptest.Server {
+		t.Helper()
+		mux := http.NewServeMux()
+		f.handle(t, mux)
+		server := httptest.NewServer(mux)
+		t.Cleanup(server.Close)
+		return server
+	}
 	for _, mode := range []string{"found", "different sender key", "padded key", "invalid key", "corrupt stored key", "missing", "empty envelope", "null plaintext", "early", "transient", "wrong room", "truncated ciphertext", "algorithm", "redaction", "replaced"} {
 		t.Run(mode, func(t *testing.T) {
 			req := require.New(t)
@@ -251,10 +259,7 @@ func TestBackupDecrypt(t *testing.T) {
 			if mode == "algorithm" {
 				evt.Content.AsEncrypted().Algorithm = "unknown"
 			}
-			mux := http.NewServeMux()
-			f.handle(t, mux)
-			server := httptest.NewServer(mux)
-			t.Cleanup(server.Close)
+			server := serve(t, f)
 			var r *Runtime
 			if mode == "corrupt stored key" {
 				var err error
@@ -309,31 +314,95 @@ func TestBackupDecrypt(t *testing.T) {
 			check.Equal(mode == "replaced" || mode == "invalid key", r.failure != nil)
 		})
 	}
-}
-
-func TestBackupFetchesRoomOnceForManyMissingSessions(t *testing.T) {
-	req := require.New(t)
-	check := assert.New(t)
-	f := newBackupFixture(t)
-	mux := http.NewServeMux()
-	f.handle(t, mux)
-	server := httptest.NewServer(mux)
-	t.Cleanup(server.Close)
-	r := backupRuntime(t, server.URL, f)
-	for i := range 100 {
-		evt := f.encrypted(t, strconv.Itoa(i), 1, event.EventMessage, map[string]any{})
-		evt.Content.AsEncrypted().SessionID = id.SessionID(strconv.Itoa(i))
+	t.Run("room cache for missing sessions", func(t *testing.T) {
+		req := require.New(t)
+		check := assert.New(t)
+		f := newBackupFixture(t)
+		server := serve(t, f)
+		r := backupRuntime(t, server.URL, f)
+		for i := range 100 {
+			evt := f.encrypted(t, strconv.Itoa(i), 1, event.EventMessage, map[string]any{})
+			evt.Content.AsEncrypted().SessionID = id.SessionID(strconv.Itoa(i))
+			_, _, err := r.decryptWithIndex(t.Context(), evt)
+			req.Error(err)
+		}
+		evt := f.encrypted(t, "$found", 1, event.EventMessage, map[string]any{"msgtype": "m.text", "body": "hello"})
 		_, _, err := r.decryptWithIndex(t.Context(), evt)
+		req.NoError(err)
+		check.Equal(1, f.roomFetches)
+		evt.Content.AsEncrypted().SessionID = "absent-after-room-fetch"
+		_, _, err = r.decryptWithIndex(t.Context(), evt)
 		req.Error(err)
-	}
-	evt := f.encrypted(t, "$found", 1, event.EventMessage, map[string]any{"msgtype": "m.text", "body": "hello"})
-	_, _, err := r.decryptWithIndex(t.Context(), evt)
-	req.NoError(err)
-	check.Equal(1, f.roomFetches)
-	evt.Content.AsEncrypted().SessionID = "absent-after-room-fetch"
-	_, _, err = r.decryptWithIndex(t.Context(), evt)
-	req.Error(err)
-	check.Equal(1, f.roomFetches)
+		check.Equal(1, f.roomFetches)
+	})
+	t.Run("only needed sessions", func(t *testing.T) {
+		req := require.New(t)
+		check := assert.New(t)
+		f := newBackupFixture(t)
+		unused := newBackupFixture(t)
+		wantedData, err := backup.EncryptSessionData(f.key, f.data)
+		req.NoError(err)
+		unusedData, err := backup.EncryptSessionData(f.key, unused.data)
+		req.NoError(err)
+		f.sessionResponse = map[string]any{"sessions": map[id.SessionID]any{f.out.ID(): map[string]any{"session_data": wantedData}, unused.out.ID(): map[string]any{"session_data": unusedData}}}
+		server := serve(t, f)
+		r := backupRuntime(t, server.URL, f)
+		evt := f.encrypted(t, "$wanted", 1, event.EventMessage, map[string]any{"msgtype": "m.text", "body": "wanted"})
+		plain, _, err := r.decryptWithIndex(t.Context(), evt)
+		req.NoError(err)
+		req.True(parseContent(plain))
+		check.Equal("wanted", plain.Content.AsMessage().Body)
+		unusedKey := backupSessionKey{evt.RoomID, unused.out.ID()}
+		check.Equal(unusedData.Ciphertext, r.sessionData[unusedKey].SessionData.Ciphertext)
+		check.NotContains(r.sessions, unusedKey)
+	})
+	t.Run("relations prefer outer event", func(t *testing.T) {
+		for _, kind := range []string{"reply", "reaction", "edit"} {
+			for _, outer := range []bool{false, true} {
+				t.Run(kind+"/outer="+strconv.FormatBool(outer), func(t *testing.T) {
+					req := require.New(t)
+					f := newBackupFixture(t)
+					typ := event.EventMessage
+					inner := map[string]any{"m.in_reply_to": map[string]any{"event_id": "$inner"}}
+					outerRelation := &event.RelatesTo{InReplyTo: &event.InReplyTo{EventID: "$outer"}}
+					if kind != "reply" {
+						relType := event.RelReplace
+						if kind == "reaction" {
+							typ, relType = event.EventReaction, event.RelAnnotation
+						}
+						inner = map[string]any{"rel_type": relType, "event_id": "$inner", "key": "yes"}
+						outerRelation = &event.RelatesTo{Type: relType, EventID: "$outer", Key: "yes"}
+					}
+					payload, err := json.Marshal(map[string]any{"room_id": "!room:example.org", "type": typ.Type, "content": map[string]any{"msgtype": "m.text", "body": "hello", "m.relates_to": inner}})
+					req.NoError(err)
+					cipher, err := f.out.Encrypt(payload)
+					req.NoError(err)
+					evt := &event.Event{ID: "$message", RoomID: "!room:example.org", Type: event.EventEncrypted, Content: event.Content{Parsed: &event.EncryptedEventContent{Algorithm: id.AlgorithmMegolmV1, SessionID: f.out.ID(), MegolmCiphertext: cipher}}}
+					if outer {
+						evt.Content.AsEncrypted().RelatesTo = outerRelation
+					}
+					server := serve(t, f)
+					plain, _, err := backupRuntime(t, server.URL, f).decryptWithIndex(t.Context(), evt)
+					req.NoError(err)
+					req.True(parseContent(plain))
+					want := id.EventID("")
+					if outer {
+						want = "$outer"
+					}
+					var got id.EventID
+					switch kind {
+					case "reply":
+						got = plain.Content.AsMessage().RelatesTo.GetReplyTo()
+					case "reaction":
+						got = plain.Content.AsReaction().RelatesTo.EventID
+					default:
+						got = plain.Content.AsMessage().RelatesTo.GetReplaceID()
+					}
+					assert.Equal(t, want, got)
+				})
+			}
+		}
+	})
 }
 
 func TestBackupStampSeparatesVersionAndETag(t *testing.T) {
@@ -349,80 +418,4 @@ func TestBackupStampSeparatesVersionAndETag(t *testing.T) {
 	second := backupRuntime(t, server.URL, f)
 	require.NoError(t, second.prepareBackup(t.Context()))
 	assert.NotEqual(t, first.stamp, second.stamp)
-}
-
-func TestBackupDecryptsOnlyNeededSessions(t *testing.T) {
-	req := require.New(t)
-	check := assert.New(t)
-	f := newBackupFixture(t)
-	unused := newBackupFixture(t)
-	wantedData, err := backup.EncryptSessionData(f.key, f.data)
-	req.NoError(err)
-	unusedData, err := backup.EncryptSessionData(f.key, unused.data)
-	req.NoError(err)
-	f.sessionResponse = map[string]any{"sessions": map[id.SessionID]any{f.out.ID(): map[string]any{"session_data": wantedData}, unused.out.ID(): map[string]any{"session_data": unusedData}}}
-	mux := http.NewServeMux()
-	f.handle(t, mux)
-	server := httptest.NewServer(mux)
-	t.Cleanup(server.Close)
-	r := backupRuntime(t, server.URL, f)
-	evt := f.encrypted(t, "$wanted", 1, event.EventMessage, map[string]any{"msgtype": "m.text", "body": "wanted"})
-	plain, _, err := r.decryptWithIndex(t.Context(), evt)
-	req.NoError(err)
-	req.True(parseContent(plain))
-	check.Equal("wanted", plain.Content.AsMessage().Body)
-	unusedKey := backupSessionKey{evt.RoomID, unused.out.ID()}
-	check.Equal(unusedData.Ciphertext, r.sessionData[unusedKey].SessionData.Ciphertext)
-	check.NotContains(r.sessions, unusedKey)
-}
-
-func TestBackupRelationsPreferOuterEvent(t *testing.T) {
-	for _, kind := range []string{"reply", "reaction", "edit"} {
-		for _, outer := range []bool{false, true} {
-			t.Run(kind+"/outer="+strconv.FormatBool(outer), func(t *testing.T) {
-				req := require.New(t)
-				f := newBackupFixture(t)
-				typ := event.EventMessage
-				inner := map[string]any{"m.in_reply_to": map[string]any{"event_id": "$inner"}}
-				outerRelation := &event.RelatesTo{InReplyTo: &event.InReplyTo{EventID: "$outer"}}
-				if kind != "reply" {
-					relType := event.RelReplace
-					if kind == "reaction" {
-						typ, relType = event.EventReaction, event.RelAnnotation
-					}
-					inner = map[string]any{"rel_type": relType, "event_id": "$inner", "key": "yes"}
-					outerRelation = &event.RelatesTo{Type: relType, EventID: "$outer", Key: "yes"}
-				}
-				payload, err := json.Marshal(map[string]any{"room_id": "!room:example.org", "type": typ.Type, "content": map[string]any{"msgtype": "m.text", "body": "hello", "m.relates_to": inner}})
-				req.NoError(err)
-				cipher, err := f.out.Encrypt(payload)
-				req.NoError(err)
-				evt := &event.Event{ID: "$message", RoomID: "!room:example.org", Type: event.EventEncrypted, Content: event.Content{Parsed: &event.EncryptedEventContent{Algorithm: id.AlgorithmMegolmV1, SessionID: f.out.ID(), MegolmCiphertext: cipher}}}
-				if outer {
-					evt.Content.AsEncrypted().RelatesTo = outerRelation
-				}
-				mux := http.NewServeMux()
-				f.handle(t, mux)
-				server := httptest.NewServer(mux)
-				t.Cleanup(server.Close)
-				plain, _, err := backupRuntime(t, server.URL, f).decryptWithIndex(t.Context(), evt)
-				req.NoError(err)
-				req.True(parseContent(plain))
-				want := id.EventID("")
-				if outer {
-					want = "$outer"
-				}
-				var got id.EventID
-				switch kind {
-				case "reply":
-					got = plain.Content.AsMessage().RelatesTo.GetReplyTo()
-				case "reaction":
-					got = plain.Content.AsReaction().RelatesTo.EventID
-				default:
-					got = plain.Content.AsMessage().RelatesTo.GetReplaceID()
-				}
-				assert.Equal(t, want, got)
-			})
-		}
-	}
 }

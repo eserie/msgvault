@@ -79,6 +79,7 @@ func TestMatrixSyncSummaryBackupFailureAndKeyHint(t *testing.T) {
 			req.NoError(runMatrixSync(t.Context(), s, cfg, "", false, nil, &out))
 			switch mode {
 			case "exclude rooms":
+				check.Contains(out.String(), "--recovery-file")
 				cfg.Matrix.ExcludeRooms = []string{"!room:example.org"}
 				out.Reset()
 				req.NoError(runMatrixSync(t.Context(), s, cfg, "", false, nil, &out))

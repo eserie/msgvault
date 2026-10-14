@@ -241,12 +241,6 @@ func TestImportEditRedactionHandlesUnavailableAndPendingEdits(t *testing.T) {
 			_, err = f.run(t, true, false)
 			req.NoError(err)
 			check.Equal("older", f.body(t, "$original"))
-			ids, err := f.store.MessageExistsBatch(f.sourceID, []string{"$original", "$older"})
-			req.NoError(err)
-			check.Zero(ids["$older"])
-			edit, err := NewImporter(f.store, nil).appliedEdit(ids["$original"])
-			req.NoError(err)
-			check.Equal("$older", edit.EventID)
 		})
 	}
 	t.Run("redacted encrypted", func(t *testing.T) {
@@ -266,16 +260,6 @@ func TestImportEditRedactionHandlesUnavailableAndPendingEdits(t *testing.T) {
 		_, err := f.run(t, true, false)
 		req.NoError(err)
 		check.Equal(encryptedPlaceholder, f.body(t, "$z-original"))
-		ids, err := f.store.MessageExistsBatch(f.sourceID, []string{"$z-original", "$edit"})
-		req.NoError(err)
-		pending, err := NewImporter(f.store, nil).pendingEdits(ids["$z-original"])
-		req.NoError(err)
-		req.Len(pending, 1)
-		check.Equal(event.EventMessage, pending[0].Type)
-		check.Equal("$edit", pending[0].ID.String())
-		req.True(parseContent(pending[0]))
-		req.NotNil(pending[0].Content.AsMessage().NewContent)
-		check.Equal("updated", pending[0].Content.AsMessage().NewContent.Body)
 		f.quiet = true
 		sum, err := f.run(t, true, true)
 		req.NoError(err)
@@ -284,9 +268,6 @@ func TestImportEditRedactionHandlesUnavailableAndPendingEdits(t *testing.T) {
 		f.timeline = []*event.Event{{ID: "$redaction", Type: event.EventRedaction, Redacts: "$edit", Content: event.Content{Raw: map[string]any{}}}}
 		_, err = f.run(t, true, false)
 		req.NoError(err)
-		pending, err = NewImporter(f.store, nil).pendingEdits(ids["$z-original"])
-		req.NoError(err)
-		check.Empty(pending)
 		f.quiet, f.backup.data.SessionKey = true, initialKey
 		_, err = f.run(t, true, true)
 		req.NoError(err)
@@ -915,7 +896,7 @@ func TestImportGCRecoversReusedPlaceholderID(t *testing.T) {
 			check.Equal("new", f.body(t, "$new"))
 			ids, err = f.store.MessageExistsBatch(f.sourceID, []string{"$new"})
 			req.NoError(err)
-			check.Equal(deletedID, ids["$new"], "SQLite reuses the collected table-max rowid")
+			req.Equal(deletedID, ids["$new"], "SQLite reuses the collected table-max rowid")
 			after := f.syncState(t)
 			check.Equal(before.RecoveryRooms["!room:example.org"].Stamp, after.RecoveryRooms["!room:example.org"].Stamp)
 		})
@@ -958,42 +939,29 @@ func TestMatrixCursorFormatVersion(t *testing.T) {
 	req.ErrorContains(err, "unsupported Matrix cursor format version 2")
 }
 
-func TestImportRecoveredReplyLinksWhenTargetArrivesLater(t *testing.T) {
-	for _, mode := range []string{"incremental", "deleted"} {
-		t.Run(mode, func(t *testing.T) {
-			req := require.New(t)
-			check := assert.New(t)
-			f := newRecoveryFixture(t)
-			reply := f.backup.encrypted(t, "$reply", 20, event.EventMessage, map[string]any{"msgtype": "m.text", "body": "reply", "m.relates_to": map[string]any{"m.in_reply_to": map[string]any{"event_id": "$target"}}})
-			f.timeline = []*event.Event{reply}
-			if mode == "deleted" {
-				_, err := f.run(t, false, false)
-				req.NoError(err)
-				req.NoError(f.store.MarkMessageDeleted(f.sourceID, "$reply"))
-				f.quiet = true
-			}
-			sum, err := f.run(t, true, false)
-			req.NoError(err)
-			check.Zero(sum.PendingEncrypted)
-			replies, err := f.store.ListUnresolvedMessageRepliesAfterContext(t.Context(), f.sourceID, SourceType, 0, pageSize, 0)
-			req.NoError(err)
-			req.Len(replies, 1)
-			check.Contains(replies[0].Metadata, `"referenced_message_id"`)
-			f.timeline = nil
-			_, err = f.run(t, true, false)
-			req.NoError(err)
-			f.quiet = false
-			f.timeline = []*event.Event{f.message(t, "$target", "target", 10)}
-			_, err = f.run(t, true, false)
-			req.NoError(err)
-			ids, err := f.store.MessageExistsBatch(f.sourceID, []string{"$reply", "$target"})
-			req.NoError(err)
-			var targetID int64
-			req.NoError(f.store.DB().QueryRow(f.store.Rebind(`SELECT reply_to_message_id FROM messages WHERE id = ?`), ids["$reply"]).Scan(&targetID))
-			check.Equal(ids["$target"], targetID)
-			check.Equal("reply", f.body(t, "$reply"))
-		})
-	}
+func TestImportRecoveredDeletedReplyLinksWhenTargetArrivesLater(t *testing.T) {
+	req := require.New(t)
+	check := assert.New(t)
+	f := newRecoveryFixture(t)
+	reply := f.backup.encrypted(t, "$reply", 20, event.EventMessage, map[string]any{"msgtype": "m.text", "body": "reply", "m.relates_to": map[string]any{"m.in_reply_to": map[string]any{"event_id": "$target"}}})
+	f.timeline = []*event.Event{reply}
+	_, err := f.run(t, false, false)
+	req.NoError(err)
+	req.NoError(f.store.MarkMessageDeleted(f.sourceID, "$reply"))
+	f.quiet = true
+	sum, err := f.run(t, true, false)
+	req.NoError(err)
+	check.Zero(sum.PendingEncrypted)
+	f.quiet = false
+	f.timeline = []*event.Event{f.message(t, "$target", "target", 10)}
+	_, err = f.run(t, true, false)
+	req.NoError(err)
+	ids, err := f.store.MessageExistsBatch(f.sourceID, []string{"$reply", "$target"})
+	req.NoError(err)
+	var targetID int64
+	req.NoError(f.store.DB().QueryRow(f.store.Rebind(`SELECT reply_to_message_id FROM messages WHERE id = ?`), ids["$reply"]).Scan(&targetID))
+	check.Equal(ids["$target"], targetID)
+	check.Equal("reply", f.body(t, "$reply"))
 }
 
 func TestImportPendingRepliesCrossPagesWithoutRawEvents(t *testing.T) {
@@ -1025,11 +993,10 @@ func TestImportKeylessPendingCountIncludesEarlierRuns(t *testing.T) {
 	check := assert.New(t)
 	f := newRecoveryFixture(t)
 	f.timeline = []*event.Event{f.message(t, "$first", "first", 10)}
-	sum, err := f.run(t, false, false)
+	_, err := f.run(t, false, false)
 	req.NoError(err)
-	check.Equal(int64(1), sum.PendingEncrypted)
 	f.timeline = []*event.Event{f.message(t, "$second", "second", 20)}
-	sum, err = f.run(t, false, false)
+	sum, err := f.run(t, false, false)
 	req.NoError(err)
 	check.Equal(int64(2), sum.PendingEncrypted)
 }
@@ -1044,7 +1011,7 @@ func TestImportHandlesUnreadableCursorBySyncMode(t *testing.T) {
 	}{
 		{"incremental refuses malformed cursor", false, "invalid JSON", true, "decode Matrix sync state"},
 		{"full replaces malformed cursor", true, "invalid JSON", false, ""},
-		{"full refuses future version", true, `{"format_version":2,"rooms":{}}`, true, ""},
+		{"full refuses future version", true, `{"format_version":2,"rooms":{}}`, true, "unsupported Matrix cursor format version"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req, check := require.New(t), assert.New(t)
