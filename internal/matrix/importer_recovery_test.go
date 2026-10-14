@@ -273,18 +273,32 @@ func TestImportEditRedactionHandlesUnavailableAndPendingEdits(t *testing.T) {
 }
 
 func TestImportSkipKeyBackupKeepsEncryptedMessages(t *testing.T) {
-	req, check := require.New(t), assert.New(t)
-	f := newRecoveryFixture(t)
-	f.timeline = []*event.Event{f.message(t, "$pending", "pending", 40)}
-	versions, rooms := f.backup.versionFetches, f.backup.roomFetches
-	r := backupRuntime(t, f.server.URL, f.backup)
-	sum, err := NewImporter(f.store, r).Import(t.Context(), ImportOptions{UserID: "@archive:example.org", SkipKeyBackup: true})
-	req.NoError(err)
-	check.Equal(encryptedPlaceholder, f.body(t, "$pending"))
-	check.Equal(versions, f.backup.versionFetches)
-	check.Equal(rooms, f.backup.roomFetches)
-	check.Zero(sum.Recovered)
-	check.NoError(sum.BackupFailure)
+	for _, mode := range []string{"SkipKeyBackup", "ExcludeRooms"} {
+		t.Run(mode, func(t *testing.T) {
+			req, check := require.New(t), assert.New(t)
+			f := newRecoveryFixture(t)
+			f.timeline = []*event.Event{f.message(t, "$pending", "pending", 40)}
+			opts := ImportOptions{UserID: "@archive:example.org"}
+			if mode == "SkipKeyBackup" {
+				opts.SkipKeyBackup = true
+			} else {
+				_, err := f.run(t, false, false)
+				req.NoError(err)
+				f.quiet, f.backup.versionStatus = true, http.StatusServiceUnavailable
+				opts.ExcludeRooms = []string{"!room:example.org"}
+			}
+			versions, rooms := f.backup.versionFetches, f.backup.roomFetches
+			sum, err := NewImporter(f.store, backupRuntime(t, f.server.URL, f.backup)).Import(t.Context(), opts)
+			req.NoError(err)
+			check.Equal(versions, f.backup.versionFetches)
+			check.Equal(rooms, f.backup.roomFetches)
+			check.NoError(sum.BackupFailure)
+			if mode == "SkipKeyBackup" {
+				check.Equal(encryptedPlaceholder, f.body(t, "$pending"))
+				check.Zero(sum.Recovered)
+			}
+		})
+	}
 }
 
 func newRecoveryFixture(t *testing.T) *recoveryFixture {
@@ -592,22 +606,6 @@ func TestImportRecoveryRollsBackInterruptedWrites(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestImportRecoverySkipsExcludedRooms(t *testing.T) {
-	req := require.New(t)
-	check := assert.New(t)
-	f := newRecoveryFixture(t)
-	f.timeline = []*event.Event{f.message(t, "$original", "original", 10)}
-	_, err := f.run(t, false, false)
-	req.NoError(err)
-	f.quiet, f.backup.versionStatus = true, http.StatusServiceUnavailable
-	opts := ImportOptions{UserID: "@archive:example.org", ExcludeRooms: []string{"!room:example.org"}}
-	sum, err := NewImporter(f.store, backupRuntime(t, f.server.URL, f.backup)).Import(t.Context(), opts)
-	req.NoError(err)
-	check.NoError(sum.BackupFailure)
-	check.Zero(f.backup.roomFetches)
-	check.Zero(f.backup.versionFetches)
 }
 
 func TestImportRecoveryResumesBeforePlaceholderCheckpoint(t *testing.T) {
