@@ -30,12 +30,6 @@ func TestMatrixSyncSummaryBackupFailureAndKeyHint(t *testing.T) {
 		mux.HandleFunc("GET /_matrix/client/v3/room_keys/version", func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusBadRequest)
 		})
-		mux.HandleFunc("GET /_matrix/client/v3/rooms/{room}/joined_members", func(w http.ResponseWriter, _ *http.Request) {
-			_, _ = w.Write([]byte(`{"joined":{}}`))
-		})
-		mux.HandleFunc("GET /_matrix/client/v3/rooms/{room}/messages", func(w http.ResponseWriter, _ *http.Request) {
-			_, _ = w.Write([]byte(`{"chunk":[]}`))
-		})
 		server := httptest.NewServer(mux)
 		t.Cleanup(server.Close)
 		s := testutil.NewTestStore(t)
