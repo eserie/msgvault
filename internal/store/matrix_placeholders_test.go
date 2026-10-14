@@ -95,6 +95,14 @@ func setupMatrixPlaceholders(t *testing.T) (*store.Store, int64, int64, []int64)
 	return s, source.ID, convID, ids
 }
 
+func setCorruptCompressedPlaceholder(t *testing.T, s *store.Store, messageID int64) {
+	t.Helper()
+	req := require.New(t)
+	_, err := s.DB().Exec(s.Rebind(`UPDATE message_raw SET raw_data = ?, compression = 'zlib' WHERE message_id = ?`), []byte("invalid compressed data"), messageID)
+	req.NoError(err)
+	req.NoError(s.SetMessageMetadataContext(t.Context(), messageID, sql.NullString{String: `{"matrix_event_type":"m.room.encrypted"}`, Valid: true}))
+}
+
 func TestMatrixPlaceholderDiscoveryAndBackfill(t *testing.T) {
 	req, check := require.New(t), assert.New(t)
 	s, sourceID, _, ids := setupMatrixPlaceholders(t)
@@ -116,6 +124,11 @@ func TestMatrixPlaceholderDiscoveryAndBackfill(t *testing.T) {
 	rooms, err = s.MatrixPlaceholderRooms(t.Context(), sourceID, nil, []string{"!room:example.org"})
 	req.NoError(err)
 	check.Empty(rooms)
+	setCorruptCompressedPlaceholder(t, s, ids[4])
+	rooms, err = s.MatrixPlaceholderRooms(t.Context(), sourceID, nil, nil)
+	req.NoError(err)
+	req.Len(rooms, 1)
+	check.Equal(int64(5), rooms[0].Count)
 }
 
 func TestMatrixPlaceholderPaging(t *testing.T) {
@@ -152,13 +165,7 @@ func TestMatrixPlaceholderPaging(t *testing.T) {
 	req.NoError(err)
 	check.Empty(page)
 	check.Equal(ids[6], scanned)
-	_, err = s.DB().Exec(s.Rebind(`UPDATE message_raw SET raw_data = ?, compression = 'zlib' WHERE message_id = ?`), []byte("invalid compressed data"), ids[4])
-	req.NoError(err)
-	req.NoError(s.SetMessageMetadataContext(t.Context(), ids[4], sql.NullString{String: `{"matrix_event_type":"m.room.encrypted"}`, Valid: true}))
-	rooms, err := s.MatrixPlaceholderRooms(t.Context(), sourceID, nil, nil)
-	req.NoError(err)
-	req.Len(rooms, 1)
-	check.Equal(int64(5), rooms[0].Count)
+	setCorruptCompressedPlaceholder(t, s, ids[4])
 	page, scanned, err = s.MatrixPlaceholders(t.Context(), convID, ids[3], 1)
 	req.NoError(err)
 	check.Empty(page)
