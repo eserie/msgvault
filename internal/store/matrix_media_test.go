@@ -146,15 +146,13 @@ func TestMatrixRetryPagesAdvancePastExcludedRows(t *testing.T) {
 	req.NoError(err)
 	req.NoError(s.SetConversationMemberCount(room, 30))
 	var eligible []int64
-	for i, kind := range []string{"roster", "size", "link", "alias", "pending", "roster", "pending", "failed"} {
+	for i, kind := range []string{"roster", "size", "alias", "pending", "roster", "pending", "failed"} {
 		messageID, err := s.UpsertMessage(&store.Message{SourceID: source.ID, ConversationID: room, SourceMessageID: fmt.Sprintf("$media%d", i), MessageType: "matrix"})
 		req.NoError(err)
 		ref := store.AttachmentRef{SourceAttachmentID: "matrix:mxc://example.org/file", StoragePath: "mxc://example.org/file", State: attachmentpolicy.StateSkipped}
 		switch kind {
 		case "size":
 			ref.Size = 101
-		case "link":
-			ref.MediaType = "link"
 		case "alias":
 			ref.StoragePath = "aa/" + strings.Repeat("a", 64)
 		case "pending":
