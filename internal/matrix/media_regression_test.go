@@ -129,11 +129,9 @@ func TestMatrixMediaPersistedFingerprintGolden(t *testing.T) {
 			if encrypted {
 				content.URL = ""
 				content.File = &event.EncryptedFileInfo{
-					URL: "mxc://example.org/file",
-					EncryptedFile: matrixattachment.EncryptedFile{
-						Key:        matrixattachment.JSONWebKey{Key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", Algorithm: "A256CTR"},
-						InitVector: "AAAAAAAAAAAAAAAAAAAAAA", Hashes: matrixattachment.EncryptedFileHashes{SHA256: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}, Version: "v2",
-					},
+					URL:        "mxc://example.org/file",
+					Key:        matrixattachment.JSONWebKey{Key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", Algorithm: "A256CTR"},
+					InitVector: "AAAAAAAAAAAAAAAAAAAAAA", Hashes: matrixattachment.EncryptedFileHashes{SHA256: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}, Version: "v2",
 				}
 				want = "sha256:v1:670ed127a639784b66a8433505e5b171fc14a8d4cd4cdd5252565c0dc0228593"
 			}
