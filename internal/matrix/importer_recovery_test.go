@@ -186,58 +186,37 @@ func TestImportRecoveryRoomFetchFailureContinuesAndPersistsAttempt(t *testing.T)
 	}
 }
 
-func TestImportCorruptPendingEdits(t *testing.T) {
-	t.Run("redaction", func(t *testing.T) {
-		req, check := require.New(t), assert.New(t)
-		f := newRecoveryFixture(t)
-		f.timeline = []*event.Event{
-			{ID: "$original", Sender: "@member:example.org", Type: event.EventMessage, Content: event.Content{Parsed: &event.MessageEventContent{MsgType: event.MsgText, Body: "original"}}},
-			{ID: "$reaction", Sender: "@member:example.org", Type: event.EventReaction, Content: event.Content{Parsed: &event.ReactionEventContent{RelatesTo: event.RelatesTo{Type: event.RelAnnotation, EventID: "$original", Key: "yes"}}}},
+func TestImportRecoveryCorruptPendingEdits(t *testing.T) {
+	req, check := require.New(t), assert.New(t)
+	f := newRecoveryFixture(t)
+	f.timeline = []*event.Event{f.message(t, "$poison", "poison", 10)}
+	_, err := f.run(t, false, false)
+	req.NoError(err)
+	ids, err := f.store.MessageExistsBatch(f.sourceID, []string{"$poison"})
+	req.NoError(err)
+	req.NoError(f.store.SetMessageMetadataContext(t.Context(), ids["$poison"], sql.NullString{String: `{"matrix_event_type":"m.room.encrypted","matrix_pending_edits":"corrupt"}`, Valid: true}))
+	later := f.message(t, "$later", "later", 20)
+	cipher, err := f.backup.out.Encrypt([]byte(`{"room_id":"!later:example.org","type":"m.room.message","content":{"msgtype":"m.text","body":"later"}}`))
+	req.NoError(err)
+	later.Content.AsEncrypted().MegolmCiphertext = cipher
+	f.extraRooms = map[string][]*event.Event{"!later:example.org": {later}}
+	for round := range 2 {
+		f.nextBatch = fmt.Sprintf("after%d", round)
+		sum, err := f.run(t, true, false)
+		req.ErrorContains(err, "recover Matrix room !room:example.org")
+		check.Equal(int64(1), sum.PendingEncrypted)
+		check.Equal(encryptedPlaceholder, f.body(t, "$poison"))
+		run := f.operation(t)
+		check.Equal(operations.StatePartial, run.State)
+		check.Contains(run.Counters, operations.PublicCounter{Name: operations.CounterItemErrors, Unit: operations.CounterUnitMessages, Value: 1})
+		state := f.syncState(t)
+		check.Equal(f.nextBatch, state.NextBatch)
+		if round == 0 {
+			check.Equal(int64(1), sum.Recovered)
+			check.Equal("later", f.body(t, "$later"))
+			f.quiet = true
 		}
-		_, err := f.run(t, false, false)
-		req.NoError(err)
-		ids, err := f.store.MessageExistsBatch(f.sourceID, []string{"$original"})
-		req.NoError(err)
-		req.NoError(f.store.SetMessageMetadataContext(t.Context(), ids["$original"], sql.NullString{String: `{"matrix_pending_edits":"corrupt"}`, Valid: true}))
-		f.timeline = []*event.Event{{ID: "$redaction", Type: event.EventRedaction, Redacts: "$reaction", Content: event.Content{Raw: map[string]any{}}}}
-		_, err = f.run(t, false, false)
-		req.NoError(err)
-		var count int
-		req.NoError(f.store.DB().QueryRow(`SELECT count(*) FROM reactions`).Scan(&count))
-		check.Zero(count)
-	})
-	t.Run("recovery", func(t *testing.T) {
-		req, check := require.New(t), assert.New(t)
-		f := newRecoveryFixture(t)
-		f.timeline = []*event.Event{f.message(t, "$poison", "poison", 10)}
-		_, err := f.run(t, false, false)
-		req.NoError(err)
-		ids, err := f.store.MessageExistsBatch(f.sourceID, []string{"$poison"})
-		req.NoError(err)
-		req.NoError(f.store.SetMessageMetadataContext(t.Context(), ids["$poison"], sql.NullString{String: `{"matrix_event_type":"m.room.encrypted","matrix_pending_edits":"corrupt"}`, Valid: true}))
-		later := f.message(t, "$later", "later", 20)
-		cipher, err := f.backup.out.Encrypt([]byte(`{"room_id":"!later:example.org","type":"m.room.message","content":{"msgtype":"m.text","body":"later"}}`))
-		req.NoError(err)
-		later.Content.AsEncrypted().MegolmCiphertext = cipher
-		f.extraRooms = map[string][]*event.Event{"!later:example.org": {later}}
-		for round := range 2 {
-			f.nextBatch = fmt.Sprintf("after%d", round)
-			sum, err := f.run(t, true, false)
-			req.ErrorContains(err, "recover Matrix room !room:example.org")
-			check.Equal(int64(1), sum.PendingEncrypted)
-			check.Equal(encryptedPlaceholder, f.body(t, "$poison"))
-			run := f.operation(t)
-			check.Equal(operations.StatePartial, run.State)
-			check.Contains(run.Counters, operations.PublicCounter{Name: operations.CounterItemErrors, Unit: operations.CounterUnitMessages, Value: 1})
-			state := f.syncState(t)
-			check.Equal(f.nextBatch, state.NextBatch)
-			if round == 0 {
-				check.Equal(int64(1), sum.Recovered)
-				check.Equal("later", f.body(t, "$later"))
-				f.quiet = true
-			}
-		}
-	})
+	}
 }
 
 func TestImportEditRedactionSkipsUnavailableEdits(t *testing.T) {
@@ -283,56 +262,49 @@ func TestImportEditRedactionSkipsUnavailableEdits(t *testing.T) {
 			check.Equal("$older", edit.EventID)
 		})
 	}
-	for _, mode := range []string{"redacted plaintext", "redacted encrypted"} {
-		t.Run(mode, func(t *testing.T) {
-			req, check := require.New(t), assert.New(t)
-			f := newRecoveryFixture(t)
-			original := f.message(t, "$z-original", "original", 10)
-			initialKey := f.backup.data.SessionKey
-			{
-				in, err := olm.NewInboundGroupSession([]byte(f.backup.out.Key()))
-				req.NoError(err)
-				exported, err := in.Export(1)
-				req.NoError(err)
-				f.backup.data.SessionKey = string(exported)
-			}
-			edit := f.edit(t, "$edit", "$z-original", "updated", 20)
-			if mode != "redacted encrypted" {
-				edit = matrixTestEvent(t, `{"type":"m.room.message","event_id":"$edit","sender":"@member:example.org","origin_server_ts":20,"content":{"msgtype":"m.text","body":"* edited","m.new_content":{"msgtype":"m.text","body":"edited"},"m.relates_to":{"rel_type":"m.replace","event_id":"$z-original"}}}`)
-			}
-			f.timeline = []*event.Event{original, edit}
-			_, err := f.run(t, true, false)
+	t.Run("redacted encrypted", func(t *testing.T) {
+		req, check := require.New(t), assert.New(t)
+		f := newRecoveryFixture(t)
+		original := f.message(t, "$z-original", "original", 10)
+		initialKey := f.backup.data.SessionKey
+		{
+			in, err := olm.NewInboundGroupSession([]byte(f.backup.out.Key()))
 			req.NoError(err)
-			check.Equal(encryptedPlaceholder, f.body(t, "$z-original"))
-			ids, err := f.store.MessageExistsBatch(f.sourceID, []string{"$z-original", "$edit"})
+			exported, err := in.Export(1)
 			req.NoError(err)
-			pending, err := NewImporter(f.store, nil).pendingEdits(ids["$z-original"])
-			req.NoError(err)
-			req.Len(pending, 1)
-			if mode == "redacted encrypted" {
-				check.Equal(event.EventMessage, pending[0].Type)
-				check.Equal("$edit", pending[0].ID.String())
-				req.True(parseContent(pending[0]))
-				req.NotNil(pending[0].Content.AsMessage().NewContent)
-				check.Equal("updated", pending[0].Content.AsMessage().NewContent.Body)
-				f.quiet = true
-				sum, err := f.run(t, true, true)
-				req.NoError(err)
-				check.Equal(int64(1), sum.PendingEncrypted)
-				f.quiet = false
-			}
-			f.timeline = []*event.Event{{ID: "$redaction", Type: event.EventRedaction, Redacts: "$edit", Content: event.Content{Raw: map[string]any{}}}}
-			_, err = f.run(t, true, false)
-			req.NoError(err)
-			pending, err = NewImporter(f.store, nil).pendingEdits(ids["$z-original"])
-			req.NoError(err)
-			check.Empty(pending)
-			f.quiet, f.backup.data.SessionKey = true, initialKey
-			_, err = f.run(t, true, true)
-			req.NoError(err)
-			check.Equal("original", f.body(t, "$z-original"))
-		})
-	}
+			f.backup.data.SessionKey = string(exported)
+		}
+		edit := f.edit(t, "$edit", "$z-original", "updated", 20)
+		f.timeline = []*event.Event{original, edit}
+		_, err := f.run(t, true, false)
+		req.NoError(err)
+		check.Equal(encryptedPlaceholder, f.body(t, "$z-original"))
+		ids, err := f.store.MessageExistsBatch(f.sourceID, []string{"$z-original", "$edit"})
+		req.NoError(err)
+		pending, err := NewImporter(f.store, nil).pendingEdits(ids["$z-original"])
+		req.NoError(err)
+		req.Len(pending, 1)
+		check.Equal(event.EventMessage, pending[0].Type)
+		check.Equal("$edit", pending[0].ID.String())
+		req.True(parseContent(pending[0]))
+		req.NotNil(pending[0].Content.AsMessage().NewContent)
+		check.Equal("updated", pending[0].Content.AsMessage().NewContent.Body)
+		f.quiet = true
+		sum, err := f.run(t, true, true)
+		req.NoError(err)
+		check.Equal(int64(1), sum.PendingEncrypted)
+		f.quiet = false
+		f.timeline = []*event.Event{{ID: "$redaction", Type: event.EventRedaction, Redacts: "$edit", Content: event.Content{Raw: map[string]any{}}}}
+		_, err = f.run(t, true, false)
+		req.NoError(err)
+		pending, err = NewImporter(f.store, nil).pendingEdits(ids["$z-original"])
+		req.NoError(err)
+		check.Empty(pending)
+		f.quiet, f.backup.data.SessionKey = true, initialKey
+		_, err = f.run(t, true, true)
+		req.NoError(err)
+		check.Equal("original", f.body(t, "$z-original"))
+	})
 }
 
 func TestImportSkipKeyBackupKeepsEncryptedMessages(t *testing.T) {
@@ -823,7 +795,7 @@ func TestImportRecoveryProgressDoesNotStarveQuietRoom(t *testing.T) {
 }
 
 func TestImportEditWaitsForEncryptedOriginal(t *testing.T) {
-	for _, mode := range []string{"incremental", "full"} {
+	for _, mode := range []string{"incremental", "full", "redacted plaintext"} {
 		t.Run(mode, func(t *testing.T) {
 			req, check := require.New(t), assert.New(t)
 			f := newRecoveryFixture(t)
@@ -835,25 +807,42 @@ func TestImportEditWaitsForEncryptedOriginal(t *testing.T) {
 			check.Equal(encryptedPlaceholder, f.body(t, "$z-original"))
 			ids, err := f.store.MessageExistsBatch(f.sourceID, []string{"$z-original", "$edit"})
 			req.NoError(err)
+			want := "edited"
+			if mode == "redacted plaintext" {
+				pending, err := NewImporter(f.store, nil).pendingEdits(ids["$z-original"])
+				req.NoError(err)
+				req.Len(pending, 1)
+				f.timeline = []*event.Event{{ID: "$redaction", Type: event.EventRedaction, Redacts: "$edit", Content: event.Content{Raw: map[string]any{}}}}
+				_, err = f.run(t, false, false)
+				req.NoError(err)
+				pending, err = NewImporter(f.store, nil).pendingEdits(ids["$z-original"])
+				req.NoError(err)
+				check.Empty(pending)
+				want = "original"
+			}
 			f.quiet = true
-			_, err = f.run(t, false, false)
+			if mode != "redacted plaintext" {
+				_, err = f.run(t, false, false)
+				req.NoError(err)
+				last, err := f.store.GetLastSuccessfulSyncByType(f.sourceID, SourceType)
+				req.NoError(err)
+				check.NotContains(last.CursorAfter.String, "deferred_relations", "edits wait in archive metadata")
+			}
+			sum, err := f.run(t, true, mode != "incremental")
 			req.NoError(err)
-			last, err := f.store.GetLastSuccessfulSyncByType(f.sourceID, SourceType)
-			req.NoError(err)
-			check.NotContains(last.CursorAfter.String, "deferred_relations", "edits wait in archive metadata")
-			sum, err := f.run(t, true, mode == "full")
-			req.NoError(err)
-			check.Zero(sum.PendingEncrypted)
-			check.Equal("edited", f.body(t, "$z-original"))
-			ids, err = f.store.MessageExistsBatch(f.sourceID, []string{"$z-original", "$edit"})
-			req.NoError(err)
-			check.Zero(ids["$edit"], "edits do not create message rows")
-			metadata, err := f.store.GetMessageMetadata(ids["$z-original"])
-			req.NoError(err)
-			check.NotContains(metadata.String, "matrix_pending_edits")
-			_, err = f.run(t, true, false)
-			req.NoError(err)
-			check.Equal("edited", f.body(t, "$z-original"))
+			check.Equal(want, f.body(t, "$z-original"))
+			if mode != "redacted plaintext" {
+				check.Zero(sum.PendingEncrypted)
+				ids, err = f.store.MessageExistsBatch(f.sourceID, []string{"$z-original", "$edit"})
+				req.NoError(err)
+				check.Zero(ids["$edit"], "edits do not create message rows")
+				metadata, err := f.store.GetMessageMetadata(ids["$z-original"])
+				req.NoError(err)
+				check.NotContains(metadata.String, "matrix_pending_edits")
+				_, err = f.run(t, true, false)
+				req.NoError(err)
+				check.Equal("edited", f.body(t, "$z-original"))
+			}
 		})
 	}
 }

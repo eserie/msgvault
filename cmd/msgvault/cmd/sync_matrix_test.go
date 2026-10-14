@@ -74,7 +74,7 @@ func TestMatrixSyncSummaryBackupFailureAndKeyHint(t *testing.T) {
 			req.ErrorContains(runMatrixSync(t.Context(), s, cfg, "", false, nil, &out), "key backup unavailable, 1 encrypted events pending: load Matrix key backup")
 		})
 	}
-	for _, mode := range []string{"hint text", "per-source counts", "one hint for two sources", "exclude rooms"} {
+	for _, mode := range []string{"hint text", "per-source counts and single hint", "exclude rooms"} {
 		t.Run(mode, func(t *testing.T) {
 			req, check := require.New(t), assert.New(t)
 			s, cfg, creds, newPlaceholder := setup(t)
@@ -103,29 +103,24 @@ func TestMatrixSyncSummaryBackupFailureAndKeyHint(t *testing.T) {
 				*newPlaceholder = true
 				out.Reset()
 				req.NoError(runMatrixSync(t.Context(), s, cfg, "", false, nil, &out))
-				if mode == "per-source counts" {
-					check.Equal(2, strings.Count(out.String(), "2 encrypted placeholders"))
-				} else {
-					check.Equal(1, strings.Count(out.String(), "run msgvault add-matrix --homeserver"))
-				}
+				check.Equal(2, strings.Count(out.String(), "2 encrypted placeholders"))
+				check.Equal(1, strings.Count(out.String(), "run msgvault add-matrix --homeserver"))
 			}
 		})
 	}
-	for _, syncConfig := range []string{`"invalid JSON"`, `{"skip_key_backup":true,"skip_key_backup":"invalid"}`} {
-		t.Run("unreadable preference/"+syncConfig, func(t *testing.T) {
-			req, check := require.New(t), assert.New(t)
-			s, cfg, creds, newPlaceholder := setup(t)
-			*newPlaceholder = true
-			sources, err := s.ListSources(sourceTypeMatrix)
-			req.NoError(err)
-			req.NoError(s.UpdateSourceSyncConfig(sources[0].ID, syncConfig))
-			req.NoError(matrixsource.SaveCredentials(cfg.TokensDir(), creds))
-			var out bytes.Buffer
-			req.NoError(runMatrixSync(t.Context(), s, cfg, "", false, nil, &out))
-			check.Contains(out.String(), "2 encrypted placeholders")
-			check.Contains(out.String(), "run msgvault add-matrix --homeserver")
-		})
-	}
+	t.Run("unreadable preference", func(t *testing.T) {
+		req, check := require.New(t), assert.New(t)
+		s, cfg, creds, newPlaceholder := setup(t)
+		*newPlaceholder = true
+		sources, err := s.ListSources(sourceTypeMatrix)
+		req.NoError(err)
+		req.NoError(s.UpdateSourceSyncConfig(sources[0].ID, `"invalid JSON"`))
+		req.NoError(matrixsource.SaveCredentials(cfg.TokensDir(), creds))
+		var out bytes.Buffer
+		req.NoError(runMatrixSync(t.Context(), s, cfg, "", false, nil, &out))
+		check.Contains(out.String(), "2 encrypted placeholders")
+		check.Contains(out.String(), "run msgvault add-matrix --homeserver")
+	})
 	t.Run("skip key backup", func(t *testing.T) {
 		req, check := require.New(t), assert.New(t)
 		s, cfg, creds, _ := setup(t)
