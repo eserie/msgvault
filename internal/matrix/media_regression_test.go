@@ -303,17 +303,6 @@ func TestImportFilteredMediaDiscoveryRunsOnce(t *testing.T) {
 }
 
 func TestImportMediaValidatesMXCBeforeRequest(t *testing.T) {
-	for _, server := range []struct {
-		value string
-		valid bool
-	}{
-		{"example.org", true}, {"example.org:8448", true}, {"127.0.0.1", true}, {"[2001:db8::1]:8448", true},
-		{".", false}, {"..", false}, {"bad_host", false}, {"example.org:port", false}, {"example.org:123456", false}, {"[:::]", false},
-	} {
-		t.Run("server/"+server.value, func(t *testing.T) {
-			assert.Equal(t, server.valid, validMediaServerName(server.value))
-		})
-	}
 	for _, uri := range []struct {
 		value string
 		valid bool

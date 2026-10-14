@@ -177,62 +177,56 @@ func TestRoomTitleUsesLatestTimelineRename(t *testing.T) {
 }
 
 func TestImporterReclassifiesInactiveRoomFromDirectAccountData(t *testing.T) {
-	for _, mode := range []string{"inactive", "left"} {
-		t.Run(mode, func(t *testing.T) {
-			require := require.New(t)
-			assert := assert.New(t)
-			var syncCalls int
-			mux := http.NewServeMux()
-			mux.HandleFunc("GET /_matrix/client/v3/sync", func(w http.ResponseWriter, _ *http.Request) {
-				syncCalls++
-				if syncCalls == 1 {
-					_, _ = w.Write([]byte(`{"next_batch":"next-1","rooms":{"join":{"!room:example.org":{"state":{"events":[]},"timeline":{"events":[]}}}}}`))
-					return
-				}
-				if mode == "left" && syncCalls == 3 {
-					_, _ = w.Write([]byte(`{"next_batch":"next-3","rooms":{"leave":{"!room:example.org":{"timeline":{"events":[]}}}}}`))
-					return
-				}
-				_, _ = w.Write([]byte(`{"next_batch":"next-2","rooms":{"join":{}}}`))
-			})
-			mux.HandleFunc("GET /_matrix/client/v3/user/@archive:example.org/account_data/m.direct", func(w http.ResponseWriter, _ *http.Request) {
-				if syncCalls == 1 || syncCalls == 3 {
-					_, _ = w.Write([]byte(`{}`))
-					return
-				}
-				_, _ = w.Write([]byte(`{"@member:example.org":["!room:example.org"]}`))
-			})
-			mux.HandleFunc("GET /_matrix/client/v3/rooms/!room:example.org/joined_members", func(w http.ResponseWriter, _ *http.Request) {
-				_, _ = w.Write([]byte(`{"joined":{"@archive:example.org":{"display_name":"Archive"},"@member:example.org":{"display_name":"Member"}}}`))
-			})
-			server := httptest.NewServer(mux)
-			defer server.Close()
-			client, err := mautrix.NewClient(server.URL, id.UserID("@archive:example.org"), "token")
-			require.NoError(err)
+	require := require.New(t)
+	assert := assert.New(t)
+	var syncCalls int
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /_matrix/client/v3/sync", func(w http.ResponseWriter, _ *http.Request) {
+		syncCalls++
+		if syncCalls == 1 {
+			_, _ = w.Write([]byte(`{"next_batch":"next-1","rooms":{"join":{"!room:example.org":{"state":{"events":[]},"timeline":{"events":[]}}}}}`))
+			return
+		}
+		if syncCalls == 3 {
+			_, _ = w.Write([]byte(`{"next_batch":"next-3","rooms":{"leave":{"!room:example.org":{"timeline":{"events":[]}}}}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"next_batch":"next-2","rooms":{"join":{}}}`))
+	})
+	mux.HandleFunc("GET /_matrix/client/v3/user/@archive:example.org/account_data/m.direct", func(w http.ResponseWriter, _ *http.Request) {
+		if syncCalls == 1 || syncCalls == 3 {
+			_, _ = w.Write([]byte(`{}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"@member:example.org":["!room:example.org"]}`))
+	})
+	mux.HandleFunc("GET /_matrix/client/v3/rooms/!room:example.org/joined_members", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"joined":{"@archive:example.org":{"display_name":"Archive"},"@member:example.org":{"display_name":"Member"}}}`))
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	client, err := mautrix.NewClient(server.URL, id.UserID("@archive:example.org"), "token")
+	require.NoError(err)
 
-			st := testutil.NewTestStore(t)
-			_, err = st.GetOrCreateSource(SourceType, "@archive:example.org")
-			require.NoError(err)
-			importer := NewImporter(st, &Runtime{Client: client})
-			_, err = importer.Import(t.Context(), ImportOptions{UserID: "@archive:example.org"})
-			require.NoError(err)
-			_, err = NewImporter(st, &Runtime{Client: client}).Import(t.Context(), ImportOptions{UserID: "@archive:example.org"})
-			require.NoError(err)
-			var conversationType string
-			require.NoError(st.DB().QueryRow(st.Rebind(`SELECT conversation_type FROM conversations WHERE source_conversation_id = ?`), "!room:example.org").Scan(&conversationType))
-			assert.Equal("direct_chat", conversationType)
-			if mode == "left" {
-				_, err = NewImporter(st, &Runtime{Client: client}).Import(t.Context(), ImportOptions{UserID: "@archive:example.org", Full: true})
-				require.NoError(err)
-				require.NoError(st.DB().QueryRow(st.Rebind(`SELECT conversation_type FROM conversations WHERE source_conversation_id = ?`), "!room:example.org").Scan(&conversationType))
-				assert.Equal("group_chat", conversationType)
-				_, err = NewImporter(st, &Runtime{Client: client}).Import(t.Context(), ImportOptions{UserID: "@archive:example.org"})
-				require.NoError(err)
-				require.NoError(st.DB().QueryRow(st.Rebind(`SELECT conversation_type FROM conversations WHERE source_conversation_id = ?`), "!room:example.org").Scan(&conversationType))
-				assert.Equal("direct_chat", conversationType)
-			}
-		})
-	}
+	st := testutil.NewTestStore(t)
+	_, err = st.GetOrCreateSource(SourceType, "@archive:example.org")
+	require.NoError(err)
+	importer := NewImporter(st, &Runtime{Client: client})
+	_, err = importer.Import(t.Context(), ImportOptions{UserID: "@archive:example.org"})
+	require.NoError(err)
+	_, err = NewImporter(st, &Runtime{Client: client}).Import(t.Context(), ImportOptions{UserID: "@archive:example.org"})
+	require.NoError(err)
+	var conversationType string
+	require.NoError(st.DB().QueryRow(st.Rebind(`SELECT conversation_type FROM conversations WHERE source_conversation_id = ?`), "!room:example.org").Scan(&conversationType))
+	assert.Equal("direct_chat", conversationType)
+	_, err = NewImporter(st, &Runtime{Client: client}).Import(t.Context(), ImportOptions{UserID: "@archive:example.org", Full: true})
+	require.NoError(err)
+	require.NoError(st.DB().QueryRow(st.Rebind(`SELECT conversation_type FROM conversations WHERE source_conversation_id = ?`), "!room:example.org").Scan(&conversationType))
+	assert.Equal("group_chat", conversationType)
+	_, err = NewImporter(st, &Runtime{Client: client}).Import(t.Context(), ImportOptions{UserID: "@archive:example.org"})
+	require.NoError(err)
+	require.NoError(st.DB().QueryRow(st.Rebind(`SELECT conversation_type FROM conversations WHERE source_conversation_id = ?`), "!room:example.org").Scan(&conversationType))
+	assert.Equal("direct_chat", conversationType)
 }
 
 func TestImporterExplicitEmptyRoomNameClearsArchivedTitle(t *testing.T) {
