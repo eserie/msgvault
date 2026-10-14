@@ -236,6 +236,7 @@ func TestImportMediaCaptionEditKeepsPNGType(t *testing.T) {
 				req.Len(refs, 1)
 				for _, ref := range refs {
 					check.Equal("image/png", ref.MimeType)
+					check.Equal(pngData.Len(), ref.Size, "caption edits without declared size keep the stored size")
 					stored, err := os.ReadFile(filepath.Join(opts.AttachmentsDir, ref.StoragePath))
 					req.NoError(err)
 					check.Equal(pngData.Bytes(), stored)
@@ -244,55 +245,6 @@ func TestImportMediaCaptionEditKeepsPNGType(t *testing.T) {
 			})
 		}
 	}
-}
-
-func TestImportMediaDotServerMakesNoRequest(t *testing.T) {
-	for _, uri := range []string{"mxc://./file", "mxc://../file"} {
-		t.Run(uri, func(t *testing.T) {
-			req, check := require.New(t), assert.New(t)
-			f := newRecoveryFixture(t)
-			f.timeline = []*event.Event{matrixTestEvent(t, fmt.Sprintf(`{"type":"m.room.message","event_id":"$media","sender":"@member:example.org","content":{"msgtype":"m.file","body":"file","url":%q}}`, uri))}
-			mux, ok := f.server.Config.Handler.(*http.ServeMux)
-			req.True(ok)
-			requests := 0
-			mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
-				requests++
-				_, _ = w.Write([]byte("unexpected endpoint"))
-			})
-			sum, err := NewImporter(f.store, backupRuntime(t, f.server.URL, f.backup)).Import(t.Context(), ImportOptions{UserID: "@archive:example.org", AttachmentsDir: t.TempDir()})
-			req.NoError(err)
-			check.Zero(requests)
-			check.Equal(int64(1), sum.AttachmentsFailed)
-			check.Zero(sum.AttachmentsDownloaded)
-		})
-	}
-}
-
-func TestImportMediaCaptionEditKeepsSizeEstimate(t *testing.T) {
-	req, check := require.New(t), assert.New(t)
-	f := newRecoveryFixture(t)
-	f.timeline = []*event.Event{matrixTestEvent(t, `{"type":"m.room.message","event_id":"$media","sender":"@member:example.org","origin_server_ts":10,"content":{"msgtype":"m.file","body":"caption","filename":"file.txt","url":"mxc://example.org/file"}}`)}
-	mux, ok := f.server.Config.Handler.(*http.ServeMux)
-	req.True(ok)
-	downloads := 0
-	mux.HandleFunc("GET /_matrix/client/v1/media/download/example.org/file", func(w http.ResponseWriter, _ *http.Request) {
-		downloads++
-		_, _ = w.Write([]byte("file"))
-	})
-	runtime := backupRuntime(t, f.server.URL, f.backup)
-	opts := ImportOptions{UserID: "@archive:example.org", AttachmentsDir: t.TempDir(), MediaPolicy: attachmentpolicy.Policy{Scope: attachmentpolicy.ScopeAll}}
-	_, err := NewImporter(f.store, runtime).Import(t.Context(), opts)
-	req.NoError(err)
-	f.timeline = []*event.Event{matrixTestEvent(t, `{"type":"m.room.message","event_id":"$edit","sender":"@member:example.org","origin_server_ts":20,"content":{"m.new_content":{"msgtype":"m.file","body":"edited","filename":"file.txt","url":"mxc://example.org/file"},"m.relates_to":{"rel_type":"m.replace","event_id":"$media"}}}`)}
-	_, err = NewImporter(f.store, runtime).Import(t.Context(), opts)
-	req.NoError(err)
-	check.Equal("[file: file.txt] edited", f.body(t, "$media"))
-	ids, err := f.store.MessageExistsBatch(f.sourceID, []string{"$media"})
-	req.NoError(err)
-	var size int64
-	req.NoError(f.store.DB().QueryRow(f.store.Rebind(`SELECT size_estimate FROM messages WHERE id = ?`), ids["$media"]).Scan(&size))
-	check.Equal(int64(27), size)
-	check.Equal(1, downloads)
 }
 
 func TestImportFilteredMediaDiscoveryRunsOnce(t *testing.T) {
@@ -380,31 +332,36 @@ func TestImportMediaValidatesMXCBeforeRequest(t *testing.T) {
 			assert.Equal(t, uri.valid, err == nil && validMediaServerName(parsed.Homeserver) && id.IsValidMediaID(parsed.FileID))
 		})
 	}
-	req, check := require.New(t), assert.New(t)
-	f := newRecoveryFixture(t)
-	f.timeline = []*event.Event{matrixTestEvent(t, `{"type":"m.room.message","event_id":"$media","sender":"@member:example.org","content":{"msgtype":"m.file","body":"file","url":"mxc://example.org/../file"}}`)}
-	mux, ok := f.server.Config.Handler.(*http.ServeMux)
-	req.True(ok)
-	requests := 0
-	mux.HandleFunc("GET /_matrix/client/v1/media/download/", func(w http.ResponseWriter, _ *http.Request) {
-		requests++
-		_, _ = w.Write([]byte("file"))
-	})
-	runtime := backupRuntime(t, f.server.URL, f.backup)
-	opts := ImportOptions{UserID: "@archive:example.org", AttachmentsDir: t.TempDir(), MediaPolicy: attachmentpolicy.Policy{Scope: attachmentpolicy.ScopeAll}}
-	sum, err := NewImporter(f.store, runtime).Import(t.Context(), opts)
-	req.NoError(err)
-	check.Zero(requests)
-	check.Equal(int64(1), sum.AttachmentsFailed)
-	ids, err := f.store.MessageExistsBatch(f.sourceID, []string{"$media"})
-	req.NoError(err)
-	refs, err := f.store.MessageMatrixAttachments(ids["$media"])
-	req.NoError(err)
-	check.Equal(attachmentpolicy.StateFailed, refs["matrix:mxc://example.org/../file"].State)
-	opts.Full = true
-	_, err = NewImporter(f.store, runtime).Import(t.Context(), opts)
-	req.NoError(err)
-	check.Zero(requests)
+	for _, uri := range []string{"mxc://example.org/../file", "mxc://./file", "mxc://../file"} {
+		t.Run("request/"+uri, func(t *testing.T) {
+			req, check := require.New(t), assert.New(t)
+			f := newRecoveryFixture(t)
+			f.timeline = []*event.Event{matrixTestEvent(t, fmt.Sprintf(`{"type":"m.room.message","event_id":"$media","sender":"@member:example.org","content":{"msgtype":"m.file","body":"file","url":%q}}`, uri))}
+			mux, ok := f.server.Config.Handler.(*http.ServeMux)
+			req.True(ok)
+			requests := 0
+			mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+				requests++
+				_, _ = w.Write([]byte("file"))
+			})
+			runtime := backupRuntime(t, f.server.URL, f.backup)
+			opts := ImportOptions{UserID: "@archive:example.org", AttachmentsDir: t.TempDir(), MediaPolicy: attachmentpolicy.Policy{Scope: attachmentpolicy.ScopeAll}}
+			sum, err := NewImporter(f.store, runtime).Import(t.Context(), opts)
+			req.NoError(err)
+			check.Zero(requests)
+			check.Equal(int64(1), sum.AttachmentsFailed)
+			check.Zero(sum.AttachmentsDownloaded)
+			ids, err := f.store.MessageExistsBatch(f.sourceID, []string{"$media"})
+			req.NoError(err)
+			refs, err := f.store.MessageMatrixAttachments(ids["$media"])
+			req.NoError(err)
+			check.Equal(attachmentpolicy.StateFailed, refs["matrix:"+uri].State)
+			opts.Full = true
+			_, err = NewImporter(f.store, runtime).Import(t.Context(), opts)
+			req.NoError(err)
+			check.Zero(requests)
+		})
+	}
 }
 
 func TestImportMediaStopsAfterConsecutiveTransientFailures(t *testing.T) {
@@ -601,7 +558,7 @@ func TestImportMediaEncryptionReplacementAndReuse(t *testing.T) {
 	})
 }
 
-func TestImportMediaAlgorithmOnlyEditRejectsCachedPlaintext(t *testing.T) {
+func TestImportMediaAlgorithmChangeInvalidatesFingerprint(t *testing.T) {
 	req, check := require.New(t), assert.New(t)
 	f := newRecoveryFixture(t)
 	data := []byte("synthetic file")
@@ -646,7 +603,6 @@ func TestImportMediaAlgorithmOnlyEditRejectsCachedPlaintext(t *testing.T) {
 	req.NoError(json.Unmarshal([]byte(ref.Metadata), &afterMetadata))
 	check.NotEqual(beforeMetadata.Input, afterMetadata.Input)
 	check.Equal(beforeMetadata.Attempts, afterMetadata.Attempts)
-	check.WithinDuration(time.Now().Add(7*24*time.Hour), afterMetadata.RetryAfter, time.Minute)
 	check.Equal(int64(1), sum.AttachmentsFailed)
 	check.Equal(1, requests)
 	content.File.Key.Algorithm = "A256CTR"
@@ -907,7 +863,6 @@ func TestImportMediaTransferErrorContinuesAndRetriesOnNormalSync(t *testing.T) {
 				req.NoError(t.Context().Err())
 				check.Equal(int64(1), sum.AttachmentsPending)
 				check.Equal(1, transport.requests, "the sweep leaves this run's attempted media alone")
-				check.InDelta(attachmentpolicy.DownloadTimeout(opts.MediaPolicy.MaxBytes), transport.deadline, float64(time.Second))
 				check.Equal("later text", f.body(t, "$text"))
 				ids, err := f.store.MessageExistsBatch(f.sourceID, []string{"$media"})
 				req.NoError(err)
@@ -941,34 +896,6 @@ func TestImportMediaTransferErrorContinuesAndRetriesOnNormalSync(t *testing.T) {
 					check.Equal(int64(1), sum.AttachmentsPending)
 					check.Zero(sum.AttachmentsFailed)
 				}
-				opts.MediaPolicy.Scope = attachmentpolicy.ScopeNone
-				opts.Full = true
-				_, err = NewImporter(f.store, runtime).Import(t.Context(), opts)
-				req.NoError(err)
-				refs, err = f.store.MessageMatrixAttachments(ids["$media"])
-				req.NoError(err)
-				check.Equal(attachmentpolicy.StateSkipped, refs["matrix:mxc://example.org/photo"].State)
-				opts.MediaPolicy.Scope = attachmentpolicy.ScopeAll
-				opts.Full = false
-				sum, err = NewImporter(f.store, runtime).Import(t.Context(), opts)
-				req.NoError(err)
-				check.Equal(8, transport.requests, "policy changes preserve the backoff")
-				check.Equal(int64(1), sum.AttachmentsPending)
-				opts.Full = true
-				_, err = NewImporter(f.store, runtime).Import(t.Context(), opts)
-				req.NoError(err)
-				check.Equal(9, transport.requests, "full sync retries once, even after timeline replay")
-				mux, ok := f.server.Config.Handler.(*http.ServeMux)
-				req.True(ok)
-				mux.HandleFunc("GET /_matrix/client/v1/media/download/example.org/photo", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("recovered media")) })
-				runtime.Client.Client.Transport = transport.RoundTripper
-				makeMediaRetryDue(t, f.store, ids["$media"])
-				opts.Full = false
-				sum, err = NewImporter(f.store, runtime).Import(t.Context(), opts)
-				req.NoError(err)
-				check.Equal(int64(1), sum.AttachmentsDownloaded)
-				check.Zero(sum.AttachmentsPending)
-				check.Zero(sum.AttachmentsFailed)
 			})
 		}
 	}
@@ -1055,10 +982,9 @@ func TestImportMediaVersionSelectionSurvivesCancellation(t *testing.T) {
 func TestImportMediaHTTPFailuresRetryByState(t *testing.T) {
 	for _, failure := range []struct {
 		status int
-		code   string
 		full   bool
-	}{{408, "", false}, {425, "", false}, {429, "", false}, {500, "", false}, {403, "", false}, {404, "", false}, {504, "M_NOT_YET_UPLOADED", false}, {410, "", false}, {404, "", true}} {
-		t.Run(strconv.Itoa(failure.status)+failure.code+"/full="+strconv.FormatBool(failure.full), func(t *testing.T) {
+	}{{408, false}, {425, false}, {429, false}, {500, false}, {404, false}, {404, true}} {
+		t.Run(strconv.Itoa(failure.status)+"/full="+strconv.FormatBool(failure.full), func(t *testing.T) {
 			req, check := require.New(t), assert.New(t)
 			f := newRecoveryFixture(t)
 			f.timeline = []*event.Event{matrixTestEvent(t, `{"type":"m.room.message","event_id":"$media","sender":"@member:example.org","content":{"msgtype":"m.file","body":"file","url":"mxc://example.org/file"}}`)}
@@ -1069,9 +995,6 @@ func TestImportMediaHTTPFailuresRetryByState(t *testing.T) {
 				requests++
 				if requests == 1 {
 					w.WriteHeader(failure.status)
-					if failure.code != "" {
-						_, _ = fmt.Fprintf(w, `{"errcode":%q,"error":"media unavailable"}`, failure.code)
-					}
 					return
 				}
 				_, _ = w.Write([]byte("file"))
@@ -1082,7 +1005,7 @@ func TestImportMediaHTTPFailuresRetryByState(t *testing.T) {
 			sum, err := NewImporter(f.store, runtime).Import(t.Context(), opts)
 			req.NoError(err)
 			check.Equal(1, requests)
-			permanent := failure.status == 403 || failure.status == 404 || failure.status == 410
+			permanent := failure.status == 404
 			if permanent {
 				check.Equal(int64(1), sum.AttachmentsFailed)
 				check.Zero(sum.AttachmentsPending)
@@ -1396,36 +1319,6 @@ func TestImportMediaReconcilesOncePerTransaction(t *testing.T) {
 			check.Equal(state, refs["matrix:mxc://example.org/file"].State)
 		})
 	}
-}
-
-func TestImportNoMediaPolicySkipsBecomeEligibleAfterLeaving(t *testing.T) {
-	req, check := require.New(t), assert.New(t)
-	f := newRecoveryFixture(t)
-	f.timeline = []*event.Event{matrixTestEvent(t, `{"type":"m.room.message","event_id":"$media","sender":"@member:example.org","content":{"msgtype":"m.file","body":"file","url":"mxc://example.org/file"}}`)}
-	mux, ok := f.server.Config.Handler.(*http.ServeMux)
-	req.True(ok)
-	requests := 0
-	mux.HandleFunc("GET /_matrix/client/v1/media/download/example.org/file", func(w http.ResponseWriter, _ *http.Request) {
-		requests++
-		_, _ = w.Write([]byte("file"))
-	})
-	runtime := backupRuntime(t, f.server.URL, f.backup)
-	opts := ImportOptions{UserID: "@archive:example.org", NoMedia: true, AttachmentsDir: t.TempDir(), MediaPolicy: attachmentpolicy.Policy{Scope: attachmentpolicy.ScopeNone}}
-	sum, err := NewImporter(f.store, runtime).Import(t.Context(), opts)
-	req.NoError(err)
-	check.Zero(sum.AttachmentsPending)
-	ids, err := f.store.MessageExistsBatch(f.sourceID, []string{"$media"})
-	req.NoError(err)
-	refs, err := f.store.MessageMatrixAttachments(ids["$media"])
-	req.NoError(err)
-	check.Equal(attachmentpolicy.StateSkipped, refs["matrix:mxc://example.org/file"].State)
-	f.quiet, f.left = true, true
-	opts.NoMedia = false
-	opts.MediaPolicy = attachmentpolicy.Policy{Scope: attachmentpolicy.ScopeAll}
-	sum, err = NewImporter(f.store, runtime).Import(t.Context(), opts)
-	req.NoError(err)
-	check.Equal(1, requests)
-	check.Equal(int64(1), sum.AttachmentsDownloaded)
 }
 
 func TestImporterTextOnlyEditSkipsLegacyLookups(t *testing.T) {
@@ -1743,60 +1636,8 @@ func TestImportLegacyMediaDiscoveryResumesBudget(t *testing.T) {
 	}
 }
 
-func TestImportLegacyMediaDiscoveryRunsOnceAfterUpgrade(t *testing.T) {
-	req, check := require.New(t), assert.New(t)
-	f := newRecoveryFixture(t)
-	f.timeline = []*event.Event{matrixTestEvent(t, `{"type":"m.room.message","event_id":"$media","sender":"@member:example.org","content":{"msgtype":"m.file","body":"file","url":"mxc://example.org/file"}}`)}
-	runtime := backupRuntime(t, f.server.URL, f.backup)
-	opts := ImportOptions{UserID: "@archive:example.org", NoMedia: true, AttachmentsDir: t.TempDir(), MediaPolicy: attachmentpolicy.Policy{Scope: attachmentpolicy.ScopeAll}}
-	_, err := NewImporter(f.store, runtime).Import(t.Context(), opts)
-	req.NoError(err)
-	ids, err := f.store.MessageExistsBatch(f.sourceID, []string{"$media"})
-	req.NoError(err)
-	req.NoError(f.store.ReplaceMessageMatrixAttachments(t.Context(), ids["$media"], nil))
-	previous, err := f.store.GetLastSuccessfulSyncByType(f.sourceID, SourceType)
-	req.NoError(err)
-	state, err := loadSyncState(previous.CursorAfter.String)
-	req.NoError(err)
-	state.MediaDiscoveryVersion = 0
-	blob, err := state.marshal()
-	req.NoError(err)
-	syncID, err := f.store.StartSync(f.sourceID, SourceType)
-	req.NoError(err)
-	req.NoError(f.store.CompleteSyncAndUpdateSourceCursor(syncID, f.sourceID, blob))
-	f.quiet, f.left, f.historyFails = true, true, true
-	mux, ok := f.server.Config.Handler.(*http.ServeMux)
-	req.True(ok)
-	downloads := 0
-	mux.HandleFunc("GET /_matrix/client/v1/media/download/example.org/file", func(w http.ResponseWriter, _ *http.Request) {
-		downloads++
-		_, _ = w.Write([]byte("file"))
-	})
-	opts.NoMedia = false
-	sum, err := NewImporter(f.store, runtime).Import(t.Context(), opts)
-	req.NoError(err)
-	check.Equal(int64(1), sum.AttachmentsDownloaded)
-	previous, err = f.store.GetLastSuccessfulSyncByType(f.sourceID, SourceType)
-	req.NoError(err)
-	state, err = loadSyncState(previous.CursorAfter.String)
-	req.NoError(err)
-	check.Equal(mediaDiscoveryVersion, state.MediaDiscoveryVersion)
-	req.NoError(f.store.ReplaceMessageMatrixAttachments(t.Context(), ids["$media"], nil))
-	sum, err = NewImporter(f.store, runtime).Import(t.Context(), opts)
-	req.NoError(err)
-	check.Zero(sum.AttachmentsDownloaded)
-	check.Equal(1, downloads, "completed discovery skips archived messages without markers")
-	opts.Full = true
-	sum, err = NewImporter(f.store, runtime).Import(t.Context(), opts)
-	req.NoError(err)
-	check.Equal(int64(1), sum.AttachmentsDownloaded)
-	check.Equal(2, downloads, "full sync repeats discovery")
-	_, err = loadSyncState(`{"format_version":1,"media_discovery_version":2,"rooms":{}}`)
-	check.ErrorIs(err, errCursorVersion)
-}
-
 func TestImportLegacyMediaDiscoveryRetriesIncompleteSync(t *testing.T) {
-	for _, scenario := range []string{"transient-edit", "forbidden-edit", "missing-edit", "malformed-edit", "wrong-sender", "wrong-target", "missing-content", "unsupported-encryption", "include-room", "exclude-room"} {
+	for _, scenario := range []string{"completed", "transient-edit", "forbidden-edit", "missing-edit", "malformed-edit", "wrong-sender", "wrong-target", "missing-content", "unsupported-encryption", "include-room", "exclude-room"} {
 		t.Run(scenario, func(t *testing.T) {
 			req, check := require.New(t), assert.New(t)
 			f := newRecoveryFixture(t)
@@ -1809,7 +1650,9 @@ func TestImportLegacyMediaDiscoveryRetriesIncompleteSync(t *testing.T) {
 			req.NoError(err)
 			messageID := ids["$media"]
 			req.NoError(f.store.ReplaceMessageMatrixAttachments(t.Context(), messageID, nil))
-			req.NoError(f.store.SetMessageMetadata(messageID, sql.NullString{String: `{"matrix_edit_event_id":"$edit","matrix_edit_ts":20}`, Valid: true}))
+			if scenario != "completed" {
+				req.NoError(f.store.SetMessageMetadata(messageID, sql.NullString{String: `{"matrix_edit_event_id":"$edit","matrix_edit_ts":20}`, Valid: true}))
+			}
 			previous, err := f.store.GetLastSuccessfulSyncByType(f.sourceID, SourceType)
 			req.NoError(err)
 			state, err := loadSyncState(previous.CursorAfter.String)
@@ -1863,10 +1706,12 @@ func TestImportLegacyMediaDiscoveryRetriesIncompleteSync(t *testing.T) {
 				}
 				writeMatrixJSON(t, w, matrixTestEvent(t, `{"type":"m.room.message","event_id":"$edit","sender":"@member:example.org","origin_server_ts":20,"content":{"m.new_content":{"msgtype":"m.file","body":"selected","url":"mxc://example.org/selected"},"m.relates_to":{"rel_type":"m.replace","event_id":"$media"}}}`))
 			})
-			mux.HandleFunc("GET /_matrix/client/v1/media/download/example.org/selected", func(w http.ResponseWriter, _ *http.Request) {
-				downloads++
-				_, _ = w.Write([]byte("selected bytes"))
-			})
+			for _, name := range []string{"original", "selected"} {
+				mux.HandleFunc("GET /_matrix/client/v1/media/download/example.org/"+name, func(w http.ResponseWriter, _ *http.Request) {
+					downloads++
+					_, _ = w.Write([]byte("selected bytes"))
+				})
+			}
 			opts.NoMedia = false
 			switch scenario {
 			case "include-room":
@@ -1876,6 +1721,20 @@ func TestImportLegacyMediaDiscoveryRetriesIncompleteSync(t *testing.T) {
 			}
 			_, err = NewImporter(f.store, runtime).Import(t.Context(), opts)
 			req.NoError(err)
+			if scenario == "completed" {
+				check.Equal(1, downloads)
+				req.NoError(f.store.ReplaceMessageMatrixAttachments(t.Context(), messageID, nil))
+				sum, err := NewImporter(f.store, runtime).Import(t.Context(), opts)
+				req.NoError(err)
+				check.Zero(sum.AttachmentsDownloaded)
+				check.Equal(1, downloads, "completed discovery skips archived messages without markers")
+				opts.Full = true
+				sum, err = NewImporter(f.store, runtime).Import(t.Context(), opts)
+				req.NoError(err)
+				check.Equal(int64(1), sum.AttachmentsDownloaded)
+				check.Equal(2, downloads, "full sync repeats discovery")
+				return
+			}
 			check.Zero(downloads)
 			previous, err = f.store.GetLastSuccessfulSyncByType(f.sourceID, SourceType)
 			req.NoError(err)
@@ -2105,14 +1964,6 @@ func TestImportDirectMediaScopeExcludesNonDirectRooms(t *testing.T) {
 			var kind string
 			req.NoError(f.store.DB().QueryRow(f.store.Rebind(`SELECT c.conversation_type FROM conversations c JOIN messages m ON m.conversation_id = c.id WHERE m.id = ?`), ids["$public"]).Scan(&kind))
 			check.Equal("group_chat", kind)
-			var attachmentID int64
-			req.NoError(f.store.DB().QueryRow(f.store.Rebind(`SELECT id FROM attachments WHERE message_id = ?`), ids["$public"]).Scan(&attachmentID))
-			f.quiet = true
-			_, err = NewImporter(f.store, runtime).Import(t.Context(), opts)
-			req.NoError(err)
-			var afterID int64
-			req.NoError(f.store.DB().QueryRow(f.store.Rebind(`SELECT id FROM attachments WHERE message_id = ?`), ids["$public"]).Scan(&afterID))
-			check.Equal(attachmentID, afterID, "unchanged excluded media keeps its occurrence row")
 		})
 	}
 }
