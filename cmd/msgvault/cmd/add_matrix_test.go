@@ -82,13 +82,15 @@ func TestAddMatrixBackupSetup(t *testing.T) {
 
 			var s *store.Store
 			var source *store.Source
-			if mode == "secret storage" {
+			if mode == "skip" || mode == "secret storage" {
 				s = testutil.NewTestStore(t)
 				setMatrixTestDatabaseURL(t, s, cfg)
 				var err error
 				source, err = s.GetOrCreateSource(sourceTypeMatrix, "@archive:example.org")
 				req.NoError(err)
-				req.NoError(s.UpdateSourceSyncConfig(source.ID, `{"skip_key_backup":true,"rooms":["!keep:example.org"],"extra":{"keep":1}}`))
+				if mode == "secret storage" {
+					req.NoError(s.UpdateSourceSyncConfig(source.ID, `{"skip_key_backup":true,"rooms":["!keep:example.org"],"extra":{"keep":1}}`))
+				}
 			}
 			t.Setenv(daemonCLISubprocessEnv, strconv.Itoa(os.Getppid()))
 			t.Setenv(clirun.EnvMatrixLoginSecret, "password")
@@ -117,7 +119,7 @@ func TestAddMatrixBackupSetup(t *testing.T) {
 				check.Zero(logins)
 				check.Empty(logouts)
 			case "loader failure":
-				req.Error(err)
+				req.ErrorContains(err, "load Matrix secret storage")
 				check.Equal(1, logins)
 				check.Equal([]string{"Bearer fresh"}, logouts)
 			case "skip", "secret storage":
@@ -131,6 +133,9 @@ func TestAddMatrixBackupSetup(t *testing.T) {
 					check.JSONEq(`{"skip_key_backup":false,"rooms":["!keep:example.org"],"extra":{"keep":1}}`, source.SyncConfig.String)
 				} else {
 					check.Empty(creds.BackupKey)
+					source, err = s.GetSourceByID(source.ID)
+					req.NoError(err)
+					check.JSONEq(`{"skip_key_backup":true}`, source.SyncConfig.String)
 				}
 			}
 		})
