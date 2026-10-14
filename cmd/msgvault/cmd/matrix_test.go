@@ -400,13 +400,15 @@ func TestAddMatrixRenewalStagingFailureKeepsOldLogin(t *testing.T) {
 
 func TestAddMatrixRenewalResumesAfterPublishFailure(t *testing.T) {
 	for _, tc := range []struct {
-		name       string
-		fail       error
-		sameDevice bool
+		name        string
+		fail        error
+		sameDevice  bool
+		wantLogins  int
+		wantLogouts []string
 	}{
-		{"not published", errors.New("synthetic disk full"), false},
-		{"published but not durable", fmt.Errorf("synthetic directory sync failure: %w", atomicfile.ErrPublished), false},
-		{"same device", atomicfile.ErrPublished, true},
+		{"not published", errors.New("synthetic disk full"), false, 1, []string{"Bearer old"}},
+		{"published but not durable", fmt.Errorf("synthetic directory sync failure: %w", atomicfile.ErrPublished), false, 1, []string{"Bearer old"}},
+		{"same device", atomicfile.ErrPublished, true, 0, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			require := require.New(t)
@@ -427,11 +429,7 @@ func TestAddMatrixRenewalResumesAfterPublishFailure(t *testing.T) {
 			require.True(ok, "the new login stays recoverable")
 			assert.Equal("NEW", pending.DeviceID)
 			_, loggedOut := server.snapshot()
-			if tc.sameDevice {
-				assert.Empty(loggedOut)
-			} else {
-				assert.Equal([]string{"Bearer old"}, loggedOut, "the saved new device is kept")
-			}
+			assert.Equal(tc.wantLogouts, loggedOut, "the saved new device is kept")
 
 			restoreMatrixCredentialWrites()
 			require.NoError(runAddMatrixForRenewal(t, cfg, server.URL, ""), "the retry resumes the pending login")
@@ -439,11 +437,7 @@ func TestAddMatrixRenewalResumesAfterPublishFailure(t *testing.T) {
 			require.NoError(err)
 			assert.Equal(pending, creds)
 			logins, loggedOut := server.snapshot()
-			if tc.sameDevice {
-				assert.Zero(logins)
-			} else {
-				assert.Equal(1, logins, "the retry reuses the saved device")
-			}
+			assert.Equal(tc.wantLogins, logins, "the retry reuses the saved device")
 			assert.NotContains(loggedOut, "Bearer fresh")
 			exists, err := matrixsource.PendingCredentialsExist(cfg.TokensDir(), old.UserID)
 			require.NoError(err)
