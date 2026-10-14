@@ -1081,6 +1081,20 @@ func TestImportMediaBackoffAvoidsReadsAndUnchangedWrites(t *testing.T) {
 			refs, err := f.store.MessageMatrixAttachments(ids["$media"])
 			req.NoError(err)
 			req.Equal(state, refs["matrix:mxc://example.org/file"].State)
+			if f.store.IsPostgreSQL() {
+				_, err = f.store.DB().Exec(`CREATE FUNCTION reject_media_write() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'unexpected media write'; END $$`)
+				req.NoError(err)
+			}
+			for _, table := range []string{"attachments", "messages"} {
+				for _, operation := range []string{"INSERT", "UPDATE", "DELETE"} {
+					create := fmt.Sprintf(`CREATE TRIGGER reject_%s_%s BEFORE %s ON %s BEGIN SELECT RAISE(ABORT, 'unexpected media write'); END`, table, operation, operation, table)
+					if f.store.IsPostgreSQL() {
+						create = fmt.Sprintf(`CREATE TRIGGER reject_%s_%s BEFORE %s ON %s FOR EACH ROW EXECUTE FUNCTION reject_media_write()`, table, operation, operation, table)
+					}
+					_, err = f.store.DB().Exec(create)
+					req.NoError(err)
+				}
+			}
 			store.ConfigureSQLLogging(store.SQLLogOptions{FullTrace: true})
 			t.Cleanup(func() { store.ConfigureSQLLogging(store.SQLLogOptions{}) })
 			var logs bytes.Buffer
@@ -1091,12 +1105,11 @@ func TestImportMediaBackoffAvoidsReadsAndUnchangedWrites(t *testing.T) {
 			if state == attachmentpolicy.StatePending || state == attachmentpolicy.StateFailed {
 				req.NoError(imp.retryArchivedMedia(t.Context(), f.sourceID, opts, &ImportSummary{}))
 				check.NotContains(logs.String(), "message_raw", "backoff skips raw event reads")
-				check.NotContains(logs.String(), `"kind":"exec"`, "backoff leaves occurrences and totals alone")
 			}
-			logs.Reset()
 			opts.NoMedia = true
+			req.True(parseContent(evt))
 			req.NoError(imp.applyMedia(t.Context(), ids["$media"], mediaContent(evt), evt.Type, attachmentpolicy.Conversation{Type: "group_chat"}, opts, &ImportSummary{}))
-			check.NotContains(logs.String(), `"kind":"exec"`, "identical occurrences leave journals and totals alone")
+			req.ErrorContains(f.store.ReplaceMessageMatrixAttachments(t.Context(), ids["$media"], []store.AttachmentRef{refs["matrix:mxc://example.org/file"]}), "unexpected media write")
 		})
 	}
 }
