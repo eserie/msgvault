@@ -50,7 +50,7 @@ func (s *Store) ListMatrixRetryableAttachmentMessagesContext(ctx context.Context
 	if limit <= 0 || limit > 100 {
 		limit = 100
 	}
-	where := " AND COALESCE(a.media_type, '') <> 'link'"
+	var where string
 	args := []any{sourceID, "matrix:%"}
 	if policy.DisabledReason != "" || policy.Scope == attachmentpolicy.ScopeNone {
 		where += " AND COALESCE(a.attachment_state, '') <> 'skipped'"
