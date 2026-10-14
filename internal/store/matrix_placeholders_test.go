@@ -11,7 +11,7 @@ import (
 	"go.kenn.io/msgvault/internal/testutil"
 )
 
-func TestMatrixUnsupportedPlaceholderRetainsRawAndInvalidatesIndexes(t *testing.T) {
+func TestMatrixUnsupportedPlaceholderRetainsRawAndReplayClaimAndInvalidatesIndexes(t *testing.T) {
 	req, check := require.New(t), assert.New(t)
 	s := testutil.NewTestStore(t)
 	source, err := s.GetOrCreateSource("matrix", "@archive:example.org")
