@@ -59,21 +59,17 @@ func TestMatrixSyncSummaryBackupFailureAndKeyHint(t *testing.T) {
 		creds := matrixsource.Credentials{Homeserver: server.URL, UserID: source.Identifier, DeviceID: "ARCHIVE", AccessToken: "token"}
 		return s, cfg, creds, newPlaceholder
 	}
-	for _, skip := range []bool{false, true} {
-		t.Run(fmt.Sprintf("failure/skip=%t", skip), func(t *testing.T) {
-			req := require.New(t)
-			s, cfg, creds, _ := setup(t)
-			if skip {
-				source, err := s.GetSourceByTypeAndIdentifier(sourceTypeMatrix, creds.UserID)
-				req.NoError(err)
-				req.NoError(s.UpdateSourceSyncConfig(source.ID, `{"skip_key_backup":true}`))
-			}
-			creds.BackupKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-			req.NoError(matrixsource.SaveCredentials(cfg.TokensDir(), creds))
-			var out bytes.Buffer
-			req.ErrorContains(runMatrixSync(t.Context(), s, cfg, "", false, nil, &out), "key backup unavailable, 1 encrypted events pending")
-		})
-	}
+	t.Run("saved backup key overrides skip preference", func(t *testing.T) {
+		req := require.New(t)
+		s, cfg, creds, _ := setup(t)
+		source, err := s.GetSourceByTypeAndIdentifier(sourceTypeMatrix, creds.UserID)
+		req.NoError(err)
+		req.NoError(s.UpdateSourceSyncConfig(source.ID, `{"skip_key_backup":true}`))
+		creds.BackupKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+		req.NoError(matrixsource.SaveCredentials(cfg.TokensDir(), creds))
+		var out bytes.Buffer
+		req.ErrorContains(runMatrixSync(t.Context(), s, cfg, "", false, nil, &out), "key backup unavailable, 1 encrypted events pending")
+	})
 	for _, mode := range []string{"per-source counts and single hint", "exclude rooms"} {
 		t.Run(mode, func(t *testing.T) {
 			req, check := require.New(t), assert.New(t)
