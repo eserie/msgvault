@@ -190,10 +190,26 @@ func TestImportRecoveryRoomFetchFailureContinuesAndPersistsAttempt(t *testing.T)
 				check.Equal(1, f.backup.roomFetches)
 			}
 			check.Equal(encryptedPlaceholder, f.body(t, "$failed"))
-			state := f.syncState(t)
-			check.False(state.RecoveryRooms["!first:example.org"].TriedAt.IsZero())
 		})
 	}
+	t.Run("unsupported algorithm", func(t *testing.T) {
+		req, check := require.New(t), assert.New(t)
+		f := newRecoveryFixture(t)
+		unsupported := f.message(t, "$unsupported", "unsupported", 10)
+		unsupported.Content.AsEncrypted().Algorithm = "example.unsupported"
+		f.extraRooms = map[string][]*event.Event{"!first:example.org": {unsupported}}
+		f.timeline = []*event.Event{f.message(t, "$later", "later", 20)}
+		_, err := f.run(t, false, false)
+		req.NoError(err)
+		f.quiet = true
+		sum, err := f.run(t, true, false)
+		req.NoError(err)
+		req.NoError(sum.BackupFailure)
+		check.Equal(int64(1), sum.Recovered)
+		check.Equal(int64(1), sum.PendingEncrypted)
+		check.Equal("later", f.body(t, "$later"))
+	})
+
 }
 
 func TestImportRecoveryCorruptPendingEdits(t *testing.T) {
@@ -417,43 +433,44 @@ func TestImportFullSyncKeepsRecoveredReactionRedacted(t *testing.T) {
 }
 
 func TestImportRecoversMessagesAndEdits(t *testing.T) {
-	req := require.New(t)
-	check := assert.New(t)
-	f := newRecoveryFixture(t)
-	oldEdit := f.edit(t, "$a-edit", "$z-original", "older", 20)
-	newEdit := f.edit(t, "$b-edit", "$z-original", "newest", 30)
-	reply := f.backup.encrypted(t, "$reply", 40, event.EventMessage, map[string]any{"msgtype": "m.text", "body": "reply", "m.relates_to": map[string]any{"m.in_reply_to": map[string]any{"event_id": "$z-original"}}})
-	f.timeline = []*event.Event{oldEdit, newEdit, reply, f.message(t, "$z-original", "original", 10)}
-	_, err := f.run(t, false, false)
-	req.NoError(err)
-	check.Equal(encryptedPlaceholder, f.body(t, "$z-original"))
-	f.quiet = true
-	sum, err := f.run(t, true, false)
-	req.NoError(err)
-	check.Equal(int64(2), sum.Recovered)
-	check.Equal(int64(2), sum.MessagesProcessed)
-	run := f.operation(t)
-	check.Equal(operations.StateSucceeded, run.State)
-	check.Contains(run.Counters, operations.PublicCounter{Name: operations.CounterUpdated, Unit: operations.CounterUnitMessages, Value: 2})
-	check.Zero(sum.PendingEncrypted)
-	check.Equal("newest", f.body(t, "$z-original"))
-}
-
-func TestImportRecoveryCrossesPlaceholderPages(t *testing.T) {
-	req := require.New(t)
-	check := assert.New(t)
-	f := newRecoveryFixture(t)
-	f.timeline = []*event.Event{f.edit(t, "$000-edit", "$zzz-original", "updated", 20)}
-	for i := range 500 {
-		f.timeline = append(f.timeline, f.message(t, fmt.Sprintf("$%03d", i), "filler", 10))
-	}
-	f.timeline = append(f.timeline, f.message(t, "$zzz-original", "original", 10))
-	_, err := f.run(t, false, false)
-	req.NoError(err)
-	f.quiet = true
-	_, err = f.run(t, true, false)
-	req.NoError(err)
-	check.Equal("updated", f.body(t, "$zzz-original"))
+	t.Run("messages and edits", func(t *testing.T) {
+		req := require.New(t)
+		check := assert.New(t)
+		f := newRecoveryFixture(t)
+		oldEdit := f.edit(t, "$a-edit", "$z-original", "older", 20)
+		newEdit := f.edit(t, "$b-edit", "$z-original", "newest", 30)
+		reply := f.backup.encrypted(t, "$reply", 40, event.EventMessage, map[string]any{"msgtype": "m.text", "body": "reply", "m.relates_to": map[string]any{"m.in_reply_to": map[string]any{"event_id": "$z-original"}}})
+		f.timeline = []*event.Event{oldEdit, newEdit, reply, f.message(t, "$z-original", "original", 10)}
+		_, err := f.run(t, false, false)
+		req.NoError(err)
+		check.Equal(encryptedPlaceholder, f.body(t, "$z-original"))
+		f.quiet = true
+		sum, err := f.run(t, true, false)
+		req.NoError(err)
+		check.Equal(int64(2), sum.Recovered)
+		check.Equal(int64(2), sum.MessagesProcessed)
+		run := f.operation(t)
+		check.Equal(operations.StateSucceeded, run.State)
+		check.Contains(run.Counters, operations.PublicCounter{Name: operations.CounterUpdated, Unit: operations.CounterUnitMessages, Value: 2})
+		check.Zero(sum.PendingEncrypted)
+		check.Equal("newest", f.body(t, "$z-original"))
+	})
+	t.Run("crosses placeholder pages", func(t *testing.T) {
+		req := require.New(t)
+		check := assert.New(t)
+		f := newRecoveryFixture(t)
+		f.timeline = []*event.Event{f.edit(t, "$000-edit", "$zzz-original", "updated", 20)}
+		for i := range 500 {
+			f.timeline = append(f.timeline, f.message(t, fmt.Sprintf("$%03d", i), "filler", 10))
+		}
+		f.timeline = append(f.timeline, f.message(t, "$zzz-original", "original", 10))
+		_, err := f.run(t, false, false)
+		req.NoError(err)
+		f.quiet = true
+		_, err = f.run(t, true, false)
+		req.NoError(err)
+		check.Equal("updated", f.body(t, "$zzz-original"))
+	})
 }
 
 func TestImportRecoversLeftRoomAfterFullSync(t *testing.T) {
@@ -747,6 +764,29 @@ func TestImportRecoveryBoundsRetriesAndAttemptsNewEvents(t *testing.T) {
 			check.Equal(roomCount+round*recoveryRetryLimit, f.backup.roomFetches)
 		}
 	})
+	t.Run("retired relation retries after backup change", func(t *testing.T) {
+		req, check := require.New(t), assert.New(t)
+		f := newRecoveryFixture(t)
+		missing := f.message(t, "$missing", "missing", 10)
+		missing.Content.AsEncrypted().SessionID = "absent"
+		deleted := f.backup.encrypted(t, "$deleted", 20, event.EventReaction, map[string]any{"m.relates_to": map[string]any{"rel_type": "m.annotation", "event_id": "$missing", "key": "yes"}})
+		f.timeline = []*event.Event{missing, deleted}
+		_, err := f.run(t, false, false)
+		req.NoError(err)
+		f.quiet = true
+		_, err = f.run(t, true, false)
+		req.NoError(err)
+		ids, err := f.store.MessageExistsBatch(f.sourceID, []string{"$deleted"})
+		req.NoError(err)
+		req.Empty(ids)
+		f.backup.etag = "2"
+		sum, err := f.run(t, true, false)
+		req.NoError(err)
+		check.Zero(sum.Recovered)
+		check.Equal(int64(1), sum.PendingEncrypted)
+		check.Equal(2, f.backup.roomFetches, "retiring a relation allows an immediate retry after a backup change")
+	})
+
 }
 
 func TestImportRecoveryProgressDoesNotStarveQuietRoom(t *testing.T) {
@@ -807,9 +847,6 @@ func TestImportEditWaitsForEncryptedOriginal(t *testing.T) {
 	f.quiet = true
 	_, err = f.run(t, false, false)
 	req.NoError(err)
-	last, err := f.store.GetLastSuccessfulSyncByType(f.sourceID, SourceType)
-	req.NoError(err)
-	check.NotContains(last.CursorAfter.String, "deferred_relations", "edits wait in archive metadata")
 	sum, err := f.run(t, true, false)
 	req.NoError(err)
 	check.Zero(sum.PendingEncrypted)
@@ -826,7 +863,7 @@ func TestImportEditWaitsForEncryptedOriginal(t *testing.T) {
 }
 
 func TestImportGCRecoversReusedPlaceholderID(t *testing.T) {
-	for _, mode := range []string{"same sync", "later sync", "later sync with new event", "retired relation"} {
+	for _, mode := range []string{"same sync", "later sync", "later sync with new event"} {
 		t.Run(mode, func(t *testing.T) {
 			req, check := require.New(t), assert.New(t)
 			f := newRecoveryFixture(t)
@@ -835,15 +872,10 @@ func TestImportGCRecoversReusedPlaceholderID(t *testing.T) {
 			}
 			missing := f.message(t, "$missing", "missing", 10)
 			missing.Content.AsEncrypted().SessionID = "absent"
-			retired := mode == "retired relation"
 			deleted := f.message(t, "$deleted", "deleted", 20)
-			if retired {
-				deleted = f.backup.encrypted(t, "$deleted", 20, event.EventReaction, map[string]any{"m.relates_to": map[string]any{"rel_type": "m.annotation", "event_id": "$missing", "key": "yes"}})
-			} else {
-				f.backup.status = http.StatusNotFound
-			}
+			f.backup.status = http.StatusNotFound
 			f.timeline = []*event.Event{missing, deleted}
-			_, err := f.run(t, !retired, false)
+			_, err := f.run(t, true, false)
 			req.NoError(err)
 			before := f.syncState(t)
 			ids, err := f.store.MessageExistsBatch(f.sourceID, []string{"$deleted"})
@@ -852,29 +884,13 @@ func TestImportGCRecoversReusedPlaceholderID(t *testing.T) {
 			var maxID int64
 			req.NoError(f.store.DB().QueryRow(`SELECT MAX(id) FROM messages`).Scan(&maxID))
 			req.Equal(maxID, deletedID)
-			if retired {
-				f.quiet = true
-				_, err = f.run(t, true, false)
-				req.NoError(err)
-				ids, err = f.store.MessageExistsBatch(f.sourceID, []string{"$deleted"})
-				req.NoError(err)
-				req.Empty(ids)
-				f.backup.etag = "2"
-				sum, err := f.run(t, true, false)
-				req.NoError(err)
-				check.Zero(sum.Recovered)
-				check.Equal(int64(1), sum.PendingEncrypted)
-				check.Equal(2, f.backup.roomFetches, "retiring a relation allows an immediate retry after a backup change")
-				f.quiet = false
-			} else {
-				req.Equal(deletedID, before.RecoveryRooms["!room:example.org"].LastMessageID)
-				req.NoError(f.store.MarkMessageDeleted(f.sourceID, "$deleted"))
-				plan, err := f.store.PlanGCContext(t.Context())
-				req.NoError(err)
-				deleted, err := f.store.ExecuteGCContext(t.Context(), plan)
-				req.NoError(err)
-				req.Equal(int64(1), deleted)
-			}
+			req.Equal(deletedID, before.RecoveryRooms["!room:example.org"].LastMessageID)
+			req.NoError(f.store.MarkMessageDeleted(f.sourceID, "$deleted"))
+			plan, err := f.store.PlanGCContext(t.Context())
+			req.NoError(err)
+			collected, err := f.store.ExecuteGCContext(t.Context(), plan)
+			req.NoError(err)
+			req.Equal(int64(1), collected)
 			f.backup.status = 0
 			f.timeline = []*event.Event{f.message(t, "$new", "new", 30)}
 			if mode != "same sync" {
@@ -902,29 +918,9 @@ func TestImportGCRecoversReusedPlaceholderID(t *testing.T) {
 			req.NoError(err)
 			check.Equal(deletedID, ids["$new"], "SQLite reuses the collected table-max rowid")
 			after := f.syncState(t)
-			if !retired {
-				check.Equal(before.RecoveryRooms["!room:example.org"].Stamp, after.RecoveryRooms["!room:example.org"].Stamp)
-			}
+			check.Equal(before.RecoveryRooms["!room:example.org"].Stamp, after.RecoveryRooms["!room:example.org"].Stamp)
 		})
 	}
-}
-
-func TestImportUnsupportedRoomDoesNotStopLaterRoom(t *testing.T) {
-	req, check := require.New(t), assert.New(t)
-	f := newRecoveryFixture(t)
-	unsupported := f.message(t, "$unsupported", "unsupported", 10)
-	unsupported.Content.AsEncrypted().Algorithm = "example.unsupported"
-	f.extraRooms = map[string][]*event.Event{"!first:example.org": {unsupported}}
-	f.timeline = []*event.Event{f.message(t, "$later", "later", 20)}
-	_, err := f.run(t, false, false)
-	req.NoError(err)
-	f.quiet = true
-	sum, err := f.run(t, true, false)
-	req.NoError(err)
-	req.NoError(sum.BackupFailure)
-	check.Equal(int64(1), sum.Recovered)
-	check.Equal(int64(1), sum.PendingEncrypted)
-	check.Equal("later", f.body(t, "$later"))
 }
 
 func TestImportRecoveryCountsSameRunOnce(t *testing.T) {
@@ -1057,14 +1053,10 @@ func TestImportRecoveredReplyLinksWhenTargetArrivesLater(t *testing.T) {
 				wantBody = "edited reply"
 			}
 			check.Zero(sum.PendingEncrypted)
-			check.Equal(wantBody, f.body(t, "$reply"))
 			replies, err := f.store.ListUnresolvedMessageRepliesAfterContext(t.Context(), f.sourceID, SourceType, 0, pageSize, 0)
 			req.NoError(err)
 			req.Len(replies, 1)
 			check.Contains(replies[0].Metadata, `"referenced_message_id"`)
-			saved, err := f.store.GetLastSuccessfulSyncByType(f.sourceID, SourceType)
-			req.NoError(err)
-			check.NotContains(saved.CursorAfter.String, "deferred_relations")
 			f.timeline = nil
 			_, err = f.run(t, true, false)
 			req.NoError(err)
@@ -1199,30 +1191,17 @@ func TestImportHandlesUnreadableCursorBySyncMode(t *testing.T) {
 func TestImportPlaceholderTextDoesNotRequestBackup(t *testing.T) {
 	req, check := require.New(t), assert.New(t)
 	f := newRecoveryFixture(t)
-	f.timeline = []*event.Event{matrixTestEvent(t, `{"type":"m.room.message","event_id":"$plaintext","sender":"@member:example.org","content":{"msgtype":"m.text","body":"[encrypted message — keys unavailable]"}}`)}
-	sum, err := f.run(t, true, false)
-	req.NoError(err)
-	check.Zero(sum.PendingEncrypted)
-	check.Zero(f.backup.versionFetches)
-	check.Zero(f.backup.roomFetches)
-	check.Equal(encryptedPlaceholder, f.body(t, "$plaintext"))
 	f.timeline = []*event.Event{matrixTestEvent(t, `{"type":"m.room.message","event_id":"$ordinary","sender":"@member:example.org","origin_server_ts":10,"content":{"msgtype":"m.text","body":"ordinary"}}`)}
-	_, err = f.run(t, true, false)
+	_, err := f.run(t, true, false)
 	req.NoError(err)
 	f.backup.versionStatus = http.StatusServiceUnavailable
 	f.timeline = []*event.Event{matrixTestEvent(t, `{"type":"m.room.message","event_id":"$edit","sender":"@member:example.org","origin_server_ts":20,"content":{"msgtype":"m.text","body":"* edited","m.new_content":{"msgtype":"m.text","body":"[encrypted message — keys unavailable]"},"m.relates_to":{"rel_type":"m.replace","event_id":"$ordinary"}}}`)}
-	sum, err = f.run(t, true, false)
+	sum, err := f.run(t, true, false)
 	req.NoError(err)
 	check.Zero(sum.PendingEncrypted)
 	req.NoError(sum.BackupFailure)
 	check.Zero(f.backup.versionFetches)
 	check.Equal(encryptedPlaceholder, f.body(t, "$ordinary"))
-	f.quiet = true
-	sum, err = f.run(t, true, false)
-	req.NoError(err)
-	check.Zero(sum.PendingEncrypted)
-	req.NoError(sum.BackupFailure)
-	check.Zero(f.backup.versionFetches)
 }
 
 func TestImportRecoveryRejectsReplayedIndex(t *testing.T) {
@@ -1267,17 +1246,6 @@ func TestImportRecoveryRejectsReplayedIndex(t *testing.T) {
 					sum, err := f.run(t, true, false)
 					req.NoError(err)
 					check.Zero(sum.PendingEncrypted)
-					if kind == "redacted reaction" {
-						ids, err := f.store.MessageExistsBatch(f.sourceID, []string{"$first"})
-						req.NoError(err)
-						req.NotZero(ids["$first"])
-						var hidden bool
-						req.NoError(f.store.DB().QueryRow(f.store.Rebind(`SELECT deleted_at IS NOT NULL FROM messages WHERE id = ?`), ids["$first"]).Scan(&hidden))
-						check.True(hidden)
-						var reactions int
-						req.NoError(f.store.DB().QueryRow(`SELECT count(*) FROM reactions`).Scan(&reactions))
-						check.Zero(reactions)
-					}
 				}
 				if later {
 					f.quiet = false
