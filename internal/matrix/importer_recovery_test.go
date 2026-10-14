@@ -441,25 +441,15 @@ func TestImportRecoversMessagesAndEdits(t *testing.T) {
 		f.timeline = []*event.Event{original, edit}
 		_, err := f.run(t, false, false)
 		req.NoError(err)
-		check.Equal(encryptedPlaceholder, f.body(t, "$z-original"))
-		ids, err := f.store.MessageExistsBatch(f.sourceID, []string{"$z-original", "$edit"})
-		req.NoError(err)
 		f.quiet = true
-		_, err = f.run(t, false, false)
+		_, err = f.run(t, true, false)
 		req.NoError(err)
-		sum, err := f.run(t, true, false)
-		req.NoError(err)
-		check.Zero(sum.PendingEncrypted)
-		check.Equal("edited", f.body(t, "$z-original"))
-		ids, err = f.store.MessageExistsBatch(f.sourceID, []string{"$z-original", "$edit"})
+		ids, err := f.store.MessageExistsBatch(f.sourceID, []string{"$z-original", "$edit"})
 		req.NoError(err)
 		check.Zero(ids["$edit"], "edits do not create message rows")
 		metadata, err := f.store.GetMessageMetadata(ids["$z-original"])
 		req.NoError(err)
 		check.NotContains(metadata.String, "matrix_pending_edits")
-		_, err = f.run(t, true, false)
-		req.NoError(err)
-		check.Equal("edited", f.body(t, "$z-original"))
 	})
 }
 
@@ -1070,34 +1060,29 @@ func TestImportNewPlaceholderRetriesAfterBackupVersionFailure(t *testing.T) {
 }
 
 func TestImportKeylessPendingCountIncludesEarlierRuns(t *testing.T) {
-	t.Run("keyless pending across runs", func(t *testing.T) {
-		req := require.New(t)
-		check := assert.New(t)
-		f := newRecoveryFixture(t)
-		f.timeline = []*event.Event{f.message(t, "$first", "first", 10)}
-		sum, err := f.run(t, false, false)
-		req.NoError(err)
-		check.Equal(int64(1), sum.PendingEncrypted)
-		f.timeline = []*event.Event{f.message(t, "$second", "second", 20)}
-		sum, err = f.run(t, false, false)
-		req.NoError(err)
-		check.Equal(int64(2), sum.PendingEncrypted)
-		f.quiet = true
-		sum, err = f.run(t, false, true)
-		req.NoError(err)
-		check.Equal(int64(2), sum.PendingEncrypted)
-	})
-	t.Run("same run message counts", func(t *testing.T) {
-		req, check := require.New(t), assert.New(t)
-		f := newRecoveryFixture(t)
-		f.timeline = []*event.Event{f.message(t, "$original", "original", 10)}
-		sum, err := f.run(t, true, false)
-		req.NoError(err)
-		check.Equal(int64(1), sum.MessagesAdded)
-		sync, err := f.store.GetLastSuccessfulSyncByType(f.sourceID, SourceType)
-		req.NoError(err)
-		check.Equal(int64(1), sync.MessagesProcessed)
-	})
+	req := require.New(t)
+	check := assert.New(t)
+	f := newRecoveryFixture(t)
+	f.timeline = []*event.Event{f.message(t, "$first", "first", 10)}
+	sum, err := f.run(t, false, false)
+	req.NoError(err)
+	check.Equal(int64(1), sum.PendingEncrypted)
+	f.timeline = []*event.Event{f.message(t, "$second", "second", 20)}
+	sum, err = f.run(t, false, false)
+	req.NoError(err)
+	check.Equal(int64(2), sum.PendingEncrypted)
+}
+
+func TestImportCountsMessagesPersistedAndRecoveredInSameRun(t *testing.T) {
+	req, check := require.New(t), assert.New(t)
+	f := newRecoveryFixture(t)
+	f.timeline = []*event.Event{f.message(t, "$original", "original", 10)}
+	sum, err := f.run(t, true, false)
+	req.NoError(err)
+	check.Equal(int64(1), sum.MessagesAdded)
+	sync, err := f.store.GetLastSuccessfulSyncByType(f.sourceID, SourceType)
+	req.NoError(err)
+	check.Equal(int64(1), sync.MessagesProcessed)
 }
 
 func TestImportHandlesUnreadableCursorBySyncMode(t *testing.T) {

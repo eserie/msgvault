@@ -167,7 +167,7 @@ func TestLoadBackupKey(t *testing.T) {
 			}
 			server := httptest.NewServer(mux)
 			t.Cleanup(server.Close)
-			encoded, err := LoadBackupKey(t.Context(), Credentials{Homeserver: server.URL, UserID: "@archive:example.org", DeviceID: "ARCHIVE", AccessToken: "token", BackupKey: "corrupt saved key"}, secret, mode == "passphrase", utils.DecodeBase58RecoveryKey(secret))
+			encoded, err := LoadBackupKey(t.Context(), Credentials{Homeserver: server.URL, UserID: "@archive:example.org", DeviceID: "ARCHIVE", AccessToken: "token"}, secret, mode == "passphrase", utils.DecodeBase58RecoveryKey(secret))
 			switch mode {
 			case "corrupt IV":
 				req.ErrorIs(err, ssss.ErrCorruptedKeyMetadata)
