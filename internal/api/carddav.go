@@ -949,7 +949,7 @@ func (c *CardDAVController) scopedStatus(ctx context.Context) (CardDAVStatusResp
 	}
 	if err != nil {
 		status.RepairReason = "credential_unavailable"
-		return status, nil //nolint:nilerr // Status reports the recoverable credential condition.
+		return status, nil // Status reports the recoverable credential condition.
 	}
 	status.CredentialConfigured = credential.BaseURL == cfg.BaseURL && credential.Username == cfg.Username &&
 		credential.BaseURL == account.BaseURL && credential.Username == account.Username &&
@@ -972,7 +972,7 @@ func (c *CardDAVController) scopedStatus(ctx context.Context) (CardDAVStatusResp
 		if _, err := c.microsoftContactsManager(credential.Username); err != nil {
 			status.CredentialConfigured = false
 			status.RepairReason = "microsoft_authorization_required"
-			return status, nil //nolint:nilerr // Status reports missing Microsoft authorization without contacting Microsoft.
+			return status, nil // Status reports missing Microsoft authorization without contacting Microsoft.
 		}
 	}
 	if !status.Available {

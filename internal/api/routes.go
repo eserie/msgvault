@@ -695,7 +695,7 @@ func registerAPIV1RawHumaJSONOneOfRoute(
 	registerRawHumaRoute(api, op, handler)
 }
 
-//nolint:unparam // Retain method for symmetry with the other raw-route helpers and future non-GET binary endpoints.
+// Retain method for symmetry with the other raw-route helpers and future non-GET binary endpoints.
 func registerAPIV1RawHumaBinaryRoute(
 	api huma.API,
 	operationID string,
