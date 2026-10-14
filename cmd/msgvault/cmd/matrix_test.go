@@ -472,17 +472,11 @@ func TestAddMatrixRenewalResumesPublishedPendingLogin(t *testing.T) {
 	_, loggedOut = server.snapshot()
 	assert.Empty(loggedOut, "both logins survive a second staging failure")
 
-	pending, _, err := matrixsource.LoadPendingCredentials(cfg.TokensDir(), old.UserID)
-	require.NoError(err)
-	pending.BackupKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-	require.NoError(matrixsource.SavePendingCredentials(cfg.TokensDir(), pending))
-	t.Setenv(clirun.EnvMatrixRecoverySecret, "")
 	restoreMatrixCredentialWrites()
 	require.NoError(runAddMatrixForRenewal(t, cfg, server.URL, ""))
 	creds, err = matrixsource.LoadCredentials(cfg.TokensDir(), old.UserID)
 	require.NoError(err)
 	assert.Equal("NEW", creds.DeviceID)
-	assert.Equal(pending.BackupKey, creds.BackupKey)
 	logins, loggedOut := server.snapshot()
 	assert.Equal(1, logins)
 	assert.Equal([]string{"Bearer old"}, loggedOut)

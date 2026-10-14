@@ -202,7 +202,7 @@ func TestLoadBackupKey(t *testing.T) {
 }
 
 func TestBackupDecrypt(t *testing.T) {
-	for _, mode := range []string{"found", "different sender key", "padded key", "invalid key", "missing", "empty envelope", "null plaintext", "early", "transient", "wrong room", "truncated ciphertext", "algorithm", "redaction", "replaced"} {
+	for _, mode := range []string{"found", "different sender key", "padded key", "invalid key", "corrupt stored key", "missing", "empty envelope", "null plaintext", "early", "transient", "wrong room", "truncated ciphertext", "algorithm", "redaction", "replaced"} {
 		t.Run(mode, func(t *testing.T) {
 			req := require.New(t)
 			check := assert.New(t)
@@ -255,7 +255,14 @@ func TestBackupDecrypt(t *testing.T) {
 			f.handle(t, mux)
 			server := httptest.NewServer(mux)
 			t.Cleanup(server.Close)
-			r := backupRuntime(t, server.URL, f)
+			var r *Runtime
+			if mode == "corrupt stored key" {
+				var err error
+				r, err = Open(Credentials{Homeserver: server.URL, UserID: "@archive:example.org", AccessToken: "token", BackupKey: "corrupt!"})
+				req.NoError(err)
+			} else {
+				r = backupRuntime(t, server.URL, f)
+			}
 			if mode == "replaced" {
 				var err error
 				f.key, err = backup.NewMegolmBackupKey()
@@ -268,6 +275,8 @@ func TestBackupDecrypt(t *testing.T) {
 				req.True(parseContent(plain))
 				check.Equal("hello", plain.Content.AsMessage().Body)
 				check.True(plain.Mautrix.WasEncrypted)
+			case "corrupt stored key":
+				req.ErrorContains(r.backupKeyError, "decode Matrix backup key")
 			case "replaced":
 				req.ErrorContains(err, "matrix key backup was replaced")
 				check.Contains(err.Error(), "run add-matrix with --recovery-file or --skip-key-backup")
@@ -293,7 +302,7 @@ func TestBackupDecrypt(t *testing.T) {
 				req.Error(err)
 				check.Equal(2, f.roomFetches)
 			}
-			if mode == "algorithm" || mode == "replaced" || mode == "invalid key" {
+			if mode == "algorithm" || mode == "replaced" || mode == "invalid key" || mode == "corrupt stored key" {
 				check.Zero(f.roomFetches)
 			}
 			check.Equal(mode == "replaced" || mode == "invalid key", r.failure != nil)
