@@ -264,7 +264,7 @@ func TestBackupDecrypt(t *testing.T) {
 				f.key, err = backup.NewMegolmBackupKey()
 				req.NoError(err)
 			}
-			plain, err := r.decrypt(t.Context(), evt)
+			plain, _, err := r.decryptWithIndex(t.Context(), evt)
 			switch mode {
 			case "found", "different sender key", "padded key":
 				req.NoError(err)
@@ -292,7 +292,7 @@ func TestBackupDecrypt(t *testing.T) {
 				req.Error(err)
 			}
 			if mode == "transient" {
-				_, err = r.decrypt(t.Context(), evt)
+				_, _, err = r.decryptWithIndex(t.Context(), evt)
 				req.Error(err)
 				check.Equal(2, f.roomFetches)
 			}
@@ -316,15 +316,15 @@ func TestBackupFetchesRoomOnceForManyMissingSessions(t *testing.T) {
 	for i := range 100 {
 		evt := f.encrypted(t, strconv.Itoa(i), 1, event.EventMessage, map[string]any{})
 		evt.Content.AsEncrypted().SessionID = id.SessionID(strconv.Itoa(i))
-		_, err := r.decrypt(t.Context(), evt)
+		_, _, err := r.decryptWithIndex(t.Context(), evt)
 		req.Error(err)
 	}
 	evt := f.encrypted(t, "$found", 1, event.EventMessage, map[string]any{"msgtype": "m.text", "body": "hello"})
-	_, err := r.decrypt(t.Context(), evt)
+	_, _, err := r.decryptWithIndex(t.Context(), evt)
 	req.NoError(err)
 	check.Equal(1, f.roomFetches)
 	evt.Content.AsEncrypted().SessionID = "absent-after-room-fetch"
-	_, err = r.decrypt(t.Context(), evt)
+	_, _, err = r.decryptWithIndex(t.Context(), evt)
 	req.Error(err)
 	check.Equal(1, f.roomFetches)
 }
@@ -360,7 +360,7 @@ func TestBackupDecryptsOnlyNeededSessions(t *testing.T) {
 	t.Cleanup(server.Close)
 	r := backupRuntime(t, server.URL, f)
 	evt := f.encrypted(t, "$wanted", 1, event.EventMessage, map[string]any{"msgtype": "m.text", "body": "wanted"})
-	plain, err := r.decrypt(t.Context(), evt)
+	plain, _, err := r.decryptWithIndex(t.Context(), evt)
 	req.NoError(err)
 	req.True(parseContent(plain))
 	check.Equal("wanted", plain.Content.AsMessage().Body)
@@ -398,7 +398,7 @@ func TestBackupRelationsPreferOuterEvent(t *testing.T) {
 				f.handle(t, mux)
 				server := httptest.NewServer(mux)
 				t.Cleanup(server.Close)
-				plain, err := backupRuntime(t, server.URL, f).decrypt(t.Context(), evt)
+				plain, _, err := backupRuntime(t, server.URL, f).decryptWithIndex(t.Context(), evt)
 				req.NoError(err)
 				req.True(parseContent(plain))
 				want := id.EventID("")
