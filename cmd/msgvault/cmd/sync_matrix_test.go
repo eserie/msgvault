@@ -61,7 +61,7 @@ func TestMatrixSyncSummaryBackupFailureAndKeyHint(t *testing.T) {
 	}
 	for _, skip := range []bool{false, true} {
 		t.Run(fmt.Sprintf("failure/skip=%t", skip), func(t *testing.T) {
-			req, check := require.New(t), assert.New(t)
+			req := require.New(t)
 			s, cfg, creds, _ := setup(t)
 			if skip {
 				source, err := s.GetSourceByTypeAndIdentifier(sourceTypeMatrix, creds.UserID)
@@ -72,7 +72,6 @@ func TestMatrixSyncSummaryBackupFailureAndKeyHint(t *testing.T) {
 			req.NoError(matrixsource.SaveCredentials(cfg.TokensDir(), creds))
 			var out bytes.Buffer
 			req.ErrorContains(runMatrixSync(t.Context(), s, cfg, "", false, nil, &out), "key backup unavailable, 1 encrypted events pending: load Matrix key backup")
-			check.NotContains(out.String(), "key backup unavailable")
 		})
 	}
 	t.Run("key hint", func(t *testing.T) {

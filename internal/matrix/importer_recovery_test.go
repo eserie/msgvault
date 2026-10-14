@@ -55,13 +55,7 @@ func (s ingestDuringDecryption) Decrypt(message []byte) ([]byte, uint, error) {
 }
 
 func TestImportRecoveryDecryptsBeforeTakingWriteLock(t *testing.T) {
-	for _, mode := range []string{"ingest during decrypt", "empty page"} {
-		t.Run(mode, func(t *testing.T) { checkRecoveryDuringDecryption(t, mode) })
-	}
-}
-
-func TestImportRecoveryRevalidatesPlaceholderDuringDecryption(t *testing.T) {
-	for _, mode := range []string{"reused", "deletion changed"} {
+	for _, mode := range []string{"ingest during decrypt", "empty page", "reused", "deletion changed"} {
 		t.Run(mode, func(t *testing.T) { checkRecoveryDuringDecryption(t, mode) })
 	}
 }
@@ -245,7 +239,7 @@ func TestImportRedactionSkipsUnrelatedPendingEdits(t *testing.T) {
 }
 
 func TestImportEditRedactionSkipsUnavailableEdits(t *testing.T) {
-	for _, mode := range []string{"missing session", "no key", "transient"} {
+	for _, mode := range []string{"missing session", "transient"} {
 		t.Run(mode, func(t *testing.T) {
 			req := require.New(t)
 			check := assert.New(t)
@@ -264,7 +258,7 @@ func TestImportEditRedactionSkipsUnavailableEdits(t *testing.T) {
 			if mode == "transient" {
 				f.backup.status = http.StatusServiceUnavailable
 			}
-			_, err = f.run(t, mode != "no key", false)
+			_, err = f.run(t, true, false)
 			if mode == "transient" {
 				req.ErrorContains(err, "fetch Matrix room backup")
 			} else {

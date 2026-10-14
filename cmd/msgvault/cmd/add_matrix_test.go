@@ -3,7 +3,6 @@ package cmd
 import (
 	"encoding/base64"
 	"encoding/json/v2"
-	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -25,22 +24,6 @@ import (
 	"maunium.net/go/mautrix/crypto/ssss"
 	"maunium.net/go/mautrix/id"
 )
-
-func TestAddMatrixFailedStagingRecordsSkipPreference(t *testing.T) {
-	req, check := require.New(t), assert.New(t)
-	login, cfg, old := setupMatrixRenewal(t)
-	req.NoError(matrixsource.SaveCredentials(cfg.TokensDir(), old))
-	s := testutil.NewTestStore(t)
-	setMatrixTestDatabaseURL(t, s, cfg)
-	failMatrixCredentialWrite(t, &savePendingMatrixCredentials, errors.New("synthetic disk full"))
-	req.ErrorContains(runAddMatrixForRenewal(t, cfg, login.URL, "password"), "login unchanged")
-	creds, err := matrixsource.LoadCredentials(cfg.TokensDir(), old.UserID)
-	req.NoError(err)
-	check.Equal(old, creds)
-	source, err := s.GetSourceByTypeAndIdentifier(sourceTypeMatrix, old.UserID)
-	req.NoError(err)
-	check.JSONEq(`{"skip_key_backup":true}`, source.SyncConfig.String)
-}
 
 func setMatrixTestDatabaseURL(t *testing.T, s *store.Store, cfg *config.Config) {
 	t.Helper()

@@ -145,7 +145,6 @@ func TestMatrixPlaceholderDiscoveryBackfillPagingAndRetirement(t *testing.T) {
 	req.NoError(err)
 	check.Empty(page)
 	check.Equal(ids[6], scanned)
-	req.NoError(s.SetMessageMetadataContext(t.Context(), ids[3], sql.NullString{String: `{"matrix_event_type":"m.room.message"}`, Valid: true}))
 	_, err = s.DB().Exec(s.Rebind(`UPDATE message_raw SET raw_data = ?, compression = 'zlib' WHERE message_id = ?`), []byte("invalid compressed data"), ids[4])
 	req.NoError(err)
 	req.NoError(s.SetMessageMetadataContext(t.Context(), ids[4], sql.NullString{String: `{"matrix_event_type":"m.room.encrypted"}`, Valid: true}))
