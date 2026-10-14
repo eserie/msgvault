@@ -133,9 +133,10 @@ func TestMatrixPlaceholderDiscoveryAndBackfill(t *testing.T) {
 
 func TestMatrixPlaceholderPaging(t *testing.T) {
 	req, check := require.New(t), assert.New(t)
-	s, sourceID, convID, ids := setupMatrixPlaceholders(t)
-	_, err := s.MatrixPlaceholderRooms(t.Context(), sourceID, nil, nil)
-	req.NoError(err)
+	s, _, convID, ids := setupMatrixPlaceholders(t)
+	for i, eventType := range []string{"m.room.encrypted", "m.room.encrypted", "m.room.encrypted", "m.room.message", "", "m.room.encrypted", "m.room.encrypted"} {
+		req.NoError(s.SetMessageMetadataContext(t.Context(), ids[i], sql.NullString{String: fmt.Sprintf(`{"matrix_event_type":%q}`, eventType), Valid: true}))
+	}
 	page, scanned, err := s.MatrixPlaceholders(t.Context(), convID, ids[0], 1)
 	req.NoError(err)
 	req.Len(page, 1)
