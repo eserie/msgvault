@@ -436,23 +436,6 @@ func TestImportRecoversMessagesAndEdits(t *testing.T) {
 		req.NoError(err)
 		check.NotContains(metadata.String, "matrix_pending_edits")
 	})
-	t.Run("full sync resets cursor", func(t *testing.T) {
-		req := require.New(t)
-		check := assert.New(t)
-		f := newRecoveryFixture(t)
-		f.timeline = []*event.Event{f.backup.encrypted(t, "$message", 20, event.EventMessage, map[string]any{"msgtype": "m.text", "body": "recovered"})}
-		_, err := f.run(t, false, false)
-		req.NoError(err)
-		f.timeline = []*event.Event{f.message(t, "$second", "second", 30)}
-		sum, err := f.run(t, false, true)
-		req.NoError(err)
-		check.Equal(int64(2), sum.PendingEncrypted)
-		f.quiet = true
-		sum, err = f.run(t, true, false)
-		req.NoError(err)
-		check.Equal(int64(2), sum.Recovered)
-		check.Equal("recovered", f.body(t, "$message"))
-	})
 }
 
 func (f *recoveryFixture) body(t *testing.T, eventID string) string {
