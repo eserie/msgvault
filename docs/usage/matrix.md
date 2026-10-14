@@ -1,5 +1,5 @@
 ---
-last_edited: "2026-10-12"
+last_edited: "2026-10-14"
 title: Matrix
 description: Archive Matrix room history with keys from your account's backup.
 ---
@@ -98,9 +98,15 @@ available to keyword, semantic, and people workflows enabled for the archive.
 
 ## Media behavior and limits
 
-The first sync after upgrading discovers media in previously archived messages and saves a completion marker for the account and configured room scope. Later syncs skip this scan until `rooms` or `exclude_rooms` changes. `sync-matrix --full` repeats discovery and re-fetches complete joined-room history.
+After upgrading, each sync scans up to 100 previously archived messages without media markers and saves its progress. Later syncs resume the scan until it completes for the account and configured room scope. Temporary lookup failures get another scan pass. Changing `rooms` or `exclude_rooms` restarts discovery. `sync-matrix --full` restarts discovery and re-fetches complete joined-room history.
 
-By default, eligible media is downloaded for direct chats and groups with at most 20 participants, with a 250 MiB per-file cap. `--no-media` records eligible media as pending without downloading bytes. Excluded media is skipped. Later syncs fetch pending media, including interrupted downloads and temporary failures such as 408, 425, 429, 5xx, timeouts and connection errors. Transient failures stay pending and retry on normal syncs after a growing backoff of 1, 2, 4, 8, 16, then 24 hours. Later failures keep the 24-hour backoff. File access denied, missing files, hash mismatches and decryption errors stay failed and retry on normal syncs after one week. `--full` bypasses both waits. An invalid or expired account token stops the sync. The summary counts outstanding pending and failed media for the selected account and rooms. Each media item is attempted once per run; content-addressed storage avoids duplicate files.
+By default, eligible media is downloaded for direct chats and groups with at most 20 participants, with a 250 MiB per-file cap. `--no-media` records eligible media as pending without downloading bytes. Excluded media is skipped. The summary separates media downloaded this sync from outstanding pending and failed media for the selected account and rooms. Each media item is attempted once per run; content-addressed storage avoids duplicate files.
+
+### Retry timing
+
+- Temporary failures such as 408, 425, 429, 5xx, timeouts and connection errors stay pending. Normal syncs retry after 1, 2, 4, 8, 16, then 24 hours. Later failures keep the 24-hour wait.
+- File access denied, missing files, hash mismatches and decryption errors stay failed. Normal syncs retry after one week. An edit that changes the media URL or encryption details starts a fresh attempt.
+- `--full` bypasses both waits. An invalid or expired account token stops the sync.
 
 A homeserver without the authenticated media endpoint returns `M_UNRECOGNIZED`. Sync prints one warning and continues archiving messages. Media downloads stop for the rest of that run, and eligible items stay pending.
 

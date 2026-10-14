@@ -108,42 +108,15 @@ func (s *Store) listRetryableAttachmentMessages(
 }
 
 // listRetryableAttachmentMessagesContext honors cancellation during listRetryableAttachmentMessages.
-func (s *Store) listRetryableAttachmentMessagesContext(
-	ctx context.Context, sourceID int64, providerPrefix string, policy attachmentpolicy.Policy,
+func (s *Store) listRetryableAttachmentMessagesContext(ctx context.Context,
+	sourceID int64, providerPrefix string, policy attachmentpolicy.Policy,
 ) ([]PendingAttachmentMessage, error) {
-	return s.listRetryableAttachmentMessagesPageContext(ctx, sourceID, providerPrefix, policy, 0, 0)
-}
-
-func (s *Store) listRetryableAttachmentMessagesPageContext(
-	ctx context.Context,
-	sourceID int64,
-	providerPrefix string,
-	policy attachmentpolicy.Policy,
-	afterID int64,
-	limit int,
-) ([]PendingAttachmentMessage, error) {
-	where := " AND COALESCE(a.media_type, '') <> 'link'"
-	args := []any{sourceID, providerPrefix + "%"}
-	if policy.DisabledReason != "" || policy.Scope == attachmentpolicy.ScopeNone {
-		where += " AND COALESCE(a.attachment_state, '') <> 'skipped'"
-	} else {
-		if policy.MaxBytes > 0 {
-			where += " AND (COALESCE(a.attachment_state, '') <> 'skipped' OR COALESCE(a.size, 0) <= ?)"
-			args = append(args, policy.MaxBytes)
-		}
-		if policy.Scope == attachmentpolicy.ScopeDirect {
-			allowedTypes := "('direct_chat', 'group_chat')"
-			if providerPrefix == "matrix:" {
-				allowedTypes = "('direct_chat')"
-			}
-			where += " AND (COALESCE(a.attachment_state, '') <> 'skipped' OR c.conversation_type IN " + allowedTypes + ")"
-		}
-	}
-	query := `
+	rows, err := s.db.QueryContext(ctx, `
 		SELECT m.id, c.id, m.source_message_id, c.source_conversation_id,
 		       c.conversation_type, COALESCE(c.participant_count, 0),
 		       COALESCE(a.attachment_state, ''), COALESCE(a.size, 0),
-		       a.storage_path, COALESCE(CAST(c.metadata AS TEXT), ''), a.id
+		       COALESCE(a.content_hash, ''), a.storage_path,
+		       COALESCE(a.media_type, ''), COALESCE(CAST(c.metadata AS TEXT), '')
 		FROM messages m
 		JOIN conversations c ON c.id = m.conversation_id
 		JOIN attachments a ON a.message_id = m.id
@@ -151,73 +124,43 @@ func (s *Store) listRetryableAttachmentMessagesPageContext(
 		  AND NOT EXISTS (SELECT 1 FROM source_merge_archive_only_messages am WHERE am.message_id = m.id)
 		  AND NOT EXISTS (SELECT 1 FROM source_merge_preserved_attachments spa WHERE spa.attachment_id = a.id)
 		  AND a.source_attachment_id LIKE ?
-		  AND COALESCE(a.content_hash, '') = ''
-		  AND COALESCE(a.attachment_state, '') IN ('', 'pending', 'failed', 'skipped')
-		` + where
-	if limit > 0 {
-		query += " AND (m.id > ? OR (m.id = ? AND a.id > ?))"
+		ORDER BY m.id, a.id
+	`, sourceID, providerPrefix+"%")
+	if err != nil {
+		return nil, err
 	}
-	query += " ORDER BY m.id, a.id"
-	if limit > 0 {
-		query += " LIMIT ?"
-	}
-
+	defer func() { _ = rows.Close() }()
 	var items []PendingAttachmentMessage
 	var lastAdded int64
-	afterAttachmentID := int64(1<<63 - 1)
-	// Roster and CAS checks stay in Go; bounded pages advance past rejected rows.
-	for {
-		pageArgs := append([]any(nil), args...)
-		if limit > 0 {
-			pageArgs = append(pageArgs, afterID, afterID, afterAttachmentID, limit)
-		}
-		rows, err := s.db.QueryContext(ctx, query, pageArgs...)
-		if err != nil {
+	for rows.Next() {
+		var item PendingAttachmentMessage
+		var state attachmentpolicy.DownloadState
+		var size int64
+		var contentHash, storagePath, mediaType, conversationMetadata string
+		if err := rows.Scan(&item.MessageID, &item.ConversationID, &item.SourceMessageID, &item.ChatID,
+			&item.ConversationType, &item.ParticipantCount, &state, &size,
+			&contentHash, &storagePath, &mediaType, &conversationMetadata); err != nil {
 			return nil, err
 		}
-		var scanned int
-		for rows.Next() {
-			var item PendingAttachmentMessage
-			var state attachmentpolicy.DownloadState
-			var size int64
-			var storagePath, conversationMetadata string
-			if err := rows.Scan(&item.MessageID, &item.ConversationID, &item.SourceMessageID, &item.ChatID,
-				&item.ConversationType, &item.ParticipantCount, &state, &size,
-				&storagePath, &conversationMetadata, &afterAttachmentID); err != nil {
-				_ = rows.Close()
-				return nil, err
-			}
-			afterID = item.MessageID
-			scanned++
-			item.ParticipantCount = policyParticipantCount(providerPrefix, item.ParticipantCount, conversationMetadata, policy)
-			if item.MessageID == lastAdded || casAttachmentDownloaded(AttachmentRef{StoragePath: storagePath}) {
-				continue
-			}
-			conversation := attachmentpolicy.Conversation{Type: item.ConversationType, ParticipantCount: item.ParticipantCount}
-			if state == attachmentpolicy.StateSkipped {
-				if providerPrefix == "matrix:" {
-					if policy.MaxParticipants > 0 && item.ParticipantCount > policy.MaxParticipants {
-						continue
-					}
-				} else if !policy.Allows(conversation, size) {
-					continue
-				}
-			}
+		item.ParticipantCount = policyParticipantCount(
+			providerPrefix, item.ParticipantCount, conversationMetadata, policy,
+		)
+		if item.MessageID == lastAdded || mediaType == "link" || contentHash != "" ||
+			casAttachmentDownloaded(AttachmentRef{StoragePath: storagePath}) {
+			continue
+		}
+		eligible := attachmentpolicy.RetryEligible(state)
+		if state == attachmentpolicy.StateSkipped {
+			eligible = policy.Allows(attachmentpolicy.Conversation{
+				Type: item.ConversationType, ParticipantCount: item.ParticipantCount,
+			}, size)
+		}
+		if eligible {
 			items = append(items, item)
 			lastAdded = item.MessageID
-			if limit > 0 && len(items) == limit {
-				break
-			}
-		}
-		err = rows.Err()
-		_ = rows.Close()
-		if err != nil {
-			return nil, err
-		}
-		if limit <= 0 || scanned < limit || len(items) == limit {
-			return items, nil
 		}
 	}
+	return items, rows.Err()
 }
 
 // ListBeeperRetryableAttachmentMessages returns only unfinished Beeper media.
