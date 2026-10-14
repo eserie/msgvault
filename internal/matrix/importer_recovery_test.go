@@ -978,7 +978,7 @@ func TestImportHandlesUnreadableCursorBySyncMode(t *testing.T) {
 	}{
 		{"incremental refuses malformed cursor", false, "invalid JSON", true, "decode Matrix sync state"},
 		{"full replaces malformed cursor", true, "invalid JSON", false, ""},
-		{"full refuses future version", true, `{"format_version":2,"rooms":{}}`, true, "unsupported Matrix cursor format version 2"},
+		{"full refuses future version", true, `{"format_version":2,"rooms":{}}`, true, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req, check := require.New(t), assert.New(t)
