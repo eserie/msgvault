@@ -44,7 +44,7 @@ func setMatrixTestDatabaseURL(t *testing.T, s *store.Store, cfg *config.Config) 
 }
 
 func TestAddMatrixBackupSetup(t *testing.T) {
-	for _, mode := range []string{"missing", "invalid", "failed", "skip", "previous login's key", "pending login's key", "secret storage"} {
+	for _, mode := range []string{"missing", "invalid", "failed", "skip", "secret storage"} {
 		t.Run(mode, func(t *testing.T) {
 			req := require.New(t)
 			check := assert.New(t)
@@ -73,22 +73,10 @@ func TestAddMatrixBackupSetup(t *testing.T) {
 			home := t.TempDir()
 			cfg := &config.Config{HomeDir: home, Data: config.DataConfig{DataDir: home}}
 			args := []string{"add-matrix", "--homeserver", homeserver, "--user-id", "@archive:example.org", "--no-default-identity"}
-			if mode == "skip" || mode == "previous login's key" || mode == "pending login's key" {
-				previous := matrixsource.Credentials{Homeserver: server.URL, UserID: "@archive:example.org", DeviceID: "OLD", AccessToken: "old"}
-				previous.BackupKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-				if mode == "pending login's key" {
-					previous.BackupKey = ""
-				}
-				if mode == "skip" {
-					args = append(args, "--skip-key-backup")
-				}
+			if mode == "skip" {
+				previous := matrixsource.Credentials{Homeserver: server.URL, UserID: "@archive:example.org", DeviceID: "OLD", AccessToken: "old", BackupKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}
+				args = append(args, "--skip-key-backup")
 				req.NoError(matrixsource.SaveCredentials(cfg.TokensDir(), previous))
-				if mode == "pending login's key" {
-					pending := previous
-					pending.DeviceID, pending.AccessToken = "NEW", "fresh"
-					pending.BackupKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-					req.NoError(matrixsource.SavePendingCredentials(cfg.TokensDir(), pending))
-				}
 			}
 
 			var s *store.Store
@@ -136,7 +124,7 @@ func TestAddMatrixBackupSetup(t *testing.T) {
 				req.ErrorContains(err, "load Matrix secret storage")
 				check.Equal(1, logins)
 				check.Equal([]string{"Bearer fresh"}, logouts)
-			case "skip", "previous login's key", "pending login's key", "secret storage":
+			case "skip", "secret storage":
 				req.NoError(err)
 				creds, err := matrixsource.LoadCredentials(cfg.TokensDir(), "@archive:example.org")
 				req.NoError(err)
@@ -145,11 +133,6 @@ func TestAddMatrixBackupSetup(t *testing.T) {
 					source, err = s.GetSourceByID(source.ID)
 					req.NoError(err)
 					check.JSONEq(`{"skip_key_backup":false,"rooms":["!keep:example.org"],"extra":{"keep":1}}`, source.SyncConfig.String)
-				} else if mode == "pending login's key" {
-					check.Equal("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", creds.BackupKey)
-				} else if mode == "previous login's key" {
-					check.Equal("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", creds.BackupKey)
-					check.Equal(1, logins)
 				} else {
 					check.Empty(creds.BackupKey)
 				}

@@ -650,43 +650,66 @@ func TestImportRecoveryResumesBeforePlaceholderCheckpoint(t *testing.T) {
 
 func TestImportRecoveryBoundsRetriesAndAttemptsNewEvents(t *testing.T) {
 	t.Run("bounded retries", func(t *testing.T) {
-		req := require.New(t)
-		check := assert.New(t)
-		f := newRecoveryFixture(t)
-		f.extraRooms = map[string][]*event.Event{}
-		const roomCount = 3 * recoveryRetryLimit
-		for i := range roomCount {
-			evt := f.message(t, "$missing"+strconv.Itoa(i), "missing", 10)
-			evt.Content.AsEncrypted().SessionID = "absent"
-			f.extraRooms[fmt.Sprintf("!missing%d:example.org", i)] = []*event.Event{evt}
+		for _, mode := range []string{"missing sessions", "failed room fetches"} {
+			t.Run(mode, func(t *testing.T) {
+				req := require.New(t)
+				check := assert.New(t)
+				f := newRecoveryFixture(t)
+				f.extraRooms = map[string][]*event.Event{}
+				f.backup.roomStatuses = map[string]int{}
+				const roomCount = 3 * recoveryRetryLimit
+				for i := range roomCount {
+					evt := f.message(t, "$missing"+strconv.Itoa(i), "missing", 10)
+					roomID := fmt.Sprintf("!missing%d:example.org", i)
+					evt.RoomID = id.RoomID(roomID)
+					if mode == "missing sessions" {
+						evt.Content.AsEncrypted().SessionID = "absent"
+					} else {
+						f.backup.roomStatuses[roomID] = http.StatusServiceUnavailable
+					}
+					f.extraRooms[roomID] = []*event.Event{evt}
+				}
+				if mode == "failed room fetches" {
+					_, err := f.run(t, false, false)
+					req.NoError(err)
+					f.quiet = true
+					for round := range 3 {
+						sum, err := f.run(t, true, false)
+						req.ErrorContains(err, "recover Matrix room")
+						check.Equal(int64(roomCount), sum.PendingEncrypted)
+						check.Equal(roomCount+round*recoveryRetryLimit, f.backup.roomFetches)
+					}
+					return
+				}
+				_, err := f.run(t, true, false)
+				req.NoError(err)
+				check.Equal(roomCount, f.backup.roomFetches)
+				f.quiet = true
+				_, err = f.run(t, true, false)
+				req.NoError(err)
+				check.Equal(roomCount, f.backup.roomFetches)
+				f.backup.etag = "2"
+				_, err = f.run(t, true, false)
+				req.NoError(err)
+				check.Equal(roomCount, f.backup.roomFetches, "cooldown holds even when the backup changes")
+				f.ageAttempts(t)
+				_, err = f.run(t, true, false)
+				req.NoError(err)
+				check.Equal(roomCount+recoveryRetryLimit, f.backup.roomFetches)
+				_, err = f.run(t, true, false)
+				req.NoError(err)
+				check.Equal(roomCount+2*recoveryRetryLimit, f.backup.roomFetches)
+				f.quiet = false
+				f.timeline = []*event.Event{f.message(t, "$new", "new", 20)}
+				_, err = f.run(t, true, false)
+				req.NoError(err)
+				check.Equal("new", f.body(t, "$new"))
+				check.Equal(2*roomCount+1, f.backup.roomFetches, "all old rooms have retried once, plus the new room")
+				_, err = f.run(t, true, true)
+				req.NoError(err)
+				check.Equal(3*roomCount+1, f.backup.roomFetches, "full sync forces all pending rooms")
+			})
 		}
-		_, err := f.run(t, true, false)
-		req.NoError(err)
-		check.Equal(roomCount, f.backup.roomFetches)
-		f.quiet = true
-		_, err = f.run(t, true, false)
-		req.NoError(err)
-		check.Equal(roomCount, f.backup.roomFetches)
-		f.backup.etag = "2"
-		_, err = f.run(t, true, false)
-		req.NoError(err)
-		check.Equal(roomCount, f.backup.roomFetches, "cooldown holds even when the backup changes")
-		f.ageAttempts(t)
-		_, err = f.run(t, true, false)
-		req.NoError(err)
-		check.Equal(roomCount+recoveryRetryLimit, f.backup.roomFetches)
-		_, err = f.run(t, true, false)
-		req.NoError(err)
-		check.Equal(roomCount+2*recoveryRetryLimit, f.backup.roomFetches)
-		f.quiet = false
-		f.timeline = []*event.Event{f.message(t, "$new", "new", 20)}
-		_, err = f.run(t, true, false)
-		req.NoError(err)
-		check.Equal("new", f.body(t, "$new"))
-		check.Equal(2*roomCount+1, f.backup.roomFetches, "all old rooms have retried once, plus the new room")
-		_, err = f.run(t, true, true)
-		req.NoError(err)
-		check.Equal(3*roomCount+1, f.backup.roomFetches, "full sync forces all pending rooms")
 	})
 	t.Run("new placeholder retries after backup version failure", func(t *testing.T) {
 		req := require.New(t)
@@ -730,29 +753,6 @@ func TestImportRecoveryBoundsRetriesAndAttemptsNewEvents(t *testing.T) {
 		_, err = f.run(t, true, false)
 		req.NoError(err)
 		check.Equal("old", f.body(t, "$old"))
-	})
-	t.Run("failed rooms stay within retry limit", func(t *testing.T) {
-		req, check := require.New(t), assert.New(t)
-		f := newRecoveryFixture(t)
-		f.extraRooms = map[string][]*event.Event{}
-		f.backup.roomStatuses = map[string]int{}
-		const roomCount = recoveryRetryLimit + 3
-		for i := range roomCount {
-			roomID := fmt.Sprintf("!failed%d:example.org", i)
-			evt := f.message(t, "$failed"+strconv.Itoa(i), "failed", 10)
-			evt.RoomID = id.RoomID(roomID)
-			f.extraRooms[roomID] = []*event.Event{evt}
-			f.backup.roomStatuses[roomID] = http.StatusServiceUnavailable
-		}
-		_, err := f.run(t, false, false)
-		req.NoError(err)
-		f.quiet = true
-		for round := range 3 {
-			sum, err := f.run(t, true, false)
-			req.ErrorContains(err, "recover Matrix room")
-			check.Equal(int64(roomCount), sum.PendingEncrypted)
-			check.Equal(roomCount+round*recoveryRetryLimit, f.backup.roomFetches)
-		}
 	})
 	t.Run("retired relation retries after backup change", func(t *testing.T) {
 		req, check := require.New(t), assert.New(t)
