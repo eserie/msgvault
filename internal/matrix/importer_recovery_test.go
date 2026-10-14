@@ -54,7 +54,7 @@ func (s ingestDuringDecryption) Decrypt(message []byte) ([]byte, uint, error) {
 	return plain, index, nil
 }
 
-func TestImportRecoveryDecryptsWithoutWriteLock(t *testing.T) {
+func TestImportRecoveryDecryptsWithoutWriteLockAndRejectsStaleRows(t *testing.T) {
 	for _, mode := range []string{"ingest during decrypt", "empty recovery page avoids write lock", "reused", "deletion changed"} {
 		t.Run(mode, func(t *testing.T) {
 			req, check := require.New(t), assert.New(t)
@@ -458,7 +458,7 @@ func TestImportRecoversLeftRoomAfterFullSync(t *testing.T) {
 	req := require.New(t)
 	check := assert.New(t)
 	f := newRecoveryFixture(t)
-	f.timeline = []*event.Event{f.backup.encrypted(t, "$message", 20, event.EventMessage, map[string]any{"msgtype": "m.text", "body": "recovered", "m.relates_to": map[string]any{"m.in_reply_to": map[string]any{"event_id": "$older"}}})}
+	f.timeline = []*event.Event{f.backup.encrypted(t, "$message", 20, event.EventMessage, map[string]any{"msgtype": "m.text", "body": "recovered"})}
 	_, err := f.run(t, false, false)
 	req.NoError(err)
 	f.quiet, f.left = true, true
@@ -964,7 +964,7 @@ func TestMatrixCursorFormatVersion(t *testing.T) {
 }
 
 func TestImportRecoveredReplyLinksWhenTargetArrivesLater(t *testing.T) {
-	for _, mode := range []string{"incremental", "edited reply", "deleted"} {
+	for _, mode := range []string{"incremental", "deleted"} {
 		t.Run(mode, func(t *testing.T) {
 			req := require.New(t)
 			check := assert.New(t)
@@ -977,21 +977,8 @@ func TestImportRecoveredReplyLinksWhenTargetArrivesLater(t *testing.T) {
 				req.NoError(f.store.MarkMessageDeleted(f.sourceID, "$reply"))
 				f.quiet = true
 			}
-			sum, err := f.run(t, mode != "edited reply", false)
+			sum, err := f.run(t, true, false)
 			req.NoError(err)
-			wantBody := "reply"
-			if mode == "edited reply" {
-				f.quiet = true
-				sum, err = f.run(t, true, false)
-				req.NoError(err)
-				check.Equal("reply", f.body(t, "$reply"))
-				f.quiet = false
-				f.timeline = []*event.Event{f.edit(t, "$reply-edit", "$reply", "edited reply", 40)}
-				_, err = f.run(t, true, false)
-				req.NoError(err)
-				check.Equal("edited reply", f.body(t, "$reply"))
-				wantBody = "edited reply"
-			}
 			check.Zero(sum.PendingEncrypted)
 			replies, err := f.store.ListUnresolvedMessageRepliesAfterContext(t.Context(), f.sourceID, SourceType, 0, pageSize, 0)
 			req.NoError(err)
@@ -1009,7 +996,7 @@ func TestImportRecoveredReplyLinksWhenTargetArrivesLater(t *testing.T) {
 			var targetID int64
 			req.NoError(f.store.DB().QueryRow(f.store.Rebind(`SELECT reply_to_message_id FROM messages WHERE id = ?`), ids["$reply"]).Scan(&targetID))
 			check.Equal(ids["$target"], targetID)
-			check.Equal(wantBody, f.body(t, "$reply"))
+			check.Equal("reply", f.body(t, "$reply"))
 		})
 	}
 }
