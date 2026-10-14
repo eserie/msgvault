@@ -21,11 +21,51 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.kenn.io/msgvault/internal/attachmentpolicy"
+	"go.kenn.io/msgvault/internal/query"
 	"go.kenn.io/msgvault/internal/store"
 	matrixattachment "maunium.net/go/mautrix/crypto/attachment"
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
 )
+
+func TestImportMediaCASShapedURLIsNotLocalStorage(t *testing.T) {
+	for _, encrypted := range []bool{false, true} {
+		for _, state := range []attachmentpolicy.DownloadState{attachmentpolicy.StatePending, attachmentpolicy.StateSkipped, attachmentpolicy.StateFailed} {
+			t.Run(fmt.Sprintf("encrypted=%t/%s", encrypted, state), func(t *testing.T) {
+				req, check := require.New(t), assert.New(t)
+				f := newRecoveryFixture(t)
+				hash := strings.Repeat("d", 64)
+				uri := "dd/" + hash
+				content := &event.MessageEventContent{MsgType: event.MsgFile, Body: "file", URL: id.ContentURIString(uri)}
+				if encrypted {
+					content.URL = ""
+					content.File = &event.EncryptedFileInfo{EncryptedFile: *matrixattachment.NewEncryptedFile(), URL: id.ContentURIString(uri)}
+				}
+				raw, err := json.Marshal(&event.Event{ID: "$media", Sender: "@member:example.org", Type: event.EventMessage, Content: event.Content{Parsed: content}})
+				req.NoError(err)
+				f.timeline = []*event.Event{matrixTestEvent(t, string(raw))}
+				opts := ImportOptions{UserID: "@archive:example.org", AttachmentsDir: t.TempDir(), NoMedia: state == attachmentpolicy.StatePending}
+				if state == attachmentpolicy.StateSkipped {
+					opts.MediaPolicy.Scope = attachmentpolicy.ScopeNone
+				}
+				_, err = NewImporter(f.store, backupRuntime(t, f.server.URL, f.backup)).Import(t.Context(), opts)
+				req.NoError(err)
+				ids, err := f.store.MessageExistsBatch(f.sourceID, []string{"$media"})
+				req.NoError(err)
+				refs, err := f.store.MessageMatrixAttachments(ids["$media"])
+				req.NoError(err)
+				req.Len(refs, 1)
+				ref := refs["matrix:"+uri]
+				check.Equal(state, ref.State)
+				check.Equal(ref.SourceAttachmentID, ref.StoragePath)
+				check.Empty(ref.ContentHash)
+				matches, err := query.NewEngine(f.store.DB(), f.store.IsPostgreSQL()).GetAttachmentsByHash(t.Context(), hash)
+				req.NoError(err)
+				check.Empty(matches)
+			})
+		}
+	}
+}
 
 func TestImportMediaCaptionEditKeepsSizeEstimate(t *testing.T) {
 	req, check := require.New(t), assert.New(t)

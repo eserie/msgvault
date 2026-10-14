@@ -1163,7 +1163,7 @@ func TestImporterMediaEditReplacesAttachmentAndStoresEmptyFiles(t *testing.T) {
 	req.NoError(err)
 	restored := attachments["matrix:mxc://example.org/original"]
 	check.Equal(attachmentpolicy.StatePending, restored.State)
-	check.Equal("mxc://example.org/original", restored.StoragePath)
+	check.Equal(restored.SourceAttachmentID, restored.StoragePath)
 	check.Equal(int64(2), sum.AttachmentsDownloaded, "restoring the original adds no download to this run")
 	req.NoError(imp.retryArchivedMedia(t.Context(), source.ID, opts, sum))
 	attachments, err = st.MessageMatrixAttachments(messageIDs["$media"])

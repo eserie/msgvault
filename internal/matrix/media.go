@@ -344,11 +344,12 @@ func (imp *Importer) prepareMedia(ctx context.Context, messageID int64, content 
 		mimeType = content.Info.MimeType
 	}
 	ref := store.AttachmentRef{
-		Filename: content.GetFileName(), MimeType: mimeType, StoragePath: string(uri), Size: int(size),
+		Filename: content.GetFileName(), MimeType: mimeType, Size: int(size),
 		SourceAttachmentID: "matrix:" + string(uri), MediaType: strings.TrimPrefix(string(content.MsgType), "m."),
 		Role: store.AttachmentRoleStandalone, RoleSource: store.AttachmentRoleSourceProviderExplicit,
 		State: attachmentpolicy.StatePending,
 	}
+	ref.StoragePath = ref.SourceAttachmentID
 	ref.SourcePartKey = ref.SourceAttachmentID
 	if eventType == event.EventSticker {
 		ref.Role = store.AttachmentRoleSticker
