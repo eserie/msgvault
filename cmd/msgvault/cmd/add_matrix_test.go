@@ -90,7 +90,7 @@ func TestAddMatrixBackupSetup(t *testing.T) {
 				check.Zero(logins)
 				check.Empty(logouts)
 			case "failed":
-				req.Error(err)
+				req.ErrorContains(err, "load Matrix secret storage: failed to get default key account data")
 				check.Equal(1, logins)
 				check.Equal([]string{"Bearer fresh"}, logouts)
 			case "skip", "previous login's key":

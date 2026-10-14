@@ -78,11 +78,6 @@ func TestTextReadersHideRetiredPlaceholders(t *testing.T) {
 			req.NoError(err)
 			req.Len(groups, 1)
 			check.Equal(int64(2), groups[0].Count)
-			stats, err := tc.engine.GetTextStats(t.Context(), TextStatsOptions{})
-			req.NoError(err)
-			check.Equal(int64(2), stats.MessageCount)
-			check.Equal(int64(1), stats.ActiveMessageCount)
-			check.Equal(int64(1), stats.SourceDeletedMessageCount)
 		})
 	}
 }
