@@ -102,17 +102,19 @@ After upgrading, each sync scans up to 10,000 previously archived message rows w
 
 By default, eligible media is downloaded for direct chats and groups with at most 20 participants, with a 250 MiB per-file cap. `--no-media` records eligible media as pending without downloading bytes. Pending and failed media excluded by current policy becomes skipped, including during `--no-media` runs and retry backoff. The summary separates media downloaded this sync from outstanding pending and failed media for the selected account and rooms. Each media item is attempted once per run; content-addressed storage avoids duplicate files.
 
+Downloads buffer one file in memory up to the configured per-file cap, 250 MiB by default. Set `max_media_mb` to fit the daemon's available memory.
+
 ### Retry timing
 
 - Temporary failures such as 408, 425, 429, 5xx, timeouts and connection errors stay pending. Normal syncs retry after 1, 2, 4, 8, 16, then 24 hours. Later failures keep the 24-hour wait.
 - File access denied, missing files, hash mismatches and decryption errors stay failed. Normal syncs retry after one week. An edit that changes the media URL or encryption details starts a fresh attempt.
 - `--full` bypasses both waits. An invalid or expired account token stops the sync.
 
-A homeserver without the authenticated media endpoint returns `M_UNRECOGNIZED`. Sync prints one warning and continues archiving messages. Media downloads stop for the rest of that run, and eligible items stay pending.
+Media downloads use the authenticated endpoint added in [Matrix 1.11](https://matrix.org/docs/spec-guides/authed-media-servers/). Older homeservers without that endpoint return `M_UNRECOGNIZED`. Sync prints one warning and continues archiving messages. Media downloads stop for the rest of that run, and eligible items stay pending.
 
 Three consecutive transient download failures also stop media downloads for the rest of the run. Remaining items stay pending for a later sync.
 
-Media from messages later redacted at the source is still fetched when the homeserver still serves it.
+msgvault retains archived message data after source redaction or deletion. Later media discovery can still fetch a saved URL when current policy allows it and the homeserver retains the file.
 
 Redacting an edit restores the earlier event's media under the current policy. If that media was already attempted in the same run, the restored attachment stays pending until a later sync. Otherwise, sync downloads it immediately. `--no-media` leaves eligible media pending for a later sync. Restoration requires the homeserver to still have the media.
 
