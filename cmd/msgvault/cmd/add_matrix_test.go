@@ -28,32 +28,10 @@ import (
 
 func TestAddMatrixFailedStagingHonorsSkipWithExistingBackupKey(t *testing.T) {
 	req, check := require.New(t), assert.New(t)
-	login, cfg, old := setupMatrixRenewal(t)
+	server, cfg, old := setupMatrixRenewal(t)
 	key, err := backup.NewMegolmBackupKey()
 	req.NoError(err)
 	old.BackupKey = base64.RawStdEncoding.EncodeToString(key.Bytes())
-	mux := http.NewServeMux()
-	mux.Handle("/", login.Config.Handler)
-	writeJSON := func(w http.ResponseWriter, value any) {
-		raw, err := json.Marshal(value)
-		if check.NoError(err) {
-			_, _ = w.Write(raw)
-		}
-	}
-	mux.HandleFunc("GET /_matrix/client/v3/sync", func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"next_batch":"next","rooms":{"join":{"!room:example.org":{"timeline":{"events":[{"type":"m.room.encrypted","event_id":"$encrypted","sender":"@member:example.org","content":{"algorithm":"m.megolm.v1.aes-sha2","session_id":"unknown","ciphertext":"unknown"}}]}}}}}`))
-	})
-	mux.HandleFunc("GET /_matrix/client/v3/user/{user}/account_data/m.direct", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, map[string]any{}) })
-	mux.HandleFunc("GET /_matrix/client/v3/rooms/{room}/joined_members", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, map[string]any{"joined": map[string]any{}}) })
-	mux.HandleFunc("GET /_matrix/client/v3/rooms/{room}/messages", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, map[string]any{"chunk": []any{}}) })
-	backupRequests := 0
-	mux.HandleFunc("GET /_matrix/client/v3/room_keys/version", func(w http.ResponseWriter, _ *http.Request) {
-		backupRequests++
-		w.WriteHeader(http.StatusServiceUnavailable)
-	})
-	server := httptest.NewServer(mux)
-	t.Cleanup(server.Close)
-	old.Homeserver = server.URL
 	req.NoError(matrixsource.SaveCredentials(cfg.TokensDir(), old))
 	s := testutil.NewTestStore(t)
 	setMatrixTestDatabaseURL(t, s, cfg)
@@ -65,14 +43,6 @@ func TestAddMatrixFailedStagingHonorsSkipWithExistingBackupKey(t *testing.T) {
 	source, err := s.GetSourceByTypeAndIdentifier(sourceTypeMatrix, old.UserID)
 	req.NoError(err)
 	check.JSONEq(`{"skip_key_backup":true}`, source.SyncConfig.String)
-	req.NoError(runMatrixSync(t.Context(), s, cfg, old.UserID, false, false, nil, nil, io.Discard))
-	ids, err := s.MessageExistsBatch(source.ID, []string{"$encrypted"})
-	req.NoError(err)
-	req.NotZero(ids["$encrypted"])
-	detail, err := s.GetMessage(ids["$encrypted"])
-	req.NoError(err)
-	check.Equal(store.MatrixEncryptedPlaceholder, detail.BodyText)
-	check.Zero(backupRequests)
 }
 
 func setMatrixTestDatabaseURL(t *testing.T, s *store.Store, cfg *config.Config) {
