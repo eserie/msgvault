@@ -22,6 +22,7 @@ import (
 	"go.kenn.io/msgvault/internal/testutil"
 	"maunium.net/go/mautrix/crypto/backup"
 	"maunium.net/go/mautrix/crypto/ssss"
+	"maunium.net/go/mautrix/crypto/utils"
 	"maunium.net/go/mautrix/id"
 )
 
@@ -44,7 +45,7 @@ func setMatrixTestDatabaseURL(t *testing.T, s *store.Store, cfg *config.Config) 
 }
 
 func TestAddMatrixBackupSetup(t *testing.T) {
-	for _, mode := range []string{"missing", "invalid", "failed", "skip", "secret storage"} {
+	for _, mode := range []string{"missing", "invalid", "loader failure", "skip", "secret storage"} {
 		t.Run(mode, func(t *testing.T) {
 			req := require.New(t)
 			check := assert.New(t)
@@ -95,10 +96,8 @@ func TestAddMatrixBackupSetup(t *testing.T) {
 			switch mode {
 			case "invalid":
 				t.Setenv(clirun.EnvMatrixRecoverySecret, "invalid recovery key")
-			case "failed":
-				key, err := ssss.NewKey("")
-				req.NoError(err)
-				t.Setenv(clirun.EnvMatrixRecoverySecret, key.RecoveryKey())
+			case "loader failure":
+				t.Setenv(clirun.EnvMatrixRecoverySecret, utils.EncodeBase58RecoveryKey(make([]byte, 32)))
 			}
 			root := newTestRootCmd()
 			root.AddCommand(newAddMatrixCmd())
@@ -117,8 +116,8 @@ func TestAddMatrixBackupSetup(t *testing.T) {
 				req.ErrorContains(err, "invalid recovery key")
 				check.Zero(logins)
 				check.Empty(logouts)
-			case "failed":
-				req.ErrorContains(err, "load Matrix secret storage")
+			case "loader failure":
+				req.Error(err)
 				check.Equal(1, logins)
 				check.Equal([]string{"Bearer fresh"}, logouts)
 			case "skip", "secret storage":
