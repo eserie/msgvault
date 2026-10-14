@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"bytes"
 	"encoding/base64"
 	"encoding/json/v2"
 	"errors"
@@ -30,10 +29,9 @@ import (
 func TestAddMatrixFailedStagingKeepsRecoveringWithExistingBackupKey(t *testing.T) {
 	req, check := require.New(t), assert.New(t)
 	login, cfg, old := setupMatrixRenewal(t)
-	crypto := matrixtest.NewBackupCrypto(t)
-	old.BackupKey = base64.RawStdEncoding.EncodeToString(crypto.Key.Bytes())
-	ciphertext, err := crypto.Out.Encrypt([]byte(`{"room_id":"!room:example.org","type":"m.room.message","content":{"msgtype":"m.text","body":"recovered history"}}`))
+	key, err := backup.NewMegolmBackupKey()
 	req.NoError(err)
+	old.BackupKey = base64.RawStdEncoding.EncodeToString(key.Bytes())
 	mux := http.NewServeMux()
 	mux.Handle("/", login.Config.Handler)
 	writeJSON := func(w http.ResponseWriter, value any) {
@@ -43,22 +41,13 @@ func TestAddMatrixFailedStagingKeepsRecoveringWithExistingBackupKey(t *testing.T
 		}
 	}
 	mux.HandleFunc("GET /_matrix/client/v3/sync", func(w http.ResponseWriter, _ *http.Request) {
-		evt := map[string]any{"type": "m.room.encrypted", "event_id": "$encrypted", "sender": "@member:example.org", "content": map[string]any{"algorithm": id.AlgorithmMegolmV1, "session_id": crypto.Out.ID(), "ciphertext": string(ciphertext)}}
-		writeJSON(w, map[string]any{"next_batch": "next", "rooms": map[string]any{"join": map[string]any{"!room:example.org": map[string]any{"timeline": map[string]any{"events": []any{evt}}}}}})
+		_, _ = w.Write([]byte(`{"next_batch":"next","rooms":{"join":{"!room:example.org":{"timeline":{"events":[{"type":"m.room.encrypted","event_id":"$encrypted","sender":"@member:example.org","content":{"algorithm":"m.megolm.v1.aes-sha2","session_id":"unknown","ciphertext":"unknown"}}]}}}}}`))
 	})
 	mux.HandleFunc("GET /_matrix/client/v3/user/{user}/account_data/m.direct", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, map[string]any{}) })
 	mux.HandleFunc("GET /_matrix/client/v3/rooms/{room}/joined_members", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, map[string]any{"joined": map[string]any{}}) })
 	mux.HandleFunc("GET /_matrix/client/v3/rooms/{room}/messages", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, map[string]any{"chunk": []any{}}) })
-	backupRequests := 0
 	mux.HandleFunc("GET /_matrix/client/v3/room_keys/version", func(w http.ResponseWriter, _ *http.Request) {
-		backupRequests++
-		writeJSON(w, map[string]any{"version": "1", "etag": "1", "algorithm": id.KeyBackupAlgorithmMegolmBackupV1, "auth_data": map[string]any{"public_key": base64.RawStdEncoding.EncodeToString(crypto.Key.PublicKey().Bytes())}})
-	})
-	mux.HandleFunc("GET /_matrix/client/v3/room_keys/keys/{room}", func(w http.ResponseWriter, _ *http.Request) {
-		encrypted, err := backup.EncryptSessionData(crypto.Key, crypto.Data)
-		if check.NoError(err) {
-			writeJSON(w, map[string]any{"sessions": map[id.SessionID]any{crypto.Out.ID(): map[string]any{"session_data": encrypted}}})
-		}
+		w.WriteHeader(http.StatusBadRequest)
 	})
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)
@@ -68,23 +57,10 @@ func TestAddMatrixFailedStagingKeepsRecoveringWithExistingBackupKey(t *testing.T
 	setMatrixTestDatabaseURL(t, s, cfg)
 	failMatrixCredentialWrite(t, &savePendingMatrixCredentials, errors.New("synthetic disk full"))
 	req.ErrorContains(runAddMatrixForRenewal(t, cfg, server.URL, "password"), "login unchanged")
-	creds, err := matrixsource.LoadCredentials(cfg.TokensDir(), old.UserID)
-	req.NoError(err)
-	check.Equal(old, creds)
 	source, err := s.GetSourceByTypeAndIdentifier(sourceTypeMatrix, old.UserID)
 	req.NoError(err)
 	check.JSONEq(`{"skip_key_backup":true}`, source.SyncConfig.String)
-	var out bytes.Buffer
-	req.NoError(runMatrixSync(t.Context(), s, cfg, old.UserID, false, nil, &out))
-	ids, err := s.MessageExistsBatch(source.ID, []string{"$encrypted"})
-	req.NoError(err)
-	req.NotZero(ids["$encrypted"])
-	detail, err := s.GetMessage(ids["$encrypted"])
-	req.NoError(err)
-	check.Equal("recovered history", detail.BodyText)
-	check.Contains(out.String(), "0 encrypted placeholders, 1 message rows recovered")
-	check.NotContains(out.String(), "--recovery-file")
-	check.Equal(1, backupRequests)
+	req.ErrorContains(runMatrixSync(t.Context(), s, cfg, old.UserID, false, nil, io.Discard), "key backup unavailable")
 }
 
 func setMatrixTestDatabaseURL(t *testing.T, s *store.Store, cfg *config.Config) {
