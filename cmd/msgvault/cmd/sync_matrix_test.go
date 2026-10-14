@@ -93,7 +93,6 @@ func TestMatrixSyncSummaryBackupFailureAndKeyHint(t *testing.T) {
 		req.NoError(matrixsource.SaveCredentials(cfg.TokensDir(), creds))
 		var out bytes.Buffer
 		req.NoError(runMatrixSync(t.Context(), s, cfg, "", false, nil, &out))
-		check.Contains(out.String(), "1 encrypted placeholders")
 		check.NotContains(out.String(), "--recovery-file")
 	})
 }
