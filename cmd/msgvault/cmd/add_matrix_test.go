@@ -44,26 +44,69 @@ func setMatrixTestDatabaseURL(t *testing.T, s *store.Store, cfg *config.Config) 
 }
 
 func TestAddMatrixBackupSetup(t *testing.T) {
-	for _, mode := range []string{"missing", "invalid", "failed", "skip", "previous login's key"} {
+	for _, mode := range []string{"missing", "invalid", "failed", "skip", "previous login's key", "pending login's key", "secret storage"} {
 		t.Run(mode, func(t *testing.T) {
 			req := require.New(t)
 			check := assert.New(t)
 			server := newRenewalHomeserver(t)
+			homeserver := server.URL
+			var backupKey *backup.MegolmBackupKey
+			var recoveryKey string
+			if mode == "secret storage" {
+				key, err := ssss.NewKey("")
+				req.NoError(err)
+				backupKey, err = backup.NewMegolmBackupKey()
+				req.NoError(err)
+				mux := http.NewServeMux()
+				mux.Handle("/", server.Config.Handler)
+				matrixtest.HandleSecretStorage(t, mux, key, backupKey)
+				mux.HandleFunc("GET /_matrix/client/v3/room_keys/version", func(w http.ResponseWriter, _ *http.Request) {
+					raw, err := json.Marshal(map[string]any{"version": "1", "algorithm": id.KeyBackupAlgorithmMegolmBackupV1, "auth_data": map[string]string{"public_key": base64.RawStdEncoding.EncodeToString(backupKey.PublicKey().Bytes())}})
+					if assert.NoError(t, err) {
+						_, _ = w.Write(raw)
+					}
+				})
+				secrets := httptest.NewServer(mux)
+				t.Cleanup(secrets.Close)
+				homeserver, recoveryKey = secrets.URL, key.RecoveryKey()
+			}
 			home := t.TempDir()
 			cfg := &config.Config{HomeDir: home, Data: config.DataConfig{DataDir: home}}
-			args := []string{"add-matrix", "--homeserver", server.URL, "--user-id", "@archive:example.org", "--no-default-identity"}
-			if mode == "skip" || mode == "previous login's key" {
+			args := []string{"add-matrix", "--homeserver", homeserver, "--user-id", "@archive:example.org", "--no-default-identity"}
+			if mode == "skip" || mode == "previous login's key" || mode == "pending login's key" {
 				previous := matrixsource.Credentials{Homeserver: server.URL, UserID: "@archive:example.org", DeviceID: "OLD", AccessToken: "old"}
 				previous.BackupKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+				if mode == "pending login's key" {
+					previous.BackupKey = ""
+				}
 				if mode == "skip" {
 					args = append(args, "--skip-key-backup")
 				}
 				req.NoError(matrixsource.SaveCredentials(cfg.TokensDir(), previous))
+				if mode == "pending login's key" {
+					pending := previous
+					pending.DeviceID, pending.AccessToken = "NEW", "fresh"
+					pending.BackupKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+					req.NoError(matrixsource.SavePendingCredentials(cfg.TokensDir(), pending))
+				}
 			}
 
+			var s *store.Store
+			var source *store.Source
+			if mode == "secret storage" {
+				s = testutil.NewTestStore(t)
+				setMatrixTestDatabaseURL(t, s, cfg)
+				var err error
+				source, err = s.GetOrCreateSource(sourceTypeMatrix, "@archive:example.org")
+				req.NoError(err)
+				req.NoError(s.UpdateSourceSyncConfig(source.ID, `{"skip_key_backup":true,"rooms":["!keep:example.org"],"extra":{"keep":1}}`))
+			}
 			t.Setenv(daemonCLISubprocessEnv, strconv.Itoa(os.Getppid()))
 			t.Setenv(clirun.EnvMatrixLoginSecret, "password")
-			t.Setenv(clirun.EnvMatrixRecoverySecret, "")
+			if mode == "pending login's key" {
+				t.Setenv(clirun.EnvMatrixLoginSecret, "")
+			}
+			t.Setenv(clirun.EnvMatrixRecoverySecret, recoveryKey)
 			switch mode {
 			case "invalid":
 				t.Setenv(clirun.EnvMatrixRecoverySecret, "invalid recovery key")
@@ -93,11 +136,18 @@ func TestAddMatrixBackupSetup(t *testing.T) {
 				req.Error(err)
 				check.Equal(1, logins)
 				check.Equal([]string{"Bearer fresh"}, logouts)
-			case "skip", "previous login's key":
+			case "skip", "previous login's key", "pending login's key", "secret storage":
 				req.NoError(err)
 				creds, err := matrixsource.LoadCredentials(cfg.TokensDir(), "@archive:example.org")
 				req.NoError(err)
-				if mode == "previous login's key" {
+				if mode == "secret storage" {
+					check.Equal(base64.RawStdEncoding.EncodeToString(backupKey.Bytes()), creds.BackupKey)
+					source, err = s.GetSourceByID(source.ID)
+					req.NoError(err)
+					check.JSONEq(`{"skip_key_backup":false,"rooms":["!keep:example.org"],"extra":{"keep":1}}`, source.SyncConfig.String)
+				} else if mode == "pending login's key" {
+					check.Equal("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", creds.BackupKey)
+				} else if mode == "previous login's key" {
 					check.Equal("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", creds.BackupKey)
 					check.Equal(1, logins)
 				} else {
@@ -106,49 +156,6 @@ func TestAddMatrixBackupSetup(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestAddMatrixSavesBackupKeyAndPreservesSyncConfig(t *testing.T) {
-	req, check := require.New(t), assert.New(t)
-	login := newRenewalHomeserver(t)
-	key, err := ssss.NewKey("")
-	req.NoError(err)
-	backupKey, err := backup.NewMegolmBackupKey()
-	req.NoError(err)
-	mux := http.NewServeMux()
-	mux.Handle("/", login.Config.Handler)
-	matrixtest.HandleSecretStorage(t, mux, key, backupKey)
-	mux.HandleFunc("GET /_matrix/client/v3/room_keys/version", func(w http.ResponseWriter, _ *http.Request) {
-		raw, err := json.Marshal(map[string]any{"version": "1", "algorithm": id.KeyBackupAlgorithmMegolmBackupV1, "auth_data": map[string]string{"public_key": base64.RawStdEncoding.EncodeToString(backupKey.PublicKey().Bytes())}})
-		if assert.NoError(t, err) {
-			_, _ = w.Write(raw)
-		}
-	})
-	server := httptest.NewServer(mux)
-	t.Cleanup(server.Close)
-	home := t.TempDir()
-	cfg := &config.Config{HomeDir: home, Data: config.DataConfig{DataDir: home}}
-	s := testutil.NewTestStore(t)
-	setMatrixTestDatabaseURL(t, s, cfg)
-	source, err := s.GetOrCreateSource(sourceTypeMatrix, "@archive:example.org")
-	req.NoError(err)
-	req.NoError(s.UpdateSourceSyncConfig(source.ID, `{"skip_key_backup":true,"rooms":["!keep:example.org"],"extra":{"keep":1}}`))
-	t.Setenv(daemonCLISubprocessEnv, strconv.Itoa(os.Getppid()))
-	t.Setenv(clirun.EnvMatrixLoginSecret, "password")
-	t.Setenv(clirun.EnvMatrixRecoverySecret, key.RecoveryKey())
-	root := newTestRootCmd()
-	root.AddCommand(newAddMatrixCmd())
-	root.SetArgs([]string{"add-matrix", "--homeserver", server.URL, "--user-id", "@archive:example.org", "--no-default-identity"})
-	root.SetContext(testInvocationContext(t.Context(), cfg, invocationOptions{}))
-	root.SetOut(io.Discard)
-	root.SetErr(io.Discard)
-	req.NoError(root.Execute())
-	creds, err := matrixsource.LoadCredentials(cfg.TokensDir(), "@archive:example.org")
-	req.NoError(err)
-	check.Equal(base64.RawStdEncoding.EncodeToString(backupKey.Bytes()), creds.BackupKey)
-	source, err = s.GetSourceByID(source.ID)
-	req.NoError(err)
-	check.JSONEq(`{"skip_key_backup":false,"rooms":["!keep:example.org"],"extra":{"keep":1}}`, source.SyncConfig.String)
 }
 
 func TestReadMatrixRecoverySecret(t *testing.T) {
