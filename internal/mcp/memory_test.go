@@ -91,7 +91,6 @@ func daemonProxyMemoryOptions() ServeOptions {
 		SavedViews:          struct{ savedview.Service }{},
 		Meetings:            struct{ MeetingBackend }{},
 		Calendar:            struct{ CalendarBackend }{},
-		MessageTags:         struct{ MessageTagBackend }{},
 		ArchiveSQLQuerier:   struct{ ArchiveSQLQuerier }{},
 		IdentityReview:      struct{ IdentityReviewBackend }{},
 		PersonCardDAV:       struct{ PersonCardDAVBackend }{},
@@ -99,7 +98,6 @@ func daemonProxyMemoryOptions() ServeOptions {
 		Drafts:              struct{ DraftRunner }{},
 		MessageTags:         struct{ MessageTagBackend }{},
 		DraftCommands:       slices.Sorted(maps.Keys(stableDraftDefinitions)),
-		MessageTags:         struct{ MessageTagBackend }{},
 	}
 }
 
