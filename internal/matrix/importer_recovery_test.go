@@ -272,7 +272,7 @@ func TestImportEditRedactionHandlesUnavailableAndPendingEdits(t *testing.T) {
 	})
 }
 
-func TestImportSkipKeyBackupKeepsEncryptedMessages(t *testing.T) {
+func TestImportRecoverySkipsBackupWhenDisabledOrRoomExcluded(t *testing.T) {
 	for _, mode := range []string{"SkipKeyBackup", "ExcludeRooms"} {
 		t.Run(mode, func(t *testing.T) {
 			req, check := require.New(t), assert.New(t)
