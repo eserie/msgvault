@@ -217,14 +217,7 @@ func TestAddMatrixKeepsOldLoginWhenPreviousLogoutFails(t *testing.T) {
 func TestAddMatrixStopsWhenExistingLoginIsUnreadable(t *testing.T) {
 	require := require.New(t)
 	assert := assert.New(t)
-	var logins int
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /_matrix/client/v3/login", func(w http.ResponseWriter, _ *http.Request) {
-		logins++
-		_, _ = w.Write([]byte(`{"user_id":"@archive:example.org","device_id":"NEW","access_token":"fresh"}`))
-	})
-	server := httptest.NewServer(mux)
-	defer server.Close()
+	server := newRenewalHomeserver(t)
 
 	home := t.TempDir()
 	cfg := &config.Config{HomeDir: home, Data: config.DataConfig{DataDir: home}}
@@ -249,6 +242,7 @@ func TestAddMatrixStopsWhenExistingLoginIsUnreadable(t *testing.T) {
 	data, err := os.ReadFile(matches[0])
 	require.NoError(err)
 	assert.Equal("not json", string(data), "the unreadable file is left for the user to fix")
+	logins, _ := server.snapshot()
 	assert.Zero(logins)
 }
 
