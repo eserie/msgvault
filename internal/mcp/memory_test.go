@@ -91,12 +91,12 @@ func daemonProxyMemoryOptions() ServeOptions {
 		SavedViews:          struct{ savedview.Service }{},
 		Meetings:            struct{ MeetingBackend }{},
 		Calendar:            struct{ CalendarBackend }{},
+		MessageTags:         struct{ MessageTagBackend }{},
 		ArchiveSQLQuerier:   struct{ ArchiveSQLQuerier }{},
 		IdentityReview:      struct{ IdentityReviewBackend }{},
 		PersonCardDAV:       struct{ PersonCardDAVBackend }{},
 		IdentityScoring:     struct{ IdentityScoringBackend }{},
 		Drafts:              struct{ DraftRunner }{},
-		MessageTags:         struct{ MessageTagBackend }{},
 		DraftCommands:       slices.Sorted(maps.Keys(stableDraftDefinitions)),
 	}
 }
