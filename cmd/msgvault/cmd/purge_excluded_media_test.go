@@ -160,11 +160,11 @@ func TestMediaPolicyForSlackdumpUsesSlackWorkspaceConfig(t *testing.T) {
 }
 
 func TestMediaPolicyForMatrixUsesAccountConfig(t *testing.T) {
-	current := &config.Config{Matrix: config.MatrixConfig{MaxMediaMB: 7}}
+	current := &config.Config{Matrix: config.MatrixConfig{MaxMediaMB: 7, AccountsConfig: map[string]config.MediaAccountConfig{"@archive:example.org": {MaxMediaMB: 3}}}}
 
 	policy, ok := mediaPolicyForSource(current, sourceTypeMatrix, "@archive:example.org")
 	require.True(t, ok)
-	assert.Equal(t, current.Matrix.MediaPolicy("@archive:example.org"), policy)
+	assert.Equal(t, int64(3)<<20, policy.MaxBytes)
 }
 
 func TestPurgeExcludedMatrixMediaAfterAllToDirectScopeChange(t *testing.T) {

@@ -638,56 +638,22 @@ func (f *recoveryFixture) ageAttempts(t *testing.T) {
 	req.NoError(f.store.CompleteSyncAndUpdateSourceCursor(syncID, f.sourceID, encoded))
 }
 
-func TestImportRecoveryRedactedReactionRejectsReplay(t *testing.T) {
-	req, check := require.New(t), assert.New(t)
-	f := newRecoveryFixture(t)
-	reaction := f.backup.encrypted(t, "$reaction", 20, event.EventReaction, map[string]any{"m.relates_to": map[string]any{"rel_type": "m.annotation", "event_id": "$original", "key": "yes"}})
-	f.timeline = []*event.Event{f.message(t, "$original", "original", 10), reaction}
-	_, err := f.run(t, false, false)
-	req.NoError(err)
-	f.timeline = []*event.Event{{ID: "$redaction", Type: event.EventRedaction, Redacts: "$reaction", Content: event.Content{Raw: map[string]any{}}}}
-	_, err = f.run(t, false, false)
-	req.NoError(err)
-	f.quiet = true
-	sum, err := f.run(t, true, false)
-	req.NoError(err)
-	check.Zero(sum.PendingEncrypted)
-	var reactions int
-	req.NoError(f.store.DB().QueryRow(`SELECT count(*) FROM reactions`).Scan(&reactions))
-	check.Zero(reactions)
-	ids, err := f.store.MessageExistsBatch(f.sourceID, []string{"$reaction"})
-	req.NoError(err)
-	req.NotZero(ids["$reaction"])
-	var hidden bool
-	req.NoError(f.store.DB().QueryRow(f.store.Rebind(`SELECT deleted_at IS NOT NULL FROM messages WHERE id = ?`), ids["$reaction"]).Scan(&hidden))
-	check.True(hidden)
-	replayed := *reaction
-	replayed.ID = "$replayed"
-	f.quiet = false
-	f.timeline = []*event.Event{&replayed}
-	_, err = f.run(t, true, false)
-	req.NoError(err)
-	req.NoError(f.store.DB().QueryRow(`SELECT count(*) FROM reactions`).Scan(&reactions))
-	check.Zero(reactions)
-	check.Equal(encryptedPlaceholder, f.body(t, "$replayed"))
-}
-
 func TestImportRecoveryRetiredRelationsRejectReplay(t *testing.T) {
-	for _, kind := range []string{"redacted edit", "orphan edit", "orphan reaction"} {
+	for _, kind := range []string{"redacted reaction", "redacted edit", "orphan edit", "orphan reaction"} {
 		t.Run(kind, func(t *testing.T) {
 			req, check := require.New(t), assert.New(t)
 			f := newRecoveryFixture(t)
 			first := f.edit(t, "$first", "$original", "edited", 20)
-			if kind == "orphan reaction" {
+			if strings.HasSuffix(kind, "reaction") {
 				first = f.backup.encrypted(t, "$first", 20, event.EventReaction, map[string]any{"m.relates_to": map[string]any{"rel_type": "m.annotation", "event_id": "$original", "key": "yes"}})
 			}
 			f.timeline = []*event.Event{first}
-			if kind == "redacted edit" {
+			if strings.HasPrefix(kind, "redacted") {
 				f.timeline = append(f.timeline, f.message(t, "$original", "original", 10))
 			}
 			_, err := f.run(t, false, false)
 			req.NoError(err)
-			if kind == "redacted edit" {
+			if strings.HasPrefix(kind, "redacted") {
 				f.timeline = []*event.Event{{ID: "$redaction", Type: event.EventRedaction, Redacts: "$first", Content: event.Content{Raw: map[string]any{}}}}
 				_, err = f.run(t, false, false)
 				req.NoError(err)
@@ -696,11 +662,19 @@ func TestImportRecoveryRetiredRelationsRejectReplay(t *testing.T) {
 			sum, err := f.run(t, true, false)
 			req.NoError(err)
 			check.Zero(sum.PendingEncrypted)
+			if kind == "redacted reaction" {
+				ids, err := f.store.MessageExistsBatch(f.sourceID, []string{"$first"})
+				req.NoError(err)
+				req.NotZero(ids["$first"])
+				var hidden bool
+				req.NoError(f.store.DB().QueryRow(f.store.Rebind(`SELECT deleted_at IS NOT NULL FROM messages WHERE id = ?`), ids["$first"]).Scan(&hidden))
+				check.True(hidden)
+			}
 			second := *first
 			second.ID = "$replayed"
 			f.quiet = false
 			f.timeline = []*event.Event{&second}
-			if kind != "redacted edit" {
+			if strings.HasPrefix(kind, "orphan") {
 				f.timeline = append(f.timeline, f.message(t, "$original", "original", 10))
 			}
 			_, err = f.run(t, true, false)

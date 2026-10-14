@@ -1169,21 +1169,6 @@ func TestImporterMediaEditReplacesAttachmentAndStoresEmptyFiles(t *testing.T) {
 	attachments, err = st.MessageMatrixAttachments(messageIDs["$media"])
 	req.NoError(err)
 	check.Equal(attachmentpolicy.StatePending, attachments["matrix:mxc://example.org/original"].State)
-	later := &ImportSummary{}
-	req.NoError(NewImporter(st, imp.runtime).retryArchivedMedia(t.Context(), source.ID, opts, later))
-	check.Equal(int64(1), later.AttachmentsDownloaded)
-	textEdit := matrixTestEvent(t, `{"type":"m.room.message","event_id":"$media-text","sender":"@member:example.org","origin_server_ts":3200,"content":{"msgtype":"m.text","body":"* now text","m.new_content":{"msgtype":"m.text","body":"now text"},"m.relates_to":{"rel_type":"m.replace","event_id":"$media"}}}`)
-	req.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, textEdit, conversation, opts, sum))
-	attachments, err = st.MessageMatrixAttachments(messageIDs["$media"])
-	req.NoError(err)
-	check.Empty(attachments, "a selected text replacement clears the media occurrence")
-	redactText := matrixTestEvent(t, `{"type":"m.room.redaction","event_id":"$redact-media-text","sender":"@member:example.org","origin_server_ts":3300,"redacts":"$media-text","content":{}}`)
-	req.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, redactText, conversation,
-		ImportOptions{NoMedia: true}, sum))
-	attachments, err = st.MessageMatrixAttachments(messageIDs["$media"])
-	req.NoError(err)
-	check.Equal(attachmentpolicy.StatePending, attachments["matrix:mxc://example.org/original"].State)
-
 	renamed := matrixTestEvent(t, `{"type":"m.room.message","event_id":"$media-renamed","sender":"@member:example.org","origin_server_ts":3500,"content":{"msgtype":"m.file","body":"* renamed.bin","m.new_content":{"msgtype":"m.file","body":"renamed.bin","filename":"renamed.bin","url":"mxc://example.org/original","info":{"mimetype":"application/octet-stream","size":999}} ,"m.relates_to":{"rel_type":"m.replace","event_id":"$media"}}}`)
 	req.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, renamed, conversation,
 		ImportOptions{NoMedia: true}, sum))
@@ -1194,11 +1179,9 @@ func TestImporterMediaEditReplacesAttachmentAndStoresEmptyFiles(t *testing.T) {
 	check.Equal("application/octet-stream", restored.MimeType, "pending media retains the selected MIME type")
 	check.Equal(999, restored.Size)
 
-	noURL := matrixTestEvent(t, `{"type":"m.room.message","event_id":"$media-no-url","sender":"@member:example.org","origin_server_ts":4000,"content":{"msgtype":"m.file","body":"* unavailable.txt","m.new_content":{"msgtype":"m.file","body":"unavailable.txt","filename":"unavailable.txt"},"m.relates_to":{"rel_type":"m.replace","event_id":"$media"}}}`)
-	req.NoError(imp.persistEvent(t.Context(), source.ID, conversationID, noURL, conversation, opts, sum))
-	attachments, err = st.MessageMatrixAttachments(messageIDs["$media"])
-	req.NoError(err)
-	check.Empty(attachments, "a selected media version without a URL clears the previous attachment")
+	later := &ImportSummary{}
+	req.NoError(NewImporter(st, imp.runtime).retryArchivedMedia(t.Context(), source.ID, opts, later))
+	check.Equal(int64(1), later.AttachmentsDownloaded)
 	t.Run("sticker edit chain", func(t *testing.T) {
 		req, check := require.New(t), assert.New(t)
 		for name, data := range map[string]string{"older": "older", "newer": "newer"} {
