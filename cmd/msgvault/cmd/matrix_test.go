@@ -384,6 +384,8 @@ func TestAddMatrixRenewalStagingFailureKeepsOldLogin(t *testing.T) {
 	require := require.New(t)
 	assert := assert.New(t)
 	server, cfg, old := setupMatrixRenewal(t)
+	s := testutil.NewTestStore(t)
+	setMatrixTestDatabaseURL(t, s, cfg)
 	failMatrixCredentialWrite(t, &savePendingMatrixCredentials, errors.New("synthetic disk full"))
 
 	require.ErrorContains(runAddMatrixForRenewal(t, cfg, server.URL, "password"), "login unchanged")
@@ -391,6 +393,9 @@ func TestAddMatrixRenewalStagingFailureKeepsOldLogin(t *testing.T) {
 	creds, err := matrixsource.LoadCredentials(cfg.TokensDir(), old.UserID)
 	require.NoError(err)
 	assert.Equal(old, creds)
+	source, err := s.GetSourceByTypeAndIdentifier(sourceTypeMatrix, old.UserID)
+	require.NoError(err)
+	assert.JSONEq(`{"skip_key_backup":true}`, source.SyncConfig.String)
 	_, loggedOut := server.snapshot()
 	assert.Equal([]string{"Bearer fresh"}, loggedOut, "only the unsaved new device is revoked")
 	pending, err := matrixsource.PendingCredentialsExist(cfg.TokensDir(), old.UserID)
@@ -415,7 +420,6 @@ func TestAddMatrixRenewalResumesAfterPublishFailure(t *testing.T) {
 			secret := "password"
 			if tc.sameDevice {
 				old.DeviceID, old.AccessToken = "NEW", "fresh"
-				old.BackupKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 				require.NoError(matrixsource.SaveCredentials(cfg.TokensDir(), old))
 				require.NoError(matrixsource.SavePendingCredentials(cfg.TokensDir(), old))
 				secret = ""
@@ -430,7 +434,6 @@ func TestAddMatrixRenewalResumesAfterPublishFailure(t *testing.T) {
 			assert.Equal("NEW", pending.DeviceID)
 			_, loggedOut := server.snapshot()
 			if tc.sameDevice {
-				assert.Empty(pending.BackupKey)
 				assert.Empty(loggedOut)
 			} else {
 				assert.Equal([]string{"Bearer old"}, loggedOut, "the saved new device is kept")

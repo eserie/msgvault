@@ -1792,7 +1792,7 @@ func TestListUnresolvedMessageRepliesReturnsOnlyUnlinkedProviderMetadata(t *test
 	assert.NotZero(parentID)
 }
 
-func TestListUnresolvedMessageRepliesAfterUsesBoundedKeysetPages(t *testing.T) {
+func TestListUnresolvedMessageRepliesAfterUsesBoundedConversationKeysetPages(t *testing.T) {
 	require := require.New(t)
 	assert := assert.New(t)
 	st := testutil.NewTestStore(t)
