@@ -82,9 +82,9 @@ func TestAgentReadSourceReplacementSnapshot(t *testing.T) {
 			assertions := assert.New(t)
 			requirements := require.New(t)
 			st := testutil.NewTestStore(t)
-			src, id, err := testutil.CreateIndexedSourceMessage(st, "reader@example.test", "message", "glacier allowed", "allowed body")
+			src, id, err := testutil.CreateIndexedSourceMessage(st, "reader@example.com", "message", "glacier allowed", "allowed body")
 			requirements.NoError(err)
-			participant, err := st.EnsureParticipant(src.Identifier, "Synthetic", "example.test")
+			participant, err := st.EnsureParticipant(src.Identifier, "Synthetic", "example.com")
 			requirements.NoError(err)
 			requirements.NoError(st.ReplaceMessageRecipients(id, "from", []int64{participant}, nil))
 			ready, resume := make(chan struct{}), make(chan struct{})
@@ -102,7 +102,7 @@ func TestAgentReadSourceReplacementSnapshot(t *testing.T) {
 			t.Cleanup(srv.agentGrants.Close)
 			_, secret, _, err := srv.agentGrants.Issue("reader", []agentgrant.Permission{agentgrant.PermissionSearchRead, agentgrant.PermissionMessageRead, agentgrant.PermissionStatsRead}, []agentgrant.SourceRef{{ID: src.ID, Type: src.SourceType, Identifier: src.Identifier}}, time.Time{})
 			requirements.NoError(err)
-			path := map[string]string{"cached search": "/api/v1/search/fast?q=glacier", "domain": "/api/v1/search/domains?domains=example.test", "stats": "/api/v1/stats/total", "subaggregate": "/api/v1/aggregates/sub?view_type=labels&sender=reader%40example.test", "list": "/api/v1/messages", "search": "/api/v1/search/fast?q=glacier", "aggregate": "/api/v1/aggregates", "message": fmt.Sprintf("/api/v1/messages/%d", id), "store message": fmt.Sprintf("/api/v1/messages/%d", id), "thread": fmt.Sprintf("/api/v1/cli/message/thread?id=%d", id)}[route]
+			path := map[string]string{"cached search": "/api/v1/search/fast?q=glacier", "domain": "/api/v1/search/domains?domains=example.com", "stats": "/api/v1/stats/total", "subaggregate": "/api/v1/aggregates/sub?view_type=labels&sender=reader%40example.com", "list": "/api/v1/messages", "search": "/api/v1/search/fast?q=glacier", "aggregate": "/api/v1/aggregates", "message": fmt.Sprintf("/api/v1/messages/%d", id), "store message": fmt.Sprintf("/api/v1/messages/%d", id), "thread": fmt.Sprintf("/api/v1/cli/message/thread?id=%d", id)}[route]
 			get := func() *httptest.ResponseRecorder {
 				r := httptest.NewRequest(http.MethodGet, path, nil)
 				r.Header.Set(apiprotocol.AgentTokenHeader, secret)
