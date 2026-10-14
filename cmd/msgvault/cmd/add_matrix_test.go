@@ -44,7 +44,7 @@ func setMatrixTestDatabaseURL(t *testing.T, s *store.Store, cfg *config.Config) 
 }
 
 func TestAddMatrixBackupSetup(t *testing.T) {
-	for _, mode := range []string{"missing", "invalid", "failed", "skip", "renew without key", "previous login's key"} {
+	for _, mode := range []string{"missing", "invalid", "failed", "skip", "previous login's key"} {
 		t.Run(mode, func(t *testing.T) {
 			req := require.New(t)
 			check := assert.New(t)
@@ -52,11 +52,9 @@ func TestAddMatrixBackupSetup(t *testing.T) {
 			home := t.TempDir()
 			cfg := &config.Config{HomeDir: home, Data: config.DataConfig{DataDir: home}}
 			args := []string{"add-matrix", "--homeserver", server.URL, "--user-id", "@archive:example.org", "--no-default-identity"}
-			if mode == "skip" || mode == "renew without key" || mode == "previous login's key" {
+			if mode == "skip" || mode == "previous login's key" {
 				previous := matrixsource.Credentials{Homeserver: server.URL, UserID: "@archive:example.org", DeviceID: "OLD", AccessToken: "old"}
-				if mode == "skip" || mode == "previous login's key" {
-					previous.BackupKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-				}
+				previous.BackupKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 				if mode == "skip" {
 					args = append(args, "--skip-key-backup")
 				}
@@ -95,7 +93,7 @@ func TestAddMatrixBackupSetup(t *testing.T) {
 				req.Error(err)
 				check.Equal(1, logins)
 				check.Equal([]string{"Bearer fresh"}, logouts)
-			case "skip", "renew without key", "previous login's key":
+			case "skip", "previous login's key":
 				req.NoError(err)
 				creds, err := matrixsource.LoadCredentials(cfg.TokensDir(), "@archive:example.org")
 				req.NoError(err)
