@@ -144,7 +144,7 @@ func (s *Server) personMatchStatus(ctx context.Context, st personMatchConsentSto
 	disclosure, disclosureErr := cfg.Disclosure()
 	if disclosureErr != nil {
 		status.Blocker = "invalid_config"
-		return status, nil //nolint:nilerr // Status reports invalid optional configuration as a blocker.
+		return status, nil // Status reports invalid optional configuration as a blocker.
 	}
 	status.Disclosure = &disclosure
 	fingerprint, err := disclosure.Fingerprint()
