@@ -173,7 +173,7 @@ func TestRoomTitleUsesLatestTimelineRename(t *testing.T) {
 	assert.Empty(empty)
 }
 
-func TestImporterReclassifiesInactiveRoomFromDirectAccountData(t *testing.T) {
+func TestImporterReclassifiesDirectRoomAcrossFullAndIncrementalSync(t *testing.T) {
 	require := require.New(t)
 	assert := assert.New(t)
 	var syncCalls int
