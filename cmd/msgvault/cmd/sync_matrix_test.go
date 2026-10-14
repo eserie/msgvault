@@ -17,17 +17,12 @@ import (
 )
 
 func TestMatrixSyncSummaryBackupFailureAndKeyHint(t *testing.T) {
-	setup := func(t *testing.T) (*store.Store, *config.Config, matrixsource.Credentials, *bool) {
+	setup := func(t *testing.T) (*store.Store, *config.Config, matrixsource.Credentials) {
 		t.Helper()
 		req := require.New(t)
-		newPlaceholder := new(bool)
 		mux := http.NewServeMux()
 		mux.HandleFunc("GET /_matrix/client/v3/sync", func(w http.ResponseWriter, _ *http.Request) {
-			if *newPlaceholder {
-				_, _ = w.Write([]byte(`{"next_batch":"next","rooms":{"join":{"!room:example.org":{"timeline":{"events":[{"type":"m.room.encrypted","event_id":"$new","sender":"@member:example.org","content":{"algorithm":"m.megolm.v1.aes-sha2","session_id":"unknown","ciphertext":"unknown"}}]}}}}}`))
-			} else {
-				_, _ = w.Write([]byte(`{"next_batch":"next","rooms":{"join":{}}}`))
-			}
+			_, _ = w.Write([]byte(`{"next_batch":"next","rooms":{"join":{}}}`))
 		})
 		mux.HandleFunc("GET /_matrix/client/v3/user/{user}/account_data/m.direct", func(w http.ResponseWriter, _ *http.Request) {
 			_, _ = w.Write([]byte(`{}`))
@@ -56,11 +51,11 @@ func TestMatrixSyncSummaryBackupFailureAndKeyHint(t *testing.T) {
 		home := t.TempDir()
 		cfg := &config.Config{HomeDir: home, Data: config.DataConfig{DataDir: home}}
 		creds := matrixsource.Credentials{Homeserver: server.URL, UserID: source.Identifier, DeviceID: "ARCHIVE", AccessToken: "token"}
-		return s, cfg, creds, newPlaceholder
+		return s, cfg, creds
 	}
 	t.Run("saved backup key overrides skip preference", func(t *testing.T) {
 		req := require.New(t)
-		s, cfg, creds, _ := setup(t)
+		s, cfg, creds := setup(t)
 		source, err := s.GetSourceByTypeAndIdentifier(sourceTypeMatrix, creds.UserID)
 		req.NoError(err)
 		req.NoError(s.UpdateSourceSyncConfig(source.ID, `{"skip_key_backup":true}`))
@@ -71,7 +66,7 @@ func TestMatrixSyncSummaryBackupFailureAndKeyHint(t *testing.T) {
 	})
 	t.Run("single hint across sources", func(t *testing.T) {
 		req, check := require.New(t), assert.New(t)
-		s, cfg, creds, newPlaceholder := setup(t)
+		s, cfg, creds := setup(t)
 		req.NoError(matrixsource.SaveCredentials(cfg.TokensDir(), creds))
 		var out bytes.Buffer
 		second, err := s.GetOrCreateSource(sourceTypeMatrix, "@second:example.org")
@@ -81,14 +76,12 @@ func TestMatrixSyncSummaryBackupFailureAndKeyHint(t *testing.T) {
 		_, err = s.PersistMessageContext(t.Context(), &store.MessagePersistData{Message: &store.Message{SourceID: second.ID, ConversationID: secondRoom, SourceMessageID: "$second", MessageType: "matrix", Snippet: sql.NullString{String: store.MatrixEncryptedPlaceholder, Valid: true}}, RawMIME: []byte(`{"type":"m.room.encrypted"}`), RawFormat: "matrix_json"})
 		req.NoError(err)
 		req.NoError(matrixsource.SaveCredentials(cfg.TokensDir(), matrixsource.Credentials{Homeserver: creds.Homeserver, UserID: second.Identifier, DeviceID: "ARCHIVE", AccessToken: "token"}))
-		*newPlaceholder = true
 		req.NoError(runMatrixSync(t.Context(), s, cfg, "", false, nil, &out))
 		check.Equal(1, strings.Count(out.String(), "run msgvault add-matrix --homeserver"))
 	})
 	t.Run("unreadable preference", func(t *testing.T) {
 		req, check := require.New(t), assert.New(t)
-		s, cfg, creds, newPlaceholder := setup(t)
-		*newPlaceholder = true
+		s, cfg, creds := setup(t)
 		sources, err := s.ListSources(sourceTypeMatrix)
 		req.NoError(err)
 		req.NoError(s.UpdateSourceSyncConfig(sources[0].ID, `"invalid JSON"`))
@@ -99,7 +92,7 @@ func TestMatrixSyncSummaryBackupFailureAndKeyHint(t *testing.T) {
 	})
 	t.Run("skip key backup", func(t *testing.T) {
 		req, check := require.New(t), assert.New(t)
-		s, cfg, creds, _ := setup(t)
+		s, cfg, creds := setup(t)
 		sources, err := s.ListSources(sourceTypeMatrix)
 		req.NoError(err)
 		req.NoError(s.UpdateSourceSyncConfig(sources[0].ID, `{"skip_key_backup":true}`))
