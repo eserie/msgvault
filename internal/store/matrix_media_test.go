@@ -126,15 +126,26 @@ func TestMatrixRetrySkipsRequireResolvedRoster(t *testing.T) {
 	req.NoError(err)
 	req.NoError(s.ReplaceMessageMatrixAttachments(t.Context(), messageID, []store.AttachmentRef{{SourceAttachmentID: "matrix:mxc://example.org/media", StoragePath: "mxc://example.org/media", State: attachmentpolicy.StateSkipped, SkipReason: attachmentpolicy.SkipParticipantThreshold}}))
 	policy := attachmentpolicy.Policy{Scope: attachmentpolicy.ScopeAll, MaxParticipants: 20}
-	items, err := s.ListMatrixRetryableAttachmentMessagesContext(t.Context(), source.ID, 0, 100, policy)
-	req.NoError(err)
-	check.Empty(items)
-	_, err = s.DB().Exec(s.Rebind(`UPDATE conversations SET metadata = ?, participant_count = 30 WHERE id = ?`), `{"member_count":2}`, room)
-	req.NoError(err)
-	items, err = s.ListMatrixRetryableAttachmentMessagesContext(t.Context(), source.ID, 0, 100, policy)
-	req.NoError(err)
-	req.Len(items, 1)
-	check.Equal(2, items[0].ParticipantCount)
+	for _, scenario := range []struct {
+		metadata string
+		limit    int
+		want     int
+	}{
+		{`{}`, 20, 0},
+		{`{"member_count_unknown":true}`, 20, 0},
+		{`{"member_count":30}`, 20, 0},
+		{`{"member_count":2,"member_count_unknown":true}`, 20, 0},
+		{`{"member_count":2}`, 20, 1},
+		{`{"member_count":30}`, 40, 1},
+		{`{"member_count":30,"member_count_unknown":true}`, 0, 1},
+	} {
+		_, err = s.DB().Exec(s.Rebind(`UPDATE conversations SET metadata = ?, participant_count = 30 WHERE id = ?`), scenario.metadata, room)
+		req.NoError(err)
+		policy.MaxParticipants = scenario.limit
+		items, err := s.ListMatrixRetryableAttachmentMessagesContext(t.Context(), source.ID, 0, 100, policy)
+		req.NoError(err)
+		check.Len(items, scenario.want, scenario.metadata)
+	}
 }
 
 func TestMatrixRetryPagesAdvancePastExcludedRows(t *testing.T) {
@@ -170,7 +181,7 @@ func TestMatrixRetryPagesAdvancePastExcludedRows(t *testing.T) {
 	req.NoError(err)
 	req.Len(items, 1)
 	check.Equal(eligible[0], items[0].MessageID)
-	check.Equal(3, strings.Count(logs.String(), `"kind":"query"`), "one-row SQL pages advance through the roster skip and CAS alias")
+	check.Equal(1, strings.Count(logs.String(), `"kind":"query"`), "SQL excludes ineligible skipped rows before paging")
 	items, err = s.ListMatrixRetryableAttachmentMessagesContext(t.Context(), source.ID, items[0].MessageID, 1, policy)
 	req.NoError(err)
 	req.Len(items, 1)
