@@ -78,7 +78,7 @@ func TestAddMatrixRenewsExistingAccountInPlace(t *testing.T) {
 	home := t.TempDir()
 	cfg := &config.Config{HomeDir: home, Data: config.DataConfig{DataDir: home}}
 	require.NoError(matrixsource.SaveCredentials(cfg.TokensDir(), matrixsource.Credentials{
-		Homeserver: server.URL, UserID: "@archive:example.org", DeviceID: "OLD", AccessToken: "revoked",
+		Homeserver: server.URL, UserID: "@archive:example.org", DeviceID: "OLD", AccessToken: "revoked", BackupKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 	}))
 	st, err := store.Open(cfg.DatabaseDSN())
 	require.NoError(err)
@@ -103,6 +103,7 @@ func TestAddMatrixRenewsExistingAccountInPlace(t *testing.T) {
 
 	creds, err := matrixsource.LoadCredentials(cfg.TokensDir(), "@archive:example.org")
 	require.NoError(err)
+	assert.Equal("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", creds.BackupKey)
 	assert.Equal("NEW", creds.DeviceID)
 	assert.Equal([]string{"Bearer revoked"}, loggedOut)
 	st, err = store.Open(cfg.DatabaseDSN())
@@ -395,10 +396,15 @@ func TestAddMatrixRenewalResumesPublishedPendingLogin(t *testing.T) {
 	_, loggedOut = server.snapshot()
 	assert.Empty(loggedOut, "both logins survive a second staging failure")
 
+	pending, _, err := matrixsource.LoadPendingCredentials(cfg.TokensDir(), old.UserID)
+	require.NoError(err)
+	pending.BackupKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	require.NoError(matrixsource.SavePendingCredentials(cfg.TokensDir(), pending))
 	restoreMatrixCredentialWrites()
 	require.NoError(runAddMatrixForRenewal(t, cfg, server.URL, ""))
 	creds, err = matrixsource.LoadCredentials(cfg.TokensDir(), old.UserID)
 	require.NoError(err)
+	assert.Equal(pending.BackupKey, creds.BackupKey)
 	assert.Equal("NEW", creds.DeviceID)
 	logins, loggedOut := server.snapshot()
 	assert.Equal(1, logins)
