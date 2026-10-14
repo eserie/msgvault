@@ -48,12 +48,14 @@ const mediaDiscoveryVersion = 1
 var errCursorVersion = errors.New("unsupported Matrix cursor format version")
 
 type SyncState struct {
-	FormatVersion         int                        `json:"format_version"`
-	MediaDiscoveryVersion int                        `json:"media_discovery_version,omitzero"`
-	MediaDiscoveryScope   string                     `json:"media_discovery_scope,omitempty"`
-	RecoveryRooms         map[string]recoveryAttempt `json:"recovery_rooms,omitzero"`
-	NextBatch             string                     `json:"next_batch,omitempty"`
-	Rooms                 map[string]*RoomState      `json:"rooms"`
+	FormatVersion            int                        `json:"format_version"`
+	MediaDiscoveryVersion    int                        `json:"media_discovery_version,omitzero"`
+	MediaDiscoveryScope      string                     `json:"media_discovery_scope,omitempty"`
+	MediaDiscoveryAfter      int64                      `json:"media_discovery_after,omitzero"`
+	MediaDiscoveryIncomplete bool                       `json:"media_discovery_incomplete,omitzero"`
+	RecoveryRooms            map[string]recoveryAttempt `json:"recovery_rooms,omitzero"`
+	NextBatch                string                     `json:"next_batch,omitempty"`
+	Rooms                    map[string]*RoomState      `json:"rooms"`
 }
 
 func newSyncState() *SyncState {
@@ -229,8 +231,13 @@ func (imp *Importer) Import(ctx context.Context, opts ImportOptions) (sum *Impor
 	}
 	state.NextBatch = resp.NextBatch
 	scope := mediaDiscoveryScope(opts)
-	if state.MediaDiscoveryVersion < mediaDiscoveryVersion || state.MediaDiscoveryScope != scope {
-		complete, discoveryErr := imp.discoverLegacyMedia(ctx, source.ID, opts)
+	if state.MediaDiscoveryScope != scope {
+		state.MediaDiscoveryVersion = 0
+		state.MediaDiscoveryScope = scope
+		state.MediaDiscoveryAfter, state.MediaDiscoveryIncomplete = 0, false
+	}
+	if state.MediaDiscoveryVersion < mediaDiscoveryVersion {
+		complete, discoveryErr := imp.discoverLegacyMedia(ctx, source.ID, state, opts)
 		if discoveryErr != nil {
 			return sum, discoveryErr
 		}

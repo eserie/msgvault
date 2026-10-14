@@ -120,7 +120,7 @@ func runMatrixSync(
 			failures = append(failures, fmt.Sprintf("%s: %v", source.Identifier, syncErr))
 			continue
 		}
-		_, _ = fmt.Fprintf(out, "Matrix %s: %d rooms, %d messages, %d media, %d media pending, %d media failed, %d encrypted placeholders, %d message rows recovered, %d unsupported events skipped\n",
+		_, _ = fmt.Fprintf(out, "Matrix %s: %d rooms, %d messages, %d media downloaded this sync, outstanding: %d media pending, %d media failed, %d encrypted placeholders, %d message rows recovered, %d unsupported events skipped\n",
 			source.Identifier, summary.RoomsProcessed, summary.MessagesProcessed, summary.AttachmentsDownloaded, summary.AttachmentsPending, summary.AttachmentsFailed, summary.PendingEncrypted, summary.Recovered, summary.EventsSkipped)
 		if needsBackupKey && !backupHintShown {
 			backupHintShown = true

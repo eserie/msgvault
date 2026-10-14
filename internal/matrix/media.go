@@ -80,16 +80,23 @@ func pendingMediaOptions(opts ImportOptions) ImportOptions {
 	return opts
 }
 
-func (imp *Importer) discoverLegacyMedia(ctx context.Context, sourceID int64, opts ImportOptions) (bool, error) {
-	var after int64
-	complete := true
-	for {
+const legacyMediaDiscoveryBudget = 100
+
+func (imp *Importer) discoverLegacyMedia(ctx context.Context, sourceID int64, state *SyncState, opts ImportOptions) (bool, error) {
+	after := state.MediaDiscoveryAfter
+	complete := !state.MediaDiscoveryIncomplete
+	for scanned := 0; scanned < legacyMediaDiscoveryBudget; {
 		items, err := imp.store.ListMatrixLegacyMediaMessagesContext(ctx, sourceID, after, opts.Rooms, opts.ExcludeRooms, opts.MediaPolicy)
-		if err != nil || len(items) == 0 {
-			return complete, err
+		if err != nil {
+			return false, err
+		}
+		if len(items) == 0 {
+			state.MediaDiscoveryAfter, state.MediaDiscoveryIncomplete = 0, false
+			return complete, nil
 		}
 		for _, item := range items {
 			after = item.MessageID
+			scanned++
 			archived, content, selected, err := imp.archivedMediaContent(item.MessageID)
 			if err != nil {
 				if errors.Is(err, errUnsupportedMediaContentVersion) || errors.Is(err, errReadMediaMetadata) {
@@ -158,7 +165,9 @@ func (imp *Importer) discoverLegacyMedia(ctx context.Context, sourceID int64, op
 				return false, err
 			}
 		}
+		state.MediaDiscoveryAfter, state.MediaDiscoveryIncomplete = after, !complete
 	}
+	return false, nil
 }
 
 func mediaDiscoveryScope(opts ImportOptions) string {
@@ -331,6 +340,9 @@ func (imp *Importer) prepareMedia(ctx context.Context, messageID int64, content 
 	if content.File != nil {
 		input.Key, input.IV = content.File.Key.Key, content.File.InitVector
 		input.SHA256, input.Version = content.File.Hashes.SHA256, content.File.Version
+		if content.File.Key.Algorithm != "A256CTR" {
+			input.Algorithm = &content.File.Key.Algorithm
+		}
 	}
 	canonical, err := json.Marshal(input)
 	if err != nil {
@@ -539,11 +551,12 @@ func (imp *Importer) downloadMedia(ctx context.Context, messageID int64, content
 }
 
 type matrixMediaInput struct {
-	URL     string `json:"url"`
-	Key     string `json:"k,omitempty"`
-	IV      string `json:"iv,omitempty"`
-	SHA256  string `json:"sha256,omitempty"`
-	Version string `json:"v,omitempty"`
+	URL       string  `json:"url"`
+	Key       string  `json:"k,omitempty"`
+	IV        string  `json:"iv,omitempty"`
+	SHA256    string  `json:"sha256,omitempty"`
+	Version   string  `json:"v,omitempty"`
+	Algorithm *string `json:"alg,omitempty"`
 }
 
 var errUnsupportedMediaContentVersion = errors.New("unsupported Matrix media content version")

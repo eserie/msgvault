@@ -81,6 +81,40 @@ func TestMatrixMediaReplacementAndExclusionRecomputeSizeEstimate(t *testing.T) {
 	check.Equal(int64(16), size)
 }
 
+func TestMatrixRetryDirectScope(t *testing.T) {
+	req, check := require.New(t), assert.New(t)
+	s := testutil.NewTestStore(t)
+	source, err := s.GetOrCreateSource("matrix", "@archive:example.org")
+	req.NoError(err)
+	var expected []int64
+	for i, kind := range []string{"group_chat", "direct_chat", "channel"} {
+		room, err := s.EnsureConversationWithType(source.ID, fmt.Sprintf("!room%d:example.org", i), kind, "Media")
+		req.NoError(err)
+		req.NoError(s.SetConversationMemberCount(room, 2))
+		for _, state := range []attachmentpolicy.DownloadState{attachmentpolicy.StateSkipped, attachmentpolicy.StatePending, attachmentpolicy.StateFailed} {
+			messageID, err := s.UpsertMessage(&store.Message{SourceID: source.ID, ConversationID: room, SourceMessageID: fmt.Sprintf("$%d-%s", i, state), MessageType: "matrix"})
+			req.NoError(err)
+			req.NoError(s.ReplaceMessageMatrixAttachments(t.Context(), messageID, []store.AttachmentRef{{SourceAttachmentID: "matrix:mxc://example.org/media", StoragePath: "matrix:mxc://example.org/media", State: state}}))
+			if kind == "direct_chat" || state != attachmentpolicy.StateSkipped {
+				expected = append(expected, messageID)
+			}
+		}
+	}
+	var got []int64
+	var after int64
+	for {
+		items, err := s.ListMatrixRetryableAttachmentMessagesContext(t.Context(), source.ID, after, 1, attachmentpolicy.Policy{Scope: attachmentpolicy.ScopeDirect, MaxParticipants: 20})
+		req.NoError(err)
+		if len(items) == 0 {
+			break
+		}
+		req.Len(items, 1)
+		after = items[0].MessageID
+		got = append(got, after)
+	}
+	check.Equal(expected, got)
+}
+
 func TestMatrixRetrySkipsRequireResolvedRoster(t *testing.T) {
 	req, check := require.New(t), assert.New(t)
 	s := testutil.NewTestStore(t)

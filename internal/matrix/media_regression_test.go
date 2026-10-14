@@ -525,11 +525,29 @@ func TestImportMediaAlgorithmOnlyEditRejectsCachedPlaintext(t *testing.T) {
 	var beforeMetadata, afterMetadata matrixMediaMetadata
 	req.NoError(json.Unmarshal([]byte(before[ref.SourceAttachmentID].Metadata), &beforeMetadata))
 	req.NoError(json.Unmarshal([]byte(ref.Metadata), &afterMetadata))
-	check.Equal(beforeMetadata.Input, afterMetadata.Input, "the v1 fingerprint stays unchanged")
+	check.NotEqual(beforeMetadata.Input, afterMetadata.Input)
 	check.Equal(beforeMetadata.Attempts, afterMetadata.Attempts)
 	check.WithinDuration(time.Now().Add(7*24*time.Hour), afterMetadata.RetryAfter, time.Minute)
 	check.Equal(int64(1), sum.AttachmentsFailed)
 	check.Equal(1, requests)
+	content.File.Key.Algorithm = "A256CTR"
+	raw, err = json.Marshal(map[string]any{
+		"type": "m.room.message", "event_id": "$corrected", "sender": "@member:example.org", "origin_server_ts": 30,
+		"content": map[string]any{"m.new_content": content, "m.relates_to": map[string]any{"rel_type": "m.replace", "event_id": "$media"}},
+	})
+	req.NoError(err)
+	f.timeline = []*event.Event{matrixTestEvent(t, string(raw))}
+	sum, err = NewImporter(f.store, runtime).Import(t.Context(), opts)
+	req.NoError(err)
+	check.Equal(int64(1), sum.AttachmentsDownloaded)
+	check.Zero(sum.AttachmentsFailed)
+	check.Equal(2, requests)
+	refs, err = f.store.MessageMatrixAttachments(ids["$media"])
+	req.NoError(err)
+	ref = refs["matrix:mxc://example.org/file"]
+	check.Equal(attachmentpolicy.StateStored, ref.State)
+	req.NoError(json.Unmarshal([]byte(ref.Metadata), &afterMetadata))
+	check.Equal(beforeMetadata.Input, afterMetadata.Input, "the default algorithm keeps the existing fingerprint")
 }
 
 func TestImportDeferredMediaSurvivesSourceRedaction(t *testing.T) {
@@ -1515,6 +1533,89 @@ func makeMediaRetryDue(t *testing.T, s *store.Store, messageID int64) {
 		require.NoError(t, err)
 		ref.Metadata = string(encoded)
 		require.NoError(t, s.ReplaceMessageMatrixAttachments(t.Context(), messageID, []store.AttachmentRef{ref}))
+	}
+}
+
+func TestImportLegacyMediaDiscoveryResumesBudget(t *testing.T) {
+	for _, scenario := range []string{"complete", "temporary", "scope", "full"} {
+		t.Run(scenario, func(t *testing.T) {
+			req, check := require.New(t), assert.New(t)
+			f := newRecoveryFixture(t)
+			room, err := f.store.EnsureConversationWithType(f.sourceID, "!room:example.org", "direct_chat", "Legacy")
+			req.NoError(err)
+			var ids []int64
+			for i := range legacyMediaDiscoveryBudget + 1 {
+				eventID := fmt.Sprintf("$legacy%d", i)
+				messageID, err := f.store.UpsertMessage(&store.Message{SourceID: f.sourceID, ConversationID: room, SourceMessageID: eventID, MessageType: SourceType})
+				req.NoError(err)
+				ids = append(ids, messageID)
+				raw := fmt.Sprintf(`{"type":"m.room.message","event_id":%q,"sender":"@member:example.org","content":{"msgtype":"m.text","body":"legacy"}}`, eventID)
+				req.NoError(f.store.UpsertMessageRawWithFormat(messageID, []byte(raw), rawFormat))
+			}
+			if scenario == "temporary" {
+				req.NoError(f.store.SetMessageMetadata(ids[0], sql.NullString{String: `{"matrix_edit_event_id":"$edit","matrix_edit_ts":20}`, Valid: true}))
+			}
+			mux, ok := f.server.Config.Handler.(*http.ServeMux)
+			req.True(ok)
+			unavailable, lookups := true, 0
+			mux.HandleFunc("GET /_matrix/client/v3/rooms/!room:example.org/event/$edit", func(w http.ResponseWriter, _ *http.Request) {
+				lookups++
+				if unavailable {
+					w.WriteHeader(http.StatusServiceUnavailable)
+					return
+				}
+				writeMatrixJSON(t, w, matrixTestEvent(t, `{"type":"m.room.message","event_id":"$edit","sender":"@member:example.org","origin_server_ts":20,"content":{"m.new_content":{"msgtype":"m.file","body":"file","url":"mxc://example.org/file"},"m.relates_to":{"rel_type":"m.replace","event_id":"$legacy0"}}}`))
+			})
+			f.quiet = true
+			runtime := backupRuntime(t, f.server.URL, f.backup)
+			opts := ImportOptions{UserID: "@archive:example.org", NoMedia: true}
+			run := func() *SyncState {
+				_, err := NewImporter(f.store, runtime).Import(t.Context(), opts)
+				req.NoError(err)
+				previous, err := f.store.GetLastSuccessfulSyncByType(f.sourceID, SourceType)
+				req.NoError(err)
+				state, err := loadSyncState(previous.CursorAfter.String)
+				req.NoError(err)
+				return state
+			}
+			state := run()
+			check.Zero(state.MediaDiscoveryVersion)
+			check.Equal(ids[legacyMediaDiscoveryBudget-1], state.MediaDiscoveryAfter)
+			check.Equal(scenario == "temporary", state.MediaDiscoveryIncomplete)
+			unavailable = false
+			if scenario == "scope" {
+				opts.ExcludeRooms = []string{"!other:example.org"}
+			}
+			opts.Full = scenario == "full"
+			state = run()
+			opts.Full = false
+			if scenario == "complete" {
+				check.Equal(mediaDiscoveryVersion, state.MediaDiscoveryVersion)
+				check.Zero(state.MediaDiscoveryAfter)
+				return
+			}
+			check.Zero(state.MediaDiscoveryVersion)
+			if scenario == "temporary" {
+				check.Zero(state.MediaDiscoveryAfter)
+				check.False(state.MediaDiscoveryIncomplete)
+				check.Equal(1, lookups, "finish the pass before retrying the earlier lookup")
+			} else {
+				check.Equal(ids[legacyMediaDiscoveryBudget-1], state.MediaDiscoveryAfter)
+			}
+			state = run()
+			if scenario == "temporary" {
+				check.Zero(state.MediaDiscoveryVersion)
+				state = run()
+			}
+			check.Equal(mediaDiscoveryVersion, state.MediaDiscoveryVersion)
+			check.Zero(state.MediaDiscoveryAfter)
+			if scenario == "temporary" {
+				check.Equal(2, lookups)
+				refs, err := f.store.MessageMatrixAttachments(ids[0])
+				req.NoError(err)
+				check.Equal(attachmentpolicy.StatePending, refs["matrix:mxc://example.org/file"].State)
+			}
+		})
 	}
 }
 
