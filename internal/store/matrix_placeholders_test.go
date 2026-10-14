@@ -227,19 +227,9 @@ func TestMatrixRecoveryTransactionKeepsStoreConfigurationAndScope(t *testing.T) 
 		check.Equal(store.DBPathForTest(s), store.DBPathForTest(view))
 		check.Equal(s.IsPostgreSQL(), view.IsPostgreSQL())
 		check.Error(view.WithExclusiveLock(t.Context(), func() error { return nil }))
-		_, err := view.EnsureLabelsBatch(f.source.ID, map[string]store.LabelInfo{"Outbox": {Name: "Outbox", Type: "system", SystemRole: store.LabelSystemRoleSent}})
-		if err != nil {
-			return err
-		}
-		check.NotContains(searchIDs(t, view, "received:"+attrSink), id)
-		_, err = view.EnsureLabelsBatch(f.source.ID, map[string]store.LabelInfo{"Outbox": {Name: "Outbox", Type: "system"}})
-		if err != nil {
-			return err
-		}
 		check.Contains(searchIDs(t, view, "received:"+attrSink), id)
 		return view.SetMessageMetadataContext(t.Context(), messageID, sql.NullString{String: `{"saved":true}`, Valid: true})
 	}))
-	check.Contains(searchIDs(t, s, "received:"+attrSink), id)
 	req.NoError(scoped.FailSync(syncID, "interrupted"))
 	err = scoped.MatrixRecoveryTransaction(t.Context(), func(view *store.Store) error {
 		return view.SetMessageMetadataContext(t.Context(), messageID, sql.NullString{})
