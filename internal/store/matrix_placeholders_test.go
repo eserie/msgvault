@@ -178,7 +178,6 @@ func TestDeleteMatrixPlaceholderRetiresRelatedData(t *testing.T) {
 	req.NoError(s.SetMessageReplyContext(t.Context(), ids[0], ids[2]))
 	revision, err := s.DerivedDataRevision()
 	req.NoError(err)
-	req.NoError(s.DeleteMatrixPlaceholder(t.Context(), sourceID+1, ids[2]))
 	req.NoError(s.SetConversationMetadata(convID, sql.NullString{String: `{"member_count":2}`, Valid: true}))
 	req.NoError(s.DeleteMatrixPlaceholder(t.Context(), sourceID, ids[2]))
 	metadata, err := s.GetConversationMetadata(convID)

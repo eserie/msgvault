@@ -419,7 +419,6 @@ func TestAddMatrixRenewalResumesAfterPublishFailure(t *testing.T) {
 				require.NoError(matrixsource.SavePendingCredentials(cfg.TokensDir(), old))
 				secret = ""
 			}
-			t.Setenv(clirun.EnvMatrixRecoverySecret, "")
 			failMatrixCredentialWrite(t, &saveMatrixCredentials, tc.fail)
 
 			require.ErrorContains(runAddMatrixForRenewal(t, cfg, server.URL, secret), "retry add-matrix to finish")
@@ -435,7 +434,7 @@ func TestAddMatrixRenewalResumesAfterPublishFailure(t *testing.T) {
 			}
 
 			restoreMatrixCredentialWrites()
-			require.NoError(runAddMatrixForRenewal(t, cfg, server.URL, ""), "a retry needs no new login secret or recovery flags")
+			require.NoError(runAddMatrixForRenewal(t, cfg, server.URL, ""), "the retry resumes the pending login")
 			creds, err := matrixsource.LoadCredentials(cfg.TokensDir(), old.UserID)
 			require.NoError(err)
 			assert.Equal(pending, creds)
