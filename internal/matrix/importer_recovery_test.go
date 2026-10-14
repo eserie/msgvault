@@ -292,7 +292,7 @@ func TestImportRecoverySkipsBackupWhenDisabledOrRoomExcluded(t *testing.T) {
 			req.NoError(err)
 			check.Equal(versions, f.backup.versionFetches)
 			check.Equal(rooms, f.backup.roomFetches)
-			check.NoError(sum.BackupFailure)
+			req.NoError(sum.BackupFailure)
 			if mode == "SkipKeyBackup" {
 				check.Equal(encryptedPlaceholder, f.body(t, "$pending"))
 				check.Zero(sum.Recovered)
