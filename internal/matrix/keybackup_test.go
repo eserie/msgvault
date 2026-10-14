@@ -277,6 +277,7 @@ func TestBackupDecrypt(t *testing.T) {
 				check.True(plain.Mautrix.WasEncrypted)
 			case "corrupt stored key":
 				req.ErrorContains(r.backupKeyError, "decode Matrix backup key")
+				req.EqualError(err, "matrix backup key unavailable")
 			case "replaced":
 				req.ErrorContains(err, "matrix key backup was replaced")
 				check.Contains(err.Error(), "run add-matrix with --recovery-file or --skip-key-backup")

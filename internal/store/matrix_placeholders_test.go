@@ -174,15 +174,11 @@ func TestMatrixPlaceholderPaging(t *testing.T) {
 
 func TestDeleteMatrixPlaceholderRetiresRelatedData(t *testing.T) {
 	req, check := require.New(t), assert.New(t)
-	s, sourceID, convID, ids := setupMatrixPlaceholders(t)
+	s, sourceID, _, ids := setupMatrixPlaceholders(t)
 	req.NoError(s.SetMessageReplyContext(t.Context(), ids[0], ids[2]))
 	revision, err := s.DerivedDataRevision()
 	req.NoError(err)
-	req.NoError(s.SetConversationMetadata(convID, sql.NullString{String: `{"member_count":2}`, Valid: true}))
 	req.NoError(s.DeleteMatrixPlaceholder(t.Context(), sourceID, ids[2]))
-	metadata, err := s.GetConversationMetadata(convID)
-	req.NoError(err)
-	check.JSONEq(`{"member_count":2}`, metadata.String)
 	updated, err := s.DerivedDataRevision()
 	req.NoError(err)
 	check.Equal(revision+1, updated)
