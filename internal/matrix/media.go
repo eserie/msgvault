@@ -100,11 +100,10 @@ func (imp *Importer) discoverLegacyMedia(ctx context.Context, sourceID int64, st
 			scanned++
 			archived, content, selected, err := imp.archivedMediaContent(item.MessageID)
 			if err != nil {
-				if errors.Is(err, errUnsupportedMediaContentVersion) || errors.Is(err, errReadMediaMetadata) {
+				if errors.Is(err, errUnsupportedMediaContentVersion) || errors.Is(err, errReadMediaMetadata) || errors.Is(err, errReadArchivedEvent) {
 					return false, err
 				}
 				slog.Warn("skip unreadable Matrix media event", "message_id", item.MessageID, "error", err)
-				complete = false
 				continue
 			}
 			if archived.Type != event.EventMessage && archived.Type != event.EventSticker {
@@ -233,7 +232,7 @@ func (imp *Importer) retryArchivedMedia(ctx context.Context, sourceID int64, opt
 			}
 			archived, content, _, err := imp.archivedMediaContent(item.MessageID)
 			if err != nil {
-				if errors.Is(err, errUnsupportedMediaContentVersion) || errors.Is(err, errReadMediaMetadata) {
+				if errors.Is(err, errUnsupportedMediaContentVersion) || errors.Is(err, errReadMediaMetadata) || errors.Is(err, errReadArchivedEvent) {
 					return err
 				}
 				slog.Warn("skip unreadable Matrix media event", "message_id", item.MessageID, "error", err)
