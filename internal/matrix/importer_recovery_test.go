@@ -207,10 +207,7 @@ func TestImportRecoveryRoomFetchFailureContinuesAndPersistsAttempt(t *testing.T)
 				check.Equal(1, f.backup.roomFetches)
 			}
 			check.Equal(encryptedPlaceholder, f.body(t, "$failed"))
-			last, err := f.store.GetLastSuccessfulSyncByType(f.sourceID, SourceType)
-			req.NoError(err)
-			state, err := loadSyncState(last.CursorAfter.String)
-			req.NoError(err)
+			state := f.syncState(t)
 			check.False(state.RecoveryRooms["!first:example.org"].TriedAt.IsZero())
 		})
 	}
@@ -552,13 +549,19 @@ func (f *recoveryFixture) operation(t *testing.T) operations.Run {
 	return run
 }
 
+func (f *recoveryFixture) syncState(t *testing.T) *SyncState {
+	t.Helper()
+	last, err := f.store.GetLastSuccessfulSyncByType(f.sourceID, SourceType)
+	require.NoError(t, err)
+	state, err := loadSyncState(last.CursorAfter.String)
+	require.NoError(t, err)
+	return state
+}
+
 func (f *recoveryFixture) ageAttempts(t *testing.T) {
 	t.Helper()
 	req := require.New(t)
-	last, err := f.store.GetLastSuccessfulSyncByType(f.sourceID, SourceType)
-	req.NoError(err)
-	state, err := loadSyncState(last.CursorAfter.String)
-	req.NoError(err)
+	state := f.syncState(t)
 	for room, attempt := range state.RecoveryRooms {
 		attempt.TriedAt = time.Now().Add(-2 * recoveryCooldown)
 		attempt.NoProgressAt = attempt.TriedAt
@@ -571,56 +574,22 @@ func (f *recoveryFixture) ageAttempts(t *testing.T) {
 	req.NoError(f.store.CompleteSyncAndUpdateSourceCursor(syncID, f.sourceID, encoded))
 }
 
-func TestImportRecoveryRedactedReactionRejectsReplay(t *testing.T) {
-	req, check := require.New(t), assert.New(t)
-	f := newRecoveryFixture(t)
-	reaction := f.backup.encrypted(t, "$reaction", 20, event.EventReaction, map[string]any{"m.relates_to": map[string]any{"rel_type": "m.annotation", "event_id": "$original", "key": "yes"}})
-	f.timeline = []*event.Event{f.message(t, "$original", "original", 10), reaction}
-	_, err := f.run(t, false, false)
-	req.NoError(err)
-	f.timeline = []*event.Event{{ID: "$redaction", Type: event.EventRedaction, Redacts: "$reaction", Content: event.Content{Raw: map[string]any{}}}}
-	_, err = f.run(t, false, false)
-	req.NoError(err)
-	f.quiet = true
-	sum, err := f.run(t, true, false)
-	req.NoError(err)
-	check.Zero(sum.PendingEncrypted)
-	var reactions int
-	req.NoError(f.store.DB().QueryRow(`SELECT count(*) FROM reactions`).Scan(&reactions))
-	check.Zero(reactions)
-	ids, err := f.store.MessageExistsBatch(f.sourceID, []string{"$reaction"})
-	req.NoError(err)
-	req.NotZero(ids["$reaction"])
-	var hidden bool
-	req.NoError(f.store.DB().QueryRow(f.store.Rebind(`SELECT deleted_at IS NOT NULL FROM messages WHERE id = ?`), ids["$reaction"]).Scan(&hidden))
-	check.True(hidden)
-	replayed := *reaction
-	replayed.ID = "$replayed"
-	f.quiet = false
-	f.timeline = []*event.Event{&replayed}
-	_, err = f.run(t, true, false)
-	req.NoError(err)
-	req.NoError(f.store.DB().QueryRow(`SELECT count(*) FROM reactions`).Scan(&reactions))
-	check.Zero(reactions)
-	check.Equal(encryptedPlaceholder, f.body(t, "$replayed"))
-}
-
 func TestImportRecoveryRetiredRelationsRejectReplay(t *testing.T) {
-	for _, kind := range []string{"redacted edit", "orphan edit", "orphan reaction"} {
+	for _, kind := range []string{"redacted edit", "redacted reaction", "orphan edit", "orphan reaction"} {
 		t.Run(kind, func(t *testing.T) {
 			req, check := require.New(t), assert.New(t)
 			f := newRecoveryFixture(t)
 			first := f.edit(t, "$first", "$original", "edited", 20)
-			if kind == "orphan reaction" {
+			if strings.HasSuffix(kind, "reaction") {
 				first = f.backup.encrypted(t, "$first", 20, event.EventReaction, map[string]any{"m.relates_to": map[string]any{"rel_type": "m.annotation", "event_id": "$original", "key": "yes"}})
 			}
 			f.timeline = []*event.Event{first}
-			if kind == "redacted edit" {
+			if strings.HasPrefix(kind, "redacted") {
 				f.timeline = append(f.timeline, f.message(t, "$original", "original", 10))
 			}
 			_, err := f.run(t, false, false)
 			req.NoError(err)
-			if kind == "redacted edit" {
+			if strings.HasPrefix(kind, "redacted") {
 				f.timeline = []*event.Event{{ID: "$redaction", Type: event.EventRedaction, Redacts: "$first", Content: event.Content{Raw: map[string]any{}}}}
 				_, err = f.run(t, false, false)
 				req.NoError(err)
@@ -629,11 +598,22 @@ func TestImportRecoveryRetiredRelationsRejectReplay(t *testing.T) {
 			sum, err := f.run(t, true, false)
 			req.NoError(err)
 			check.Zero(sum.PendingEncrypted)
+			if kind == "redacted reaction" {
+				ids, err := f.store.MessageExistsBatch(f.sourceID, []string{"$first"})
+				req.NoError(err)
+				req.NotZero(ids["$first"])
+				var hidden bool
+				req.NoError(f.store.DB().QueryRow(f.store.Rebind(`SELECT deleted_at IS NOT NULL FROM messages WHERE id = ?`), ids["$first"]).Scan(&hidden))
+				check.True(hidden)
+				var reactions int
+				req.NoError(f.store.DB().QueryRow(`SELECT count(*) FROM reactions`).Scan(&reactions))
+				check.Zero(reactions)
+			}
 			second := *first
 			second.ID = "$replayed"
 			f.quiet = false
 			f.timeline = []*event.Event{&second}
-			if kind != "redacted edit" {
+			if !strings.HasPrefix(kind, "redacted") {
 				f.timeline = append(f.timeline, f.message(t, "$original", "original", 10))
 			}
 			_, err = f.run(t, true, false)
@@ -668,10 +648,7 @@ func TestImportRecoveryFailedRoomsRespectRetryLimit(t *testing.T) {
 		req.ErrorContains(err, "recover Matrix room")
 		check.Equal(int64(roomCount), sum.PendingEncrypted)
 		check.Equal(roomCount+round*recoveryRetryLimit, f.backup.roomFetches)
-		last, err := f.store.GetLastSuccessfulSyncByType(f.sourceID, SourceType)
-		req.NoError(err)
-		state, err := loadSyncState(last.CursorAfter.String)
-		req.NoError(err)
+		state := f.syncState(t)
 		req.Len(state.RecoveryRooms, roomCount)
 		for _, attempt := range state.RecoveryRooms {
 			check.False(attempt.TriedAt.IsZero())
@@ -910,10 +887,7 @@ func TestImportRecoveryProgressDoesNotStarveQuietRoom(t *testing.T) {
 		_, err := f.run(t, true, false)
 		req.NoError(err)
 	}
-	last, err := f.store.GetLastSuccessfulSyncByType(f.sourceID, SourceType)
-	req.NoError(err)
-	state, err := loadSyncState(last.CursorAfter.String)
-	req.NoError(err)
+	state := f.syncState(t)
 	check.False(state.RecoveryRooms[fmt.Sprintf("!busy%d:example.org", recoveryRetryLimit)].TriedAt.Before(began), "the quiet room gets a turn while busy rooms keep recovering events")
 	check.Equal("quiet", f.body(t, "$quiet"), "the quiet room recovers once its keys become available")
 	check.True(state.RecoveryRooms["!busy0:example.org"].NoProgressAt.IsZero(), "progress clears only the cooldown")
@@ -1011,10 +985,7 @@ func TestImportGCRecoversReusedPlaceholderID(t *testing.T) {
 			f.timeline = []*event.Event{missing, deleted}
 			_, err := f.run(t, !retired, false)
 			req.NoError(err)
-			last, err := f.store.GetLastSuccessfulSyncByType(f.sourceID, SourceType)
-			req.NoError(err)
-			before, err := loadSyncState(last.CursorAfter.String)
-			req.NoError(err)
+			before := f.syncState(t)
 			ids, err := f.store.MessageExistsBatch(f.sourceID, []string{"$deleted"})
 			req.NoError(err)
 			deletedID := ids["$deleted"]
@@ -1078,10 +1049,7 @@ func TestImportGCRecoversReusedPlaceholderID(t *testing.T) {
 			if !f.store.IsPostgreSQL() {
 				check.Equal(deletedID, ids["$new"], "SQLite reuses the collected table-max rowid")
 			}
-			last, err = f.store.GetLastSuccessfulSyncByType(f.sourceID, SourceType)
-			req.NoError(err)
-			after, err := loadSyncState(last.CursorAfter.String)
-			req.NoError(err)
+			after := f.syncState(t)
 			if !retired {
 				check.Equal(before.RecoveryRooms["!room:example.org"].Stamp, after.RecoveryRooms["!room:example.org"].Stamp)
 			}
@@ -1231,10 +1199,7 @@ func TestImportInterruptedNewPlaceholdersPreserveRecoveryCheckpoint(t *testing.T
 	}
 	_, err := f.run(t, true, false)
 	req.NoError(err)
-	last, err := f.store.GetLastSuccessfulSyncByType(f.sourceID, SourceType)
-	req.NoError(err)
-	before, err := loadSyncState(last.CursorAfter.String)
-	req.NoError(err)
+	before := f.syncState(t)
 	for i := range 7 {
 		fresh := f.message(t, fmt.Sprintf("$new%d", i), "new", 20)
 		fresh.Content.AsEncrypted().SessionID = "absent"
@@ -1278,10 +1243,7 @@ func TestImportFailingRecoveryRoomDoesNotStarveLaterRooms(t *testing.T) {
 		run := f.operation(t)
 		check.Equal(operations.StatePartial, run.State)
 		check.Contains(run.Counters, operations.PublicCounter{Name: operations.CounterItemErrors, Unit: operations.CounterUnitMessages, Value: 1})
-		last, err := f.store.GetLastSuccessfulSyncByType(f.sourceID, SourceType)
-		req.NoError(err)
-		state, err := loadSyncState(last.CursorAfter.String)
-		req.NoError(err)
+		state := f.syncState(t)
 		check.Equal(f.nextBatch, state.NextBatch)
 		check.False(state.RecoveryRooms["!room:example.org"].TriedAt.IsZero())
 		if round == 0 {

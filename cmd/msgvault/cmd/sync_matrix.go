@@ -93,14 +93,15 @@ func runMatrixSync(ctx context.Context, s *store.Store, cfg *config.Config, acco
 					preferences.SkipKeyBackup = false
 				}
 			}
+			skipKeyBackup := preferences.SkipKeyBackup && creds.BackupKey == ""
 			var importErr error
 			summary, importErr = imp.Import(ctx, matrixsource.ImportOptions{
-				UserID: current.Identifier, Full: full, SkipKeyBackup: preferences.SkipKeyBackup,
+				UserID: current.Identifier, Full: full, SkipKeyBackup: skipKeyBackup,
 				Rooms: cfg.Matrix.Rooms, ExcludeRooms: cfg.Matrix.ExcludeRooms,
 				Progress: progress,
 			})
 			if importErr == nil && creds.BackupKey == "" {
-				needsBackupKey = summary.PendingEncrypted > 0 && !preferences.SkipKeyBackup
+				needsBackupKey = summary.PendingEncrypted > 0 && !skipKeyBackup
 			}
 			return importErr
 		})
