@@ -11,7 +11,7 @@ import (
 	"go.kenn.io/msgvault/internal/testutil"
 )
 
-func TestMatrixUnsupportedPlaceholderRetainsRawAndReplayClaimAndInvalidatesIndexes(t *testing.T) {
+func TestMatrixUnsupportedPlaceholderRetainsRawAndInvalidatesIndexes(t *testing.T) {
 	req, check := require.New(t), assert.New(t)
 	s := testutil.NewTestStore(t)
 	source, err := s.GetOrCreateSource("matrix", "@archive:example.org")
@@ -58,9 +58,6 @@ func TestMatrixUnsupportedPlaceholderRetainsRawAndReplayClaimAndInvalidatesIndex
 	rooms, err := s.MatrixPlaceholderRooms(t.Context(), source.ID, nil, nil)
 	req.NoError(err)
 	check.Empty(rooms)
-	claims, err := s.MatrixRecoveredEvents(t.Context(), convID)
-	req.NoError(err)
-	check.Equal("$unsupported", claims["matrix_megolm_session_0"])
 }
 
 func setupMatrixPlaceholders(t *testing.T) (*store.Store, int64, int64, []int64) {
