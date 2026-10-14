@@ -546,7 +546,7 @@ func TestOnlyMutatingMessageRelationsAreDeferred(t *testing.T) {
 	assert.True(shouldDeferRelation(edit))
 }
 
-func TestReplayedReplyKeepsEditedBodyAndLinksTarget(t *testing.T) {
+func TestPersistExistingReplyKeepsEditedBodyAndLinksTarget(t *testing.T) {
 	require := require.New(t)
 	assert := assert.New(t)
 	st := testutil.NewTestStore(t)

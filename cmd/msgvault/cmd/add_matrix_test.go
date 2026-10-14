@@ -159,8 +159,9 @@ func TestAddMatrixBackupSetup(t *testing.T) {
 }
 
 func TestReadMatrixRecoverySecret(t *testing.T) {
-	for _, file := range []bool{false, true} {
-		t.Run(strconv.FormatBool(file), func(t *testing.T) {
+	for _, mode := range []string{"passphrase requires file without prompt", "file preserves passphrase whitespace"} {
+		t.Run(mode, func(t *testing.T) {
+			file := mode == "file preserves passphrase whitespace"
 			req := require.New(t)
 			stdin, err := os.Open(os.DevNull)
 			req.NoError(err)
