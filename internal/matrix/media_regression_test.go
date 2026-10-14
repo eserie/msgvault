@@ -7,6 +7,8 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"image"
+	"image/png"
 	"io"
 	"log/slog"
 	"net/http"
@@ -64,6 +66,86 @@ func TestImportMediaCASShapedURLIsNotLocalStorage(t *testing.T) {
 				check.Empty(matches)
 			})
 		}
+	}
+}
+
+func TestImportMediaCaptionEditKeepsPNGType(t *testing.T) {
+	for _, encrypted := range []bool{false, true} {
+		for _, declared := range []bool{false, true} {
+			t.Run(fmt.Sprintf("encrypted=%t/declared=%t", encrypted, declared), func(t *testing.T) {
+				req, check := require.New(t), assert.New(t)
+				f := newRecoveryFixture(t)
+				var pngData bytes.Buffer
+				req.NoError(png.Encode(&pngData, image.NewRGBA(image.Rect(0, 0, 1, 1))))
+				data := append([]byte(nil), pngData.Bytes()...)
+				content := &event.MessageEventContent{MsgType: event.MsgImage, Body: "image.png", URL: "mxc://example.org/image"}
+				if declared {
+					content.Info = &event.FileInfo{MimeType: "image/png"}
+				}
+				if encrypted {
+					file := matrixattachment.NewEncryptedFile()
+					file.EncryptInPlace(data)
+					content.URL = ""
+					content.File = &event.EncryptedFileInfo{EncryptedFile: *file, URL: "mxc://example.org/image"}
+				}
+				raw, err := json.Marshal(&event.Event{ID: "$media", Sender: "@member:example.org", Timestamp: 10, Type: event.EventMessage, Content: event.Content{Parsed: content}})
+				req.NoError(err)
+				f.timeline = []*event.Event{matrixTestEvent(t, string(raw))}
+				mux, ok := f.server.Config.Handler.(*http.ServeMux)
+				req.True(ok)
+				downloads := 0
+				mux.HandleFunc("GET /_matrix/client/v1/media/download/example.org/image", func(w http.ResponseWriter, _ *http.Request) {
+					downloads++
+					w.Header().Set("Content-Type", "application/octet-stream")
+					_, _ = w.Write(data)
+				})
+				runtime := backupRuntime(t, f.server.URL, f.backup)
+				opts := ImportOptions{UserID: "@archive:example.org", AttachmentsDir: t.TempDir()}
+				_, err = NewImporter(f.store, runtime).Import(t.Context(), opts)
+				req.NoError(err)
+				content.Info = nil
+				content.Body = "edited caption"
+				raw, err = json.Marshal(&event.Event{ID: "$edit", Sender: "@member:example.org", Timestamp: 20, Type: event.EventMessage, Content: event.Content{Parsed: &event.MessageEventContent{NewContent: content, RelatesTo: &event.RelatesTo{Type: event.RelReplace, EventID: "$media"}}}})
+				req.NoError(err)
+				f.timeline = []*event.Event{matrixTestEvent(t, string(raw))}
+				_, err = NewImporter(f.store, runtime).Import(t.Context(), opts)
+				req.NoError(err)
+				ids, err := f.store.MessageExistsBatch(f.sourceID, []string{"$media"})
+				req.NoError(err)
+				refs, err := f.store.MessageMatrixAttachments(ids["$media"])
+				req.NoError(err)
+				req.Len(refs, 1)
+				for _, ref := range refs {
+					check.Equal("image/png", ref.MimeType)
+					stored, err := os.ReadFile(filepath.Join(opts.AttachmentsDir, ref.StoragePath))
+					req.NoError(err)
+					check.Equal(pngData.Bytes(), stored)
+				}
+				check.Equal(1, downloads)
+			})
+		}
+	}
+}
+
+func TestImportMediaDotServerMakesNoRequest(t *testing.T) {
+	for _, uri := range []string{"mxc://./file", "mxc://../file"} {
+		t.Run(uri, func(t *testing.T) {
+			req, check := require.New(t), assert.New(t)
+			f := newRecoveryFixture(t)
+			f.timeline = []*event.Event{matrixTestEvent(t, fmt.Sprintf(`{"type":"m.room.message","event_id":"$media","sender":"@member:example.org","content":{"msgtype":"m.file","body":"file","url":%q}}`, uri))}
+			mux, ok := f.server.Config.Handler.(*http.ServeMux)
+			req.True(ok)
+			requests := 0
+			mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+				requests++
+				_, _ = w.Write([]byte("unexpected endpoint"))
+			})
+			sum, err := NewImporter(f.store, backupRuntime(t, f.server.URL, f.backup)).Import(t.Context(), ImportOptions{UserID: "@archive:example.org", AttachmentsDir: t.TempDir()})
+			req.NoError(err)
+			check.Zero(requests)
+			check.Equal(int64(1), sum.AttachmentsFailed)
+			check.Zero(sum.AttachmentsDownloaded)
+		})
 	}
 }
 
@@ -160,6 +242,8 @@ func TestImportMediaValidatesMXCBeforeRequest(t *testing.T) {
 		{"mxc://example.org:8448/file", true},
 		{"mxc://127.0.0.1/file", true},
 		{"mxc://[2001:db8::1]:8448/file", true},
+		{"mxc://./file", false},
+		{"mxc://../file", false},
 		{"mxc://example.org/../file", false},
 		{"mxc://example.org/%2e%2e", false},
 		{"mxc://example.org/file?query", false},
@@ -174,7 +258,7 @@ func TestImportMediaValidatesMXCBeforeRequest(t *testing.T) {
 	} {
 		t.Run(uri.value, func(t *testing.T) {
 			parsed, err := id.ContentURIString(uri.value).Parse()
-			assert.Equal(t, uri.valid, err == nil && validMediaServerName(parsed.Homeserver) && matrixMediaID.MatchString(parsed.FileID))
+			assert.Equal(t, uri.valid, err == nil && validMediaServerName(parsed.Homeserver) && id.IsValidMediaID(parsed.FileID))
 		})
 	}
 	req, check := require.New(t), assert.New(t)
@@ -1487,7 +1571,7 @@ func TestImportLegacyMediaDiscoveryRunsOnceAfterUpgrade(t *testing.T) {
 }
 
 func TestImportLegacyMediaDiscoveryRetriesIncompleteSync(t *testing.T) {
-	for _, scenario := range []string{"transient-edit", "include-room", "exclude-room"} {
+	for _, scenario := range []string{"transient-edit", "forbidden-edit", "missing-edit", "include-room", "exclude-room"} {
 		t.Run(scenario, func(t *testing.T) {
 			req, check := require.New(t), assert.New(t)
 			f := newRecoveryFixture(t)
@@ -1518,6 +1602,14 @@ func TestImportLegacyMediaDiscoveryRetriesIncompleteSync(t *testing.T) {
 			lookups, downloads := 0, 0
 			mux.HandleFunc("GET /_matrix/client/v3/rooms/!room:example.org/event/$edit", func(w http.ResponseWriter, _ *http.Request) {
 				lookups++
+				if scenario == "forbidden-edit" || scenario == "missing-edit" {
+					status := http.StatusForbidden
+					if scenario == "missing-edit" {
+						status = http.StatusNotFound
+					}
+					w.WriteHeader(status)
+					return
+				}
 				if unavailable {
 					w.WriteHeader(http.StatusServiceUnavailable)
 					return
@@ -1546,6 +1638,12 @@ func TestImportLegacyMediaDiscoveryRetriesIncompleteSync(t *testing.T) {
 				check.Zero(state.MediaDiscoveryVersion)
 			} else {
 				check.Equal(mediaDiscoveryVersion, state.MediaDiscoveryVersion)
+			}
+			if scenario == "forbidden-edit" || scenario == "missing-edit" {
+				_, err = NewImporter(f.store, runtime).Import(t.Context(), opts)
+				req.NoError(err)
+				check.Equal(1, lookups)
+				return
 			}
 			unavailable = false
 			opts.Rooms, opts.ExcludeRooms = nil, nil

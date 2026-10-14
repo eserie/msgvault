@@ -11,7 +11,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/netip"
-	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -118,7 +117,9 @@ func (imp *Importer) discoverLegacyMedia(ctx context.Context, sourceID int64, op
 						return false, fmt.Errorf("authenticate legacy Matrix edit lookup: %w", err)
 					}
 					slog.Warn("skip unavailable legacy Matrix edit", "message_id", item.MessageID, "error", err)
-					complete = false
+					if temporaryMediaError(err) {
+						complete = false
+					}
 					continue
 				}
 				if edit.Type == event.EventEncrypted {
@@ -369,6 +370,9 @@ func (imp *Importer) prepareMedia(ctx context.Context, messageID int64, content 
 		return imp.store.ReplaceMessageMatrixAttachments(ctx, messageID, []store.AttachmentRef{ref})
 	}
 	if seen {
+		if ref.MimeType == "" {
+			ref.MimeType = archived.MimeType
+		}
 		metadata.Attempts = previous.Attempts
 		metadata.RetryAfter = previous.RetryAfter
 		if archived.State == attachmentpolicy.StatePending {
@@ -424,11 +428,8 @@ func (imp *Importer) prepareMedia(ctx context.Context, messageID int64, content 
 	return nil
 }
 
-var matrixMediaServerName = regexp.MustCompile(`^(?:[A-Za-z0-9.-]{1,255}|\[[0-9A-Fa-f:.]{2,45}\])(?::[0-9]{1,5})?$`)
-var matrixMediaID = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
-
 func validMediaServerName(server string) bool {
-	if !matrixMediaServerName.MatchString(server) {
+	if server == "." || server == ".." || !id.ValidateServerName(server) {
 		return false
 	}
 	if strings.HasPrefix(server, "[") {
@@ -436,6 +437,15 @@ func validMediaServerName(server string) bool {
 		return err == nil && address.Is6()
 	}
 	return true
+}
+
+func temporaryMediaError(err error) bool {
+	var httpErr mautrix.HTTPError
+	if !errors.As(err, &httpErr) || httpErr.Response == nil {
+		return true
+	}
+	status := httpErr.Response.StatusCode
+	return status == http.StatusRequestTimeout || status == http.StatusTooEarly || status == http.StatusTooManyRequests || status >= 500
 }
 
 func (imp *Importer) downloadMedia(ctx context.Context, messageID int64, content *event.MessageEventContent, ref store.AttachmentRef, metadata matrixMediaMetadata, opts ImportOptions, sum *ImportSummary) error {
@@ -447,7 +457,7 @@ func (imp *Importer) downloadMedia(ctx context.Context, messageID int64, content
 		uri = content.File.URL
 	}
 	parsed, err := uri.Parse()
-	if err != nil || !validMediaServerName(parsed.Homeserver) || !matrixMediaID.MatchString(parsed.FileID) {
+	if err != nil || !validMediaServerName(parsed.Homeserver) || !id.IsValidMediaID(parsed.FileID) {
 		return imp.persistMediaFailure(ctx, messageID, ref, metadata, opts)
 	}
 	limit := opts.MediaPolicy.MaxBytes
@@ -476,7 +486,7 @@ func (imp *Importer) downloadMedia(ctx context.Context, messageID int64, content
 		if errors.Is(err, mautrix.MUnknownToken) || (errors.As(err, &httpErr) && httpErr.Response != nil && httpErr.Response.StatusCode == http.StatusUnauthorized) {
 			return fmt.Errorf("authenticate Matrix media download: %w", err)
 		}
-		if errors.As(err, &httpErr) && httpErr.Response != nil && httpErr.Response.StatusCode != http.StatusRequestTimeout && httpErr.Response.StatusCode != http.StatusTooEarly && httpErr.Response.StatusCode != http.StatusTooManyRequests && httpErr.Response.StatusCode < 500 {
+		if !temporaryMediaError(err) {
 			return imp.persistMediaFailure(ctx, messageID, ref, metadata, opts)
 		}
 		return imp.persistMediaTransientFailure(ctx, messageID, ref, metadata, opts)
@@ -507,6 +517,9 @@ func (imp *Importer) downloadMedia(ctx context.Context, messageID int64, content
 		if err := content.File.DecryptInPlace(data); err != nil {
 			return imp.persistMediaFailure(ctx, messageID, ref, metadata, opts)
 		}
+	}
+	if ref.MimeType == "" {
+		ref.MimeType = http.DetectContentType(data)
 	}
 	write := func() error {
 		attachment := &msgmime.Attachment{Filename: ref.Filename, ContentType: ref.MimeType, Content: data}
