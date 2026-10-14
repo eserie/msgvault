@@ -91,9 +91,6 @@ func TestAddMatrixBackupSetup(t *testing.T) {
 			}
 			t.Setenv(daemonCLISubprocessEnv, strconv.Itoa(os.Getppid()))
 			t.Setenv(clirun.EnvMatrixLoginSecret, "password")
-			if mode == "pending login's key" {
-				t.Setenv(clirun.EnvMatrixLoginSecret, "")
-			}
 			t.Setenv(clirun.EnvMatrixRecoverySecret, recoveryKey)
 			switch mode {
 			case "invalid":
@@ -142,9 +139,14 @@ func TestAddMatrixBackupSetup(t *testing.T) {
 }
 
 func TestReadMatrixRecoverySecret(t *testing.T) {
-	for _, mode := range []string{"passphrase requires file without prompt", "passphrase disables normalization"} {
-		t.Run(mode, func(t *testing.T) {
-			file := mode == "passphrase disables normalization"
+	for _, tc := range []struct {
+		name string
+		file bool
+	}{
+		{"passphrase requires file without prompt", false},
+		{"passphrase disables normalization", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			req := require.New(t)
 			stdin, err := os.Open(os.DevNull)
 			req.NoError(err)
@@ -157,19 +159,16 @@ func TestReadMatrixRecoverySecret(t *testing.T) {
 				addMatrixRecoveryIsPassphrase = false
 			})
 			args := []string{"--recovery-passphrase"}
-			var path string
-			if file {
-				path = filepath.Join(t.TempDir(), "recovery")
+			if tc.file {
+				path := filepath.Join(t.TempDir(), "recovery")
 				req.NoError(os.WriteFile(path, []byte("  example passphrase  \n"), 0o600))
 				args = append(args, "--recovery-file", path)
 			}
 			req.NoError(cmd.ParseFlags(args))
 			secret, err := readMatrixRecoverySecret()
-			if file {
+			if tc.file {
 				req.NoError(err)
-				want, err := readMatrixSecretFile(path, false)
-				req.NoError(err)
-				assert.Equal(t, want, secret)
+				assert.Equal(t, "  example passphrase  ", secret)
 			} else {
 				req.EqualError(err, "--recovery-passphrase requires --recovery-file when an interactive prompt is unavailable")
 			}

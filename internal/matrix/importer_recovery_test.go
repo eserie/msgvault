@@ -23,17 +23,15 @@ import (
 )
 
 type recoveryFixture struct {
-	backup       *backupFixture
-	store        *store.Store
-	sourceID     int64
-	server       *httptest.Server
-	timeline     []*event.Event
-	history      []*event.Event
-	edits        []*event.Event
-	quiet        bool
-	historyFails bool
-	extraRooms   map[string][]*event.Event
-	nextBatch    string
+	backup     *backupFixture
+	store      *store.Store
+	sourceID   int64
+	server     *httptest.Server
+	timeline   []*event.Event
+	edits      []*event.Event
+	quiet      bool
+	extraRooms map[string][]*event.Event
+	nextBatch  string
 }
 
 type ingestDuringDecryption struct {
@@ -316,11 +314,7 @@ func newRecoveryFixture(t *testing.T) *recoveryFixture {
 		_, _ = w.Write([]byte(`{"joined":{"@member:example.org":{}}}`))
 	})
 	mux.HandleFunc("GET /_matrix/client/v3/rooms/{room}/messages", func(w http.ResponseWriter, _ *http.Request) {
-		if f.historyFails {
-			w.WriteHeader(http.StatusForbidden)
-			return
-		}
-		writeMatrixJSON(t, w, map[string]any{"chunk": f.history, "end": ""})
+		writeMatrixJSON(t, w, map[string]any{"chunk": []*event.Event{}, "end": ""})
 	})
 	mux.HandleFunc("GET /_matrix/client/v1/rooms/{room}/relations/{event}/m.replace", func(w http.ResponseWriter, _ *http.Request) { writeMatrixJSON(t, w, map[string]any{"chunk": f.edits}) })
 	f.server = httptest.NewServer(mux)
@@ -984,7 +978,7 @@ func TestImportHandlesUnreadableCursorBySyncMode(t *testing.T) {
 	}{
 		{"incremental refuses malformed cursor", false, "invalid JSON", true, "decode Matrix sync state"},
 		{"full replaces malformed cursor", true, "invalid JSON", false, ""},
-		{"full refuses future version", true, `{"format_version":2,"rooms":{}}`, true, ""},
+		{"full refuses future version", true, `{"format_version":2,"rooms":{}}`, true, "unsupported Matrix cursor format version 2"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req, check := require.New(t), assert.New(t)
