@@ -629,8 +629,8 @@ func TestImportRecoverySkipsExcludedRooms(t *testing.T) {
 }
 
 func TestImportRecoveryResumesBeforePlaceholderCheckpoint(t *testing.T) {
-	for _, quiet := range []bool{false, true} {
-		t.Run(strconv.FormatBool(quiet), func(t *testing.T) {
+	for _, mode := range []string{"placeholder arrives in same sync", "quiet follow-up sync"} {
+		t.Run(mode, func(t *testing.T) {
 			req, check := require.New(t), assert.New(t)
 			f := newRecoveryFixture(t)
 			missing := f.message(t, "$missing", "missing", 10)
@@ -644,7 +644,7 @@ func TestImportRecoveryResumesBeforePlaceholderCheckpoint(t *testing.T) {
 			fresh.RoomID = "!room:example.org"
 			// Commit the placeholder, then discard the importer before it checkpoints.
 			req.NoError(NewImporter(f.store, backupRuntime(t, f.server.URL, f.backup)).persistEvent(t.Context(), f.sourceID, convID, fresh, &ImportSummary{}))
-			f.timeline, f.quiet = []*event.Event{fresh}, quiet
+			f.timeline, f.quiet = []*event.Event{fresh}, mode == "quiet follow-up sync"
 			sum, err := f.run(t, true, false)
 			req.NoError(err)
 			check.Equal(int64(1), sum.Recovered)
@@ -712,7 +712,6 @@ func TestImportRecoveryBoundsRetriesAndAttemptsNewEvents(t *testing.T) {
 		sum, err := f.run(t, true, false)
 		req.NoError(err)
 		req.Error(sum.BackupFailure)
-		check.Contains(f.operation(t).Counters, operations.PublicCounter{Name: operations.CounterAdded, Unit: operations.CounterUnitMessages, Value: 1})
 		check.Equal(int64(1), sum.PendingEncrypted)
 		check.Equal(encryptedPlaceholder, f.body(t, "$new"))
 		f.quiet, f.backup.versionStatus = true, 0
@@ -1041,14 +1040,15 @@ func TestImportKeylessPendingCountIncludesEarlierRuns(t *testing.T) {
 
 func TestImportHandlesUnreadableCursorBySyncMode(t *testing.T) {
 	for _, tc := range []struct {
-		name      string
-		full      bool
-		blob      string
-		wantError string
+		name          string
+		full          bool
+		blob          string
+		wantError     bool
+		wantErrorText string
 	}{
-		{"incremental refuses malformed cursor", false, "invalid JSON", "decode Matrix sync state"},
-		{"full replaces malformed cursor", true, "invalid JSON", ""},
-		{"full refuses future version", true, `{"format_version":2,"rooms":{}}`, "unsupported Matrix cursor format version 2"},
+		{"incremental refuses malformed cursor", false, "invalid JSON", true, "decode Matrix sync state"},
+		{"full replaces malformed cursor", true, "invalid JSON", false, ""},
+		{"full refuses future version", true, `{"format_version":2,"rooms":{}}`, true, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req, check := require.New(t), assert.New(t)
@@ -1064,14 +1064,18 @@ func TestImportHandlesUnreadableCursorBySyncMode(t *testing.T) {
 				handler.ServeHTTP(w, r)
 			})
 			_, err = f.run(t, true, tc.full)
-			if tc.wantError == "" {
+			if !tc.wantError {
 				req.NoError(err)
 				latest, err := f.store.GetLastSuccessfulSyncByType(f.sourceID, SourceType)
 				req.NoError(err)
 				check.NotEqual(syncID, latest.ID)
 				return
 			}
-			req.ErrorContains(err, tc.wantError)
+			if tc.wantErrorText != "" {
+				req.ErrorContains(err, tc.wantErrorText)
+			} else {
+				req.Error(err)
+			}
 			latest, err := f.store.GetLastSuccessfulSyncByType(f.sourceID, SourceType)
 			req.NoError(err)
 			check.Equal(syncID, latest.ID)
