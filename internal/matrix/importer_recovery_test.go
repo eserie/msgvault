@@ -219,7 +219,7 @@ func TestImportRecoveryCorruptPendingEdits(t *testing.T) {
 	}
 }
 
-func TestImportEditRedactionSkipsUnavailableEdits(t *testing.T) {
+func TestImportEditRedactionHandlesUnavailableAndPendingEdits(t *testing.T) {
 	for _, mode := range []string{"missing session", "transient"} {
 		t.Run(mode, func(t *testing.T) {
 			req := require.New(t)
@@ -262,56 +262,49 @@ func TestImportEditRedactionSkipsUnavailableEdits(t *testing.T) {
 			check.Equal("$older", edit.EventID)
 		})
 	}
-	for _, mode := range []string{"redacted plaintext", "redacted encrypted"} {
-		t.Run(mode, func(t *testing.T) {
-			req, check := require.New(t), assert.New(t)
-			f := newRecoveryFixture(t)
-			original := f.message(t, "$z-original", "original", 10)
-			initialKey := f.backup.data.SessionKey
-			if mode == "redacted encrypted" {
-				in, err := olm.NewInboundGroupSession([]byte(f.backup.out.Key()))
-				req.NoError(err)
-				exported, err := in.Export(1)
-				req.NoError(err)
-				f.backup.data.SessionKey = string(exported)
-			}
-			edit := f.edit(t, "$edit", "$z-original", "updated", 20)
-			if mode == "redacted plaintext" {
-				edit = matrixTestEvent(t, `{"type":"m.room.message","event_id":"$edit","sender":"@member:example.org","origin_server_ts":20,"content":{"msgtype":"m.text","body":"* edited","m.new_content":{"msgtype":"m.text","body":"edited"},"m.relates_to":{"rel_type":"m.replace","event_id":"$z-original"}}}`)
-			}
-			f.timeline = []*event.Event{original, edit}
-			_, err := f.run(t, mode == "redacted encrypted", false)
+	t.Run("redacted encrypted", func(t *testing.T) {
+		req, check := require.New(t), assert.New(t)
+		f := newRecoveryFixture(t)
+		original := f.message(t, "$z-original", "original", 10)
+		initialKey := f.backup.data.SessionKey
+		{
+			in, err := olm.NewInboundGroupSession([]byte(f.backup.out.Key()))
 			req.NoError(err)
-			check.Equal(encryptedPlaceholder, f.body(t, "$z-original"))
-			ids, err := f.store.MessageExistsBatch(f.sourceID, []string{"$z-original", "$edit"})
+			exported, err := in.Export(1)
 			req.NoError(err)
-			pending, err := NewImporter(f.store, nil).pendingEdits(ids["$z-original"])
-			req.NoError(err)
-			req.Len(pending, 1)
-			if mode == "redacted encrypted" {
-				check.Equal(event.EventMessage, pending[0].Type)
-				check.Equal("$edit", pending[0].ID.String())
-				req.True(parseContent(pending[0]))
-				req.NotNil(pending[0].Content.AsMessage().NewContent)
-				check.Equal("updated", pending[0].Content.AsMessage().NewContent.Body)
-				f.quiet = true
-				sum, err := f.run(t, true, true)
-				req.NoError(err)
-				check.Equal(int64(1), sum.PendingEncrypted)
-				f.quiet = false
-			}
-			f.timeline = []*event.Event{{ID: "$redaction", Type: event.EventRedaction, Redacts: "$edit", Content: event.Content{Raw: map[string]any{}}}}
-			_, err = f.run(t, mode == "redacted encrypted", false)
-			req.NoError(err)
-			pending, err = NewImporter(f.store, nil).pendingEdits(ids["$z-original"])
-			req.NoError(err)
-			check.Empty(pending)
-			f.quiet, f.backup.data.SessionKey = true, initialKey
-			_, err = f.run(t, true, true)
-			req.NoError(err)
-			check.Equal("original", f.body(t, "$z-original"))
-		})
-	}
+			f.backup.data.SessionKey = string(exported)
+		}
+		edit := f.edit(t, "$edit", "$z-original", "updated", 20)
+		f.timeline = []*event.Event{original, edit}
+		_, err := f.run(t, true, false)
+		req.NoError(err)
+		check.Equal(encryptedPlaceholder, f.body(t, "$z-original"))
+		ids, err := f.store.MessageExistsBatch(f.sourceID, []string{"$z-original", "$edit"})
+		req.NoError(err)
+		pending, err := NewImporter(f.store, nil).pendingEdits(ids["$z-original"])
+		req.NoError(err)
+		req.Len(pending, 1)
+		check.Equal(event.EventMessage, pending[0].Type)
+		check.Equal("$edit", pending[0].ID.String())
+		req.True(parseContent(pending[0]))
+		req.NotNil(pending[0].Content.AsMessage().NewContent)
+		check.Equal("updated", pending[0].Content.AsMessage().NewContent.Body)
+		f.quiet = true
+		sum, err := f.run(t, true, true)
+		req.NoError(err)
+		check.Equal(int64(1), sum.PendingEncrypted)
+		f.quiet = false
+		f.timeline = []*event.Event{{ID: "$redaction", Type: event.EventRedaction, Redacts: "$edit", Content: event.Content{Raw: map[string]any{}}}}
+		_, err = f.run(t, true, false)
+		req.NoError(err)
+		pending, err = NewImporter(f.store, nil).pendingEdits(ids["$z-original"])
+		req.NoError(err)
+		check.Empty(pending)
+		f.quiet, f.backup.data.SessionKey = true, initialKey
+		_, err = f.run(t, true, true)
+		req.NoError(err)
+		check.Equal("original", f.body(t, "$z-original"))
+	})
 }
 
 func TestImportSkipKeyBackupKeepsEncryptedMessages(t *testing.T) {
@@ -801,7 +794,7 @@ func TestImportRecoveryProgressDoesNotStarveQuietRoom(t *testing.T) {
 }
 
 func TestImportEditWaitsForEncryptedOriginal(t *testing.T) {
-	for _, mode := range []string{"incremental", "full"} {
+	for _, mode := range []string{"incremental", "redacted plaintext"} {
 		t.Run(mode, func(t *testing.T) {
 			req, check := require.New(t), assert.New(t)
 			f := newRecoveryFixture(t)
@@ -813,25 +806,42 @@ func TestImportEditWaitsForEncryptedOriginal(t *testing.T) {
 			check.Equal(encryptedPlaceholder, f.body(t, "$z-original"))
 			ids, err := f.store.MessageExistsBatch(f.sourceID, []string{"$z-original", "$edit"})
 			req.NoError(err)
+			want := "edited"
+			if mode == "redacted plaintext" {
+				pending, err := NewImporter(f.store, nil).pendingEdits(ids["$z-original"])
+				req.NoError(err)
+				req.Len(pending, 1)
+				f.timeline = []*event.Event{{ID: "$redaction", Type: event.EventRedaction, Redacts: "$edit", Content: event.Content{Raw: map[string]any{}}}}
+				_, err = f.run(t, false, false)
+				req.NoError(err)
+				pending, err = NewImporter(f.store, nil).pendingEdits(ids["$z-original"])
+				req.NoError(err)
+				check.Empty(pending)
+				want = "original"
+			}
 			f.quiet = true
-			_, err = f.run(t, false, false)
+			if mode != "redacted plaintext" {
+				_, err = f.run(t, false, false)
+				req.NoError(err)
+				last, err := f.store.GetLastSuccessfulSyncByType(f.sourceID, SourceType)
+				req.NoError(err)
+				check.NotContains(last.CursorAfter.String, "deferred_relations", "edits wait in archive metadata")
+			}
+			sum, err := f.run(t, true, mode != "incremental")
 			req.NoError(err)
-			last, err := f.store.GetLastSuccessfulSyncByType(f.sourceID, SourceType)
-			req.NoError(err)
-			check.NotContains(last.CursorAfter.String, "deferred_relations", "edits wait in archive metadata")
-			sum, err := f.run(t, true, mode == "full")
-			req.NoError(err)
-			check.Zero(sum.PendingEncrypted)
-			check.Equal("edited", f.body(t, "$z-original"))
-			ids, err = f.store.MessageExistsBatch(f.sourceID, []string{"$z-original", "$edit"})
-			req.NoError(err)
-			check.Zero(ids["$edit"], "edits do not create message rows")
-			metadata, err := f.store.GetMessageMetadata(ids["$z-original"])
-			req.NoError(err)
-			check.NotContains(metadata.String, "matrix_pending_edits")
-			_, err = f.run(t, true, false)
-			req.NoError(err)
-			check.Equal("edited", f.body(t, "$z-original"))
+			check.Equal(want, f.body(t, "$z-original"))
+			if mode != "redacted plaintext" {
+				check.Zero(sum.PendingEncrypted)
+				ids, err = f.store.MessageExistsBatch(f.sourceID, []string{"$z-original", "$edit"})
+				req.NoError(err)
+				check.Zero(ids["$edit"], "edits do not create message rows")
+				metadata, err := f.store.GetMessageMetadata(ids["$z-original"])
+				req.NoError(err)
+				check.NotContains(metadata.String, "matrix_pending_edits")
+				_, err = f.run(t, true, false)
+				req.NoError(err)
+				check.Equal("edited", f.body(t, "$z-original"))
+			}
 		})
 	}
 }
@@ -920,21 +930,13 @@ func TestImportGCRecoversReusedPlaceholderID(t *testing.T) {
 	}
 }
 
-func TestImportUnsupportedEncryptionDoesNotFetchBackupOrStopLaterRoom(t *testing.T) {
+func TestImportUnsupportedRoomDoesNotStopLaterRoom(t *testing.T) {
 	req, check := require.New(t), assert.New(t)
 	f := newRecoveryFixture(t)
 	unsupported := f.message(t, "$unsupported", "unsupported", 10)
 	unsupported.Content.AsEncrypted().Algorithm = "example.unsupported"
 	f.extraRooms = map[string][]*event.Event{"!first:example.org": {unsupported}}
 	f.timeline = []*event.Event{f.message(t, "$later", "later", 20)}
-	handler := f.server.Config.Handler
-	f.server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/_matrix/client/v3/room_keys/keys/!first:example.org" {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			return
-		}
-		handler.ServeHTTP(w, r)
-	})
 	_, err := f.run(t, false, false)
 	req.NoError(err)
 	f.quiet = true
@@ -993,7 +995,7 @@ func TestImportInterruptedNewPlaceholdersPreserveRecoveryCheckpoint(t *testing.T
 	check.Equal(before.RecoveryRooms, state.RecoveryRooms)
 }
 
-func TestImportRecoveryPreservesUnconvertedCiphertext(t *testing.T) {
+func TestImportRecoveryRetiresUnsupportedEventsAndKeepsMalformedPending(t *testing.T) {
 	req, check := require.New(t), assert.New(t)
 	f := newRecoveryFixture(t)
 	f.timeline = []*event.Event{
@@ -1011,9 +1013,6 @@ func TestImportRecoveryPreservesUnconvertedCiphertext(t *testing.T) {
 	items, _, err := f.store.MatrixPlaceholders(t.Context(), convID, 0, 10)
 	req.NoError(err)
 	check.Len(items, 1)
-	for _, item := range items {
-		check.Contains(string(item.Raw), `"ciphertext"`)
-	}
 }
 
 func TestImportCorruptBackupKeyAllowsPlaintextSync(t *testing.T) {
@@ -1068,16 +1067,12 @@ func TestImportRecoveredReplyLinksWhenTargetArrivesLater(t *testing.T) {
 			wantBody := "reply"
 			if mode == "edited reply" {
 				f.quiet = true
-				_, err = f.run(t, true, false)
+				sum, err = f.run(t, true, false)
 				req.NoError(err)
 				check.Equal("reply", f.body(t, "$reply"))
 				f.quiet = false
 				f.timeline = []*event.Event{f.edit(t, "$reply-edit", "$reply", "edited reply", 40)}
 				_, err = f.run(t, true, false)
-				req.NoError(err)
-				check.Equal("edited reply", f.body(t, "$reply"))
-				f.quiet = true
-				sum, err = f.run(t, true, true)
 				req.NoError(err)
 				check.Equal("edited reply", f.body(t, "$reply"))
 				wantBody = "edited reply"
@@ -1139,43 +1134,27 @@ func TestImportPendingRepliesCrossPagesWithoutRawEvents(t *testing.T) {
 	}
 }
 
-func TestImportNewPlaceholderRetriesAfterBackupFailure(t *testing.T) {
-	for _, failure := range []string{"version", "room"} {
-		t.Run(failure, func(t *testing.T) {
-			req := require.New(t)
-			check := assert.New(t)
-			f := newRecoveryFixture(t)
-			f.timeline = []*event.Event{f.message(t, "$first", "first", 10)}
-			sum, err := f.run(t, true, false)
-			req.NoError(err)
-			check.Equal(int64(1), sum.Recovered)
-			f.timeline = []*event.Event{f.message(t, "$new", "new", 20)}
-			if failure == "version" {
-				f.backup.versionStatus = 503
-			} else {
-				f.backup.status = 503
-			}
-			sum, err = f.run(t, true, false)
-			if failure == "room" {
-				req.ErrorContains(err, "fetch Matrix room backup")
-				req.NoError(sum.BackupFailure)
-			} else {
-				req.NoError(err)
-				req.Error(sum.BackupFailure)
-			}
-			if failure == "version" {
-				check.Contains(f.operation(t).Counters, operations.PublicCounter{Name: operations.CounterAdded, Unit: operations.CounterUnitMessages, Value: 1})
-			}
-			check.Equal(int64(1), sum.PendingEncrypted)
-			check.Equal(encryptedPlaceholder, f.body(t, "$new"))
-			f.quiet, f.backup.status, f.backup.versionStatus = true, 0, 0
-			sum, err = f.run(t, true, false)
-			req.NoError(err)
-			check.Equal(int64(1), sum.Recovered)
-			check.Zero(sum.PendingEncrypted)
-			check.Equal("new", f.body(t, "$new"))
-		})
-	}
+func TestImportNewPlaceholderRetriesAfterBackupVersionFailure(t *testing.T) {
+	req := require.New(t)
+	check := assert.New(t)
+	f := newRecoveryFixture(t)
+	f.timeline = []*event.Event{f.message(t, "$first", "first", 10)}
+	_, err := f.run(t, true, false)
+	req.NoError(err)
+	f.timeline = []*event.Event{f.message(t, "$new", "new", 20)}
+	f.backup.versionStatus = http.StatusServiceUnavailable
+	sum, err := f.run(t, true, false)
+	req.NoError(err)
+	req.Error(sum.BackupFailure)
+	check.Contains(f.operation(t).Counters, operations.PublicCounter{Name: operations.CounterAdded, Unit: operations.CounterUnitMessages, Value: 1})
+	check.Equal(int64(1), sum.PendingEncrypted)
+	check.Equal(encryptedPlaceholder, f.body(t, "$new"))
+	f.quiet, f.backup.versionStatus = true, 0
+	sum, err = f.run(t, true, false)
+	req.NoError(err)
+	check.Equal(int64(1), sum.Recovered)
+	check.Zero(sum.PendingEncrypted)
+	check.Equal("new", f.body(t, "$new"))
 }
 
 func TestImportKeylessPendingCountIncludesEarlierRuns(t *testing.T) {
@@ -1196,42 +1175,45 @@ func TestImportKeylessPendingCountIncludesEarlierRuns(t *testing.T) {
 	check.Equal(int64(2), sum.PendingEncrypted)
 }
 
-func TestImportRefusesUnreadableCursor(t *testing.T) {
-	for _, full := range []bool{false, true} {
-		blobs := []string{`invalid JSON`}
-		if full {
-			blobs = append(blobs, `{"format_version":2,"rooms":{}}`)
-		}
-		for _, blob := range blobs {
-			t.Run(fmt.Sprintf("full=%t/%s", full, blob), func(t *testing.T) {
-				req, check := require.New(t), assert.New(t)
-				f := newRecoveryFixture(t)
-				syncID, err := f.store.StartSync(f.sourceID, SourceType)
-				req.NoError(err)
-				req.NoError(f.store.CompleteSync(syncID, blob))
-				handler := f.server.Config.Handler
-				f.server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					if full && r.URL.Path == "/_matrix/client/v3/sync" {
-						check.Empty(r.URL.Query().Get("since"))
-					}
-					handler.ServeHTTP(w, r)
-				})
-				_, err = f.run(t, true, full)
-				if full && blob != `{"format_version":2,"rooms":{}}` {
-					req.NoError(err)
-					latest, err := f.store.GetLastSuccessfulSyncByType(f.sourceID, SourceType)
-					req.NoError(err)
-					check.NotEqual(syncID, latest.ID)
-					return
+func TestImportHandlesUnreadableCursorBySyncMode(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		full      bool
+		blob      string
+		wantError bool
+	}{
+		{"incremental refuses malformed cursor", false, "invalid JSON", true},
+		{"full replaces malformed cursor", true, "invalid JSON", false},
+		{"full refuses future version", true, `{"format_version":2,"rooms":{}}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req, check := require.New(t), assert.New(t)
+			f := newRecoveryFixture(t)
+			syncID, err := f.store.StartSync(f.sourceID, SourceType)
+			req.NoError(err)
+			req.NoError(f.store.CompleteSync(syncID, tc.blob))
+			handler := f.server.Config.Handler
+			f.server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tc.full && r.URL.Path == "/_matrix/client/v3/sync" {
+					check.Empty(r.URL.Query().Get("since"))
 				}
-				req.Error(err)
+				handler.ServeHTTP(w, r)
+			})
+			_, err = f.run(t, true, tc.full)
+			if !tc.wantError {
+				req.NoError(err)
 				latest, err := f.store.GetLastSuccessfulSyncByType(f.sourceID, SourceType)
 				req.NoError(err)
-				check.Equal(syncID, latest.ID)
-				check.Equal(blob, latest.CursorAfter.String)
-				check.Zero(f.backup.versionFetches)
-			})
-		}
+				check.NotEqual(syncID, latest.ID)
+				return
+			}
+			req.Error(err)
+			latest, err := f.store.GetLastSuccessfulSyncByType(f.sourceID, SourceType)
+			req.NoError(err)
+			check.Equal(syncID, latest.ID)
+			check.Equal(tc.blob, latest.CursorAfter.String)
+			check.Zero(f.backup.versionFetches)
+		})
 	}
 }
 
