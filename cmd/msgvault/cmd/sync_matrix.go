@@ -113,7 +113,7 @@ func runMatrixSync(ctx context.Context, s *store.Store, cfg *config.Config, acco
 			source.Identifier, summary.RoomsProcessed, summary.MessagesProcessed, summary.PendingEncrypted, summary.Recovered, summary.EventsSkipped)
 		if needsBackupKey && !backupHintShown {
 			backupHintShown = true
-			_, _ = fmt.Fprintf(out, "To recover encrypted history, run msgvault add-matrix --homeserver %q --user-id %q --recovery-file <path>.\n", homeserver, source.Identifier)
+			_, _ = fmt.Fprintf(out, "To recover encrypted history, run msgvault add-matrix --homeserver %q --user-id %q --recovery-file <path>. This renews the login and logs out the old Matrix device.\n", homeserver, source.Identifier)
 		}
 		if summary.BackupFailure != nil {
 			failure := fmt.Sprintf("%s: key backup unavailable, %d encrypted events pending: %v", source.Identifier, summary.PendingEncrypted, summary.BackupFailure)

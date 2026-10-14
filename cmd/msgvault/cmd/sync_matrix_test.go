@@ -76,6 +76,7 @@ func TestMatrixSyncSummaryBackupFailureAndKeyHint(t *testing.T) {
 		req.NoError(runMatrixSync(t.Context(), s, cfg, "", false, nil, &out))
 		check.Equal(1, strings.Count(out.String(), "run msgvault add-matrix --homeserver"))
 		check.Contains(out.String(), fmt.Sprintf("--homeserver %q --user-id %q --recovery-file <path>", creds.Homeserver, creds.UserID))
+		check.Contains(out.String(), "This renews the login and logs out the old Matrix device.")
 		second, err := s.GetOrCreateSource(sourceTypeMatrix, "@second:example.org")
 		req.NoError(err)
 		secondRoom, err := s.EnsureConversation(second.ID, "!room:example.org", "Room")
