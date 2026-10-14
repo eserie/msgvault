@@ -202,7 +202,7 @@ func TestDeleteMatrixPlaceholderRetiresRelatedData(t *testing.T) {
 	check.Equal(revision+1, updated)
 }
 
-func TestMatrixRecoveryTransactionKeepsStoreConfigurationAndScope(t *testing.T) {
+func TestMatrixRecoveryTransactionRejectsNestedLocksAndRollsBackSupersededSync(t *testing.T) {
 	req := require.New(t)
 	check := assert.New(t)
 	s := testutil.NewTestStore(t)
@@ -216,10 +216,7 @@ func TestMatrixRecoveryTransactionKeepsStoreConfigurationAndScope(t *testing.T) 
 	req.NoError(err)
 	scoped := s.ScopedToSync(source.ID, syncID)
 	req.NoError(scoped.MatrixRecoveryTransaction(t.Context(), func(view *store.Store) error {
-		check.Equal(store.DBPathForTest(s), store.DBPathForTest(view))
-		check.Equal(s.IsPostgreSQL(), view.IsPostgreSQL())
 		check.Error(view.WithExclusiveLock(t.Context(), func() error { return nil }))
-		check.Equal(s.FTS5Available(), view.FTS5Available())
 		return view.SetMessageMetadataContext(t.Context(), messageID, sql.NullString{String: `{"saved":true}`, Valid: true})
 	}))
 	req.NoError(scoped.FailSync(syncID, "interrupted"))

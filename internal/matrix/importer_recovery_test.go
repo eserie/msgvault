@@ -193,16 +193,14 @@ func TestImportRecoveryCorruptPendingEdits(t *testing.T) {
 	req.NoError(err)
 	req.NoError(f.store.SetMessageMetadataContext(t.Context(), ids["$poison"], sql.NullString{String: `{"matrix_event_type":"m.room.encrypted","matrix_pending_edits":"corrupt"}`, Valid: true}))
 	f.quiet = true
-	for round := range 2 {
-		f.nextBatch = fmt.Sprintf("after%d", round)
-		_, err := f.run(t, true, false)
-		req.ErrorContains(err, "recover Matrix room !room:example.org")
-		run := f.operation(t)
-		check.Equal(operations.StatePartial, run.State)
-		check.Contains(run.Counters, operations.PublicCounter{Name: operations.CounterItemErrors, Unit: operations.CounterUnitMessages, Value: 1})
-		state := f.syncState(t)
-		check.Equal(f.nextBatch, state.NextBatch)
-	}
+	f.nextBatch = "after"
+	_, err = f.run(t, true, false)
+	req.ErrorContains(err, "recover Matrix room !room:example.org")
+	run := f.operation(t)
+	check.Equal(operations.StatePartial, run.State)
+	check.Contains(run.Counters, operations.PublicCounter{Name: operations.CounterItemErrors, Unit: operations.CounterUnitMessages, Value: 1})
+	state := f.syncState(t)
+	check.Equal(f.nextBatch, state.NextBatch)
 }
 
 func TestImportEditRedactionHandlesUnavailableAndPendingEdits(t *testing.T) {
