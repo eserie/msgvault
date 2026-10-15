@@ -33,7 +33,7 @@ separately. SQLite is the default and stores the archive at `~/.msgvault/msgvaul
 | Column | Type | Description |
 |---|---|---|
 | `id` | INTEGER PK | Auto-increment |
-| `source_type` | TEXT | Provider/import type, for example `gmail`, `imap`, `gcal`, `teams`, `discord`, `beeper`, `mbox`, `whatsapp`, `omi`, `granola`, `plaud`, `circleback`, `notion_meetings`, `muesli`, `twilio`, or `twenty` |
+| `source_type` | TEXT | Provider/import type, for example `gmail`, `imap`, `gcal`, `teams`, `discord`, `beeper`, `chatwoot`, `mbox`, `whatsapp`, `omi`, `granola`, `plaud`, `circleback`, `notion_meetings`, `muesli`, `twilio`, or `twenty` |
 | `identifier` | TEXT | Provider-stable identifier such as an email address, phone number, or Discord guild ID |
 | `display_name` | TEXT | Account display name |
 | `sync_cursor` | TEXT | Sync cursor (Gmail history ID for Gmail accounts) |
@@ -58,7 +58,7 @@ separately. SQLite is the default and stores the archive at `~/.msgvault/msgvaul
 | `conversation_id` | INTEGER FK | References `conversations` |
 | `source_id` | INTEGER FK | References `sources` |
 | `source_message_id` | TEXT | Source-specific message ID |
-| `message_type` | TEXT | `email`, `calendar_event`, `meeting_transcript`, `beeper`, `teams`, `discord`, `sms`, `mms`, `whatsapp`, `imessage`, `fbmessenger`, `synctech_sms_call`, `google_voice_text`, `google_voice_call`, `google_voice_voicemail` |
+| `message_type` | TEXT | `email`, `calendar_event`, `meeting_transcript`, `beeper`, `chatwoot`, `teams`, `discord`, `sms`, `mms`, `whatsapp`, `imessage`, `fbmessenger`, `synctech_sms_call`, `google_voice_text`, `google_voice_call`, `google_voice_voicemail` |
 | `sent_at` | DATETIME | Send timestamp |
 | `sender_id` | INTEGER FK | References `participants` |
 | `account_address` | TEXT, nullable | The one confirmed address an email or calendar event belongs to; NULL when evidence conflicts or is missing |
@@ -109,6 +109,40 @@ envelope keeps provider discovery, structured blocks, page Markdown, minimized
 resolved users, canonical text used for safe transcript preservation, and
 hydration warnings. Integration tokens and authorization headers are never
 part of the envelope.
+
+**source_import_items** -- Durable import receipts.
+
+On unreleased `main`, Apple Mail imports keep two kinds of rows here:
+
+- `emlx-target` rows track one archived message, which several `.emlx` files
+  can share. The importer marks the row `pending` before it writes the message,
+  its attachments or its search entry, and `imported` once all of that work
+  succeeds. The completion records the attachment and search settings it used;
+  a later import with different settings finishes the message again from its
+  archived raw. A `pending` row also names the file being written, the
+  attachments it contributes, and a digest of the new raw. If the import stops
+  before that file's row is updated, the next import that finishes the message
+  credits those attachments to the file when the archived raw matches. The
+  file's own row names that message before the write starts, so a row that
+  names a different message is always the newer one.
+  A message archived before receipts existed is marked legacy. For it, a file
+  without its own attachment record only fills empty placeholders and records
+  what it holds; it can replace stored attachment content only after its own
+  cache changes.
+- `emlx-occurrence` rows track one `.emlx` file, keyed by a digest of the
+  import root plus the file's relative path. An `imported` row stores a
+  filesystem fingerprint of the file and its cached attachments, and a hash of
+  each attachment the file contributed. A `pending` row means the file still
+  has work to finish.
+
+A repeat import skips reading a file when its fingerprint matches and its
+message is complete. The attachment hashes stop a file from replacing an
+attachment that another file has since updated. Platforms without a supported
+fingerprint still record completed rows but always read the file.
+
+The rows reuse the existing table and the sync run's ownership check, without a
+schema migration. They are cache hints rather than integrity checks; see
+[repeat imports](../usage/importing.md#repeat-apple-mail-imports-unreleased).
 
 **participants** -- Observed addresses and handles from source data. These are
 separate from the curated `persons` table.

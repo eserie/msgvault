@@ -1,5 +1,5 @@
 ---
-last_edited: "2026-10-12"
+last_edited: "2026-10-14"
 title: CLI Reference
 description: Complete command reference for all msgvault commands.
 ---
@@ -1435,6 +1435,49 @@ the source message has since been deleted. See
 
 ---
 
+## add-chatwoot
+
+Register permitted Chatwoot inboxes from configured `[[chatwoot]]` profiles.
+Available on `main`. The daemon reads each profile's token environment variable
+and validates access with the account API.
+
+```bash
+msgvault add-chatwoot [identifier]
+```
+
+With no identifier, register all configured profiles. Include/exclude inbox
+filters apply; no selected inboxes is an error. Re-run after adding inboxes.
+See [Chatwoot setup](guides/chatwoot.md).
+
+---
+
+## sync-chatwoot
+
+Sync Chatwoot conversations, media, and linked voice-call meetings. Available
+on `main`. Only registered inboxes selected by the profile's filters are synced.
+No identifier selects all configured profiles. Partial success is retained and
+healthy inboxes continue after another inbox fails.
+
+```bash
+msgvault sync-chatwoot [identifier] [--inbox 7] [--limit 100] [--full] [--no-media]
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--inbox` | all included registered inboxes | Numeric inbox ID to sync; repeat for multiple inboxes; requires an identifier with several profiles; excluded or unregistered IDs are rejected |
+| `--limit` | `0` | History messages per conversation this run; artifact refreshes run additionally; zero means no history limit; unfinished history resumes |
+| `--full` | `false` | Reread all available history and update existing rows in place |
+| `--no-media` | `false` | Defer attachment downloads while retaining metadata and available transcripts; recent files retry on later syncs |
+| `--build-cache` | `false` | Queue a cache refresh after the sync, even when automatic builds are disabled or the minimum rebuild interval has not elapsed |
+| `--no-build-cache` | `false` | Skip the post-sync cache refresh |
+
+See [Chatwoot](guides/chatwoot.md#understand-sync-limits) for discovery,
+refresh windows, request budgets, and how unavailable conversations are handled.
+Reconciliation defaults to every 24 hours; set `reconcile_interval_hours` in
+[Chatwoot configuration](configuration.md#chatwoot).
+
+---
+
 ## add-beeper
 
 Register the chat accounts connected to a locally running
@@ -1861,11 +1904,12 @@ attachments of these messages outside the MIME payload, in a sibling
 `Attachments/N/` directory. The importer restores cached attachments directly
 inside the message's outer multipart, within the message size limit.
 Attachments in nested parts, such as inside some forwarded messages, are not
-restored. An attachment without a cached file stays absent; unreadable files
-or directories produce a warning. Re-importing a partial message adds newly
-cached attachments to the existing message without creating another copy.
+restored. An attachment without a cached file stays absent. An unreadable
+cached file or directory counts as an error and leaves the `.emlx` file to be
+retried on the next import. Re-importing a partial message adds newly cached
+attachments to the existing message without creating another copy.
 When the archived message already holds every cached attachment, the rerun
-skips it instead of rewriting it. If both `N.emlx` and
+skips ingestion instead of rewriting it. If both `N.emlx` and
 `N.partial.emlx` exist, the complete `N.emlx` copy wins. The command summary
 reports the number of partial files read and how many attachments the run
 added to the archive.
@@ -1876,10 +1920,42 @@ added to the archive.
 | `--account` | — | Filter to specific account(s) during auto-discover (repeatable) |
 | `--accounts-db` | — | Custom path to macOS `Accounts4.sqlite` |
 | `--identifier` | — | Manual identifier when auto-discover is not suitable |
-| `--no-resume` | `false` | Start fresh, ignoring interrupted progress |
+| `--no-resume` | `false` | Report totals for this run only, without an interrupted run's counts; completed file receipts still apply |
+| `--full-reconcile` | `false` | Invalidate this root's receipts and reconcile every discovered file |
+| `--max-message-bytes` | `134217728` (128 MiB) | Maximum EMLX file and merged MIME size in bytes, including MIME encoding; explicit values must be 1–9223372036854775806 |
 | `--checkpoint-interval` | `200` | Save progress every N messages |
 | `--no-attachments` | `false` | Skip writing attachments to disk |
 | `--no-default-identity` | `false` | Do not auto-confirm the identifier as this source's "me" identity |
+
+On unreleased `main`, each completed `.emlx` file gets a receipt. Repeat
+imports still walk every mailbox directory and check each file's metadata,
+including its cached attachments. They skip reading files whose metadata is
+unchanged and whose message is complete; the summary reports them as
+`Unchanged`. New files are imported whatever their sent date. A message found
+in another mailbox keeps the labels it already has. Removing files from Apple
+Mail's local cache never deletes archived messages.
+
+A file is complete once its message, attachments under the current
+`--no-attachments` setting, and full-text index entry are stored. Skipping
+reads requires Linux or macOS file metadata and a path without symbolic links;
+other files are read on every import. Remote-image archiving also turns
+skipping off. Receipts trust file metadata and do not check archived content.
+Run `--full-reconcile` after you suspect stale state or change archived
+messages, attachment files or the search index directly; it re-imports every
+discovered file, including ones whose content matches the archive.
+
+Problems with one file do not fail the import. An unreadable or oversized file,
+an unreadable cached attachment, a merge over the byte limit, or a failed
+attachment or search-index write counts as an error. That file stays pending and
+is retried on the next import, and the run still completes and links replies.
+Database failures fail the run. A message whose MIME structure cannot be parsed
+is archived with its raw bytes and the headers that could be recovered, and is
+not retried. A file with no message content is skipped with a warning.
+
+If restored attachments would exceed the merged message limit, the importer
+keeps previously archived attachments and leaves the file pending. Retry with a
+larger `--max-message-bytes` value that fits your memory. The limit applies in
+both automatic and manual account modes and only to the run that sets it.
 
 See [Importing Local Email](/docs/usage/importing/) for usage examples.
 
@@ -2771,6 +2847,35 @@ to one lane and cannot be used with `all`. See
 [person search](/docs/usage/people/#find-a-person-by-what-you-remember) and
 [person files](/docs/usage/people/#find-files-related-to-a-person) for index
 requirements, supported filters, and pagination.
+
+#### Typo-tolerant filenames
+
+Newer than the latest release, `--fuzzy-filename` explicitly selects filename
+suggestions:
+
+```bash
+msgvault person files 42 --filename 'quaterly report' --fuzzy-filename
+msgvault person files 42 --filename 'quaterly report' --fuzzy-filename --direction to_person --mime-family pdf --limit 20 --json
+```
+
+The flag requires a nonempty `--filename` in the `metadata` lane. It rejects
+`--query` and `--cursor`, including explicitly supplied empty values. Direction,
+MIME-family and date filters still apply. Suggestions default to 20 results;
+an explicit `--limit` must be 1–100. Ordinary file lookup keeps its existing
+substring filter, output, pagination and default limit of 100.
+
+Human output includes `MATCH` (`exact`, `prefix`, or `typo`) and person
+provenance. It prints “Candidate limit reached; suggestions may be incomplete.”
+when the bounded lookup cannot prove exhaustion. `--json` returns a separate
+object with `suggestions`, `candidate_limit_reached`, and `index_revision`;
+there is no cursor or total count. Each suggestion retains the actual filename,
+attachment occurrence and matching person roles.
+
+An unavailable or warming index returns `filename_index_unavailable`; a person
+scope exceeding the bounds returns `filename_scope_too_large`. The command
+reports those errors rather than retrying an ordinary or unscoped search. See
+[filename suggestion limits](architecture/search-ranking.md#filename-suggestions)
+and the [API contract](api-server.md#filename-suggestions).
 
 ### person track, provider, sweep, and facts
 

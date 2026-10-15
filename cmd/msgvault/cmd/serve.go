@@ -172,7 +172,7 @@ func newServeSchedulers(
 	syncFunc scheduler.SyncFunc, logger *slog.Logger, idle scheduler.WorkTracker, gate api.LabeledOperationGate,
 ) (*scheduler.Scheduler, *scheduler.Scheduler) {
 	sched := scheduler.New(syncFunc).WithLogger(logger).
-		WithWorkTracker(combineWorkTrackers(idle, labelWorkTracker(gate, "a scheduled sync")))
+		WithWorkTracker(combineWorkTrackers(scheduleIdleWorkTracker(idle), labelWorkTracker(gate, "a scheduled sync")))
 	media := scheduler.New(nil).WithLogger(logger)
 	return sched, media
 }
@@ -528,6 +528,9 @@ func runServe(cmd *cobra.Command, args []string) error {
 	); err != nil {
 		return fmt.Errorf("configure document reconciliation: %w", err)
 	}
+	if err := registerFilenameDiscoveryJob(sched, s); err != nil {
+		return fmt.Errorf("schedule filename discovery: %w", err)
+	}
 	if err := configureBeeperMediaJob(ctx, mediaSched, operationGate, s, blobStore,
 		filepath.Join(cfg.Data.DataDir, "tmp", "beeper-media"), cfg.Integrations.Docbank, logger); err != nil {
 		logger.Warn("Beeper media submission unavailable", "error", err)
@@ -608,6 +611,22 @@ func runServe(cmd *cobra.Command, args []string) error {
 			logger.Error("failed to schedule slack sync", "error", err)
 		} else {
 			logger.Info("scheduled slack sync", "schedule", cfg.Slack.Schedule)
+		}
+	}
+
+	for _, source := range cfg.Chatwoot {
+		if source.Enabled && source.Schedule == "" {
+			logger.Warn("chatwoot profile is enabled but has no schedule", "profile", source.Identifier,
+				"hint", `set a cron schedule on the [[chatwoot]] profile`)
+		}
+	}
+	for _, source := range cfg.ScheduledChatwootSources() {
+		if err := registerScheduledChatwootJob(sched, source, attachmentMaint, invocationBoundJobRun(state, func(ctx context.Context) error {
+			return runConfiguredChatwootSync(ctx, s, source)
+		})); err != nil {
+			logger.Error("failed to schedule Chatwoot", "profile", source.Identifier, "error", err)
+		} else {
+			logger.Info("scheduled Chatwoot", "profile", source.Identifier, "schedule", source.Schedule)
 		}
 	}
 
