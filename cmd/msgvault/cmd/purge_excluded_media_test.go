@@ -182,7 +182,7 @@ func TestMediaPolicyForMatrixUsesAccountConfig(t *testing.T) {
 
 func TestPurgeExcludedMatrixMediaAfterAllToDirectScopeChange(t *testing.T) {
 	req, check := require.New(t), assert.New(t)
-	f := newPurgeMediaFixture(t)
+	f := newPurgeMediaFixture(t, sourceTypeBeeper)
 	f.config.Matrix.MediaScope = string(attachmentpolicy.ScopeAll)
 	_, err := f.store.DB().Exec(`UPDATE sources SET source_type = 'matrix', identifier = '@archive:example.org'`)
 	req.NoError(err)

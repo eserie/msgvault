@@ -98,7 +98,7 @@ func TestRunMatrixSyncSkipsRetiredSourcesForAllAccounts(t *testing.T) {
 		Homeserver: server.URL, UserID: active.Identifier, DeviceID: "device", AccessToken: "token",
 	}))
 
-	err = runMatrixSync(t.Context(), st, cfg, "", false, nil, io.Discard)
+	err = runMatrixSync(t.Context(), st, cfg, "", false, false, nil, nil, io.Discard)
 	require.NoError(err)
 	assert.Equal(t, 1, syncRequests, "only the active source is synced")
 }
@@ -109,7 +109,7 @@ func TestRunMatrixSyncRejectsExplicitRetiredAccountBeforeCredentials(t *testing.
 	dataDir := t.TempDir()
 	cfg := &config.Config{HomeDir: dataDir, Data: config.DataConfig{DataDir: dataDir}}
 
-	err := runMatrixSync(t.Context(), st, cfg, retired.Identifier, false, nil, io.Discard)
+	err := runMatrixSync(t.Context(), st, cfg, retired.Identifier, false, false, nil, nil, io.Discard)
 	require.ErrorIs(err, store.ErrSourceRetired)
 }
 
