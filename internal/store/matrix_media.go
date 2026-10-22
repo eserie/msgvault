@@ -22,6 +22,7 @@ func (s *Store) ListMatrixLegacyMediaMessagesContext(ctx context.Context, source
 		c.conversation_type, COALESCE(c.participant_count, 0), COALESCE(CAST(c.metadata AS TEXT), '')
 		FROM messages m JOIN conversations c ON c.id = m.conversation_id
 		WHERE m.source_id = ? AND m.id > ?
+		AND NOT EXISTS (SELECT 1 FROM source_merge_archive_only_messages am WHERE am.message_id = m.id)
 		AND EXISTS (SELECT 1 FROM message_raw r WHERE r.message_id = m.id AND r.raw_format = 'matrix_json')
 		AND NOT EXISTS (SELECT 1 FROM attachments a WHERE a.message_id = m.id AND a.source_attachment_id LIKE 'matrix:%')`)
 	args := []any{sourceID, afterID}
@@ -80,6 +81,8 @@ func (s *Store) ListMatrixRetryableAttachmentMessagesContext(ctx context.Context
 		JOIN conversations c ON c.id = m.conversation_id
 		JOIN attachments a ON a.message_id = m.id
 		WHERE m.source_id = ?
+		  AND NOT EXISTS (SELECT 1 FROM source_merge_archive_only_messages am WHERE am.message_id = m.id)
+		  AND NOT EXISTS (SELECT 1 FROM source_merge_preserved_attachments spa WHERE spa.attachment_id = a.id)
 		  AND a.source_attachment_id LIKE ?
 		  AND COALESCE(a.content_hash, '') = ''
 		  AND COALESCE(a.attachment_state, '') IN ('', 'pending', 'failed', 'skipped')
@@ -143,6 +146,8 @@ func (s *Store) MatrixOutstandingMedia(ctx context.Context, sourceID int64, incl
 		FROM attachments a JOIN messages m ON m.id = a.message_id
 		JOIN conversations c ON c.id = m.conversation_id
 		WHERE m.source_id = ?
+		AND NOT EXISTS (SELECT 1 FROM source_merge_archive_only_messages am WHERE am.message_id = m.id)
+		AND NOT EXISTS (SELECT 1 FROM source_merge_preserved_attachments spa WHERE spa.attachment_id = a.id)
 		AND a.source_attachment_id LIKE 'matrix:%'`)
 	args := []any{sourceID}
 	appendMatrixRoomFilters(&query, &args, include, exclude)

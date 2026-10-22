@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -227,6 +228,80 @@ func TestImporterReclassifiesInactiveRoomFromDirectAccountData(t *testing.T) {
 	require.NoError(err)
 	require.NoError(st.DB().QueryRow(st.Rebind(`SELECT conversation_type FROM conversations WHERE source_conversation_id = ?`), "!room:example.org").Scan(&conversationType))
 	assert.Equal("direct_chat", conversationType)
+}
+
+func TestImporterKeepsMergedMatrixHistoryOutOfProviderWork(t *testing.T) {
+	require, assert := require.New(t), assert.New(t)
+	st := testutil.NewTestStore(t)
+	history, err := st.GetOrCreateSource(SourceType, "@history:example.org")
+	require.NoError(err)
+	archive, err := st.GetOrCreateSource(SourceType, "@archive:example.org")
+	require.NoError(err)
+	room, err := st.EnsureConversationWithType(history.ID, "!room:example.org", "direct_chat", "History")
+	require.NoError(err)
+	persist := func(eventID, snippet, raw string) int64 {
+		t.Helper()
+		messageID, err := st.PersistMessageContext(t.Context(), &store.MessagePersistData{
+			Message: &store.Message{
+				SourceID: history.ID, ConversationID: room, SourceMessageID: eventID,
+				MessageType: SourceType, Snippet: sql.NullString{String: snippet, Valid: true},
+			},
+			BodyText: sql.NullString{String: snippet, Valid: true}, RawMIME: []byte(raw), RawFormat: rawFormat,
+		})
+		require.NoError(err)
+		return messageID
+	}
+	persist("$encrypted", encryptedPlaceholder, `{"type":"m.room.encrypted","content":{"ciphertext":"opaque"}}`)
+	legacyID := persist("$legacy", "legacy file", `{"type":"m.room.message","content":{"msgtype":"m.file","body":"legacy","url":"mxc://example.org/legacy"}}`)
+	retryID := persist("$retry", "pending file", `{"type":"m.room.message","content":{"msgtype":"m.file","body":"pending","url":"mxc://example.org/pending"}}`)
+	storedID := persist("$stored", "stored file", `{"type":"m.room.message","content":{"msgtype":"m.file","body":"stored","url":"mxc://example.org/stored"}}`)
+	require.NoError(st.ReplaceMessageMatrixAttachments(t.Context(), retryID, []store.AttachmentRef{{
+		SourceAttachmentID: "matrix:mxc://example.org/pending", StoragePath: "mxc://example.org/pending", State: attachmentpolicy.StatePending,
+	}}))
+	hash := strings.Repeat("a", 64)
+	require.NoError(st.ReplaceMessageMatrixAttachments(t.Context(), storedID, []store.AttachmentRef{{
+		SourceAttachmentID: "matrix:mxc://example.org/stored", StoragePath: hash[:2] + "/" + hash,
+		ContentHash: hash, Size: 100, State: attachmentpolicy.StateStored,
+	}}))
+	_, err = st.MergeSourcesContext(t.Context(), store.MergeSourcesRequest{FromSourceID: history.ID, IntoSourceID: archive.ID})
+	require.NoError(err)
+
+	var mediaRequests []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /_matrix/client/v3/sync", func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal("offline", r.URL.Query().Get("set_presence"))
+		_, _ = w.Write([]byte(`{"next_batch":"next-1","rooms":{"join":{}}}`))
+	})
+	mux.HandleFunc("GET /_matrix/client/v3/user/@archive:example.org/account_data/m.direct", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"@member:example.org":["!room:example.org"]}`))
+	})
+	mux.HandleFunc("GET /_matrix/client/v1/media/download/example.org/{mediaID}", func(w http.ResponseWriter, r *http.Request) {
+		mediaRequests = append(mediaRequests, r.PathValue("mediaID"))
+		_, _ = w.Write([]byte("media"))
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	client, err := mautrix.NewClient(server.URL, id.UserID(archive.Identifier), "token")
+	require.NoError(err)
+	sum, err := NewImporter(st, &Runtime{Client: client}).Import(t.Context(), ImportOptions{
+		UserID: archive.Identifier, AttachmentsDir: t.TempDir(),
+		MediaPolicy: attachmentpolicy.Policy{Scope: attachmentpolicy.ScopeDirect}, SkipKeyBackup: true,
+	})
+	require.NoError(err)
+	assert.Zero(sum.PendingEncrypted)
+	assert.Empty(mediaRequests)
+	var conversationType string
+	require.NoError(st.DB().QueryRow(st.Rebind(`SELECT conversation_type FROM conversations WHERE id = ?`), room).Scan(&conversationType))
+	assert.Equal("direct_chat", conversationType)
+	var retryState string
+	require.NoError(st.DB().QueryRow(st.Rebind(`SELECT attachment_state FROM attachments WHERE message_id = ?`), retryID).Scan(&retryState))
+	assert.Equal(string(attachmentpolicy.StatePending), retryState)
+	var legacyAttachments int
+	require.NoError(st.DB().QueryRow(st.Rebind(`SELECT COUNT(*) FROM attachments WHERE message_id = ?`), legacyID).Scan(&legacyAttachments))
+	assert.Zero(legacyAttachments)
+	candidates, err := st.ListAttachmentPolicyCandidates(t.Context())
+	require.NoError(err)
+	assert.Empty(candidates)
 }
 
 func TestImporterExplicitEmptyRoomNameClearsArchivedTitle(t *testing.T) {

@@ -232,3 +232,69 @@ func TestMatrixOutstandingMedia(t *testing.T) {
 	check.Zero(pending)
 	check.Zero(failed)
 }
+
+func TestMatrixProviderQueriesSkipMergedArchiveOnlyMessages(t *testing.T) {
+	req, check := require.New(t), assert.New(t)
+	s := testutil.NewTestStore(t)
+	history, err := s.GetOrCreateSource("matrix", "@history:example.org")
+	req.NoError(err)
+	archive, err := s.GetOrCreateSource("matrix", "@archive:example.org")
+	req.NoError(err)
+	room, err := s.EnsureConversationWithType(history.ID, "!room:example.org", "direct_chat", "History")
+	req.NoError(err)
+	persist := func(eventID, snippet, raw string) int64 {
+		t.Helper()
+		messageID, err := s.PersistMessageContext(t.Context(), &store.MessagePersistData{
+			Message: &store.Message{
+				SourceID: history.ID, ConversationID: room, SourceMessageID: eventID,
+				MessageType: "matrix", Snippet: sql.NullString{String: snippet, Valid: true},
+			},
+			BodyText: sql.NullString{String: snippet, Valid: true}, RawMIME: []byte(raw), RawFormat: "matrix_json",
+		})
+		req.NoError(err)
+		return messageID
+	}
+	placeholderID := persist("$encrypted", store.MatrixEncryptedPlaceholder, `{"type":"m.room.encrypted","content":{"ciphertext":"opaque"}}`)
+	legacyID := persist("$legacy", "file", `{"type":"m.room.message","content":{"msgtype":"m.file","body":"file","url":"mxc://example.org/legacy"}}`)
+	retryID := persist("$retry", "file", `{"type":"m.room.message","content":{"msgtype":"m.file","body":"file","url":"mxc://example.org/retry"}}`)
+	storedID := persist("$stored", "file", `{"type":"m.room.message","content":{"msgtype":"m.file","body":"file","url":"mxc://example.org/stored"}}`)
+	req.NoError(s.ReplaceMessageMatrixAttachments(t.Context(), retryID, []store.AttachmentRef{{
+		SourceAttachmentID: "matrix:mxc://example.org/retry", StoragePath: "mxc://example.org/retry", State: attachmentpolicy.StatePending,
+	}}))
+	hash := strings.Repeat("a", 64)
+	req.NoError(s.ReplaceMessageMatrixAttachments(t.Context(), storedID, []store.AttachmentRef{{
+		SourceAttachmentID: "matrix:mxc://example.org/stored", StoragePath: hash[:2] + "/" + hash,
+		ContentHash: hash, Size: 100, State: attachmentpolicy.StateStored,
+	}}))
+	_, err = s.MergeSourcesContext(t.Context(), store.MergeSourcesRequest{FromSourceID: history.ID, IntoSourceID: archive.ID})
+	req.NoError(err)
+
+	rooms, err := s.ListMatrixRoomIDsContext(t.Context(), archive.ID)
+	req.NoError(err)
+	check.Empty(rooms)
+	placeholders, err := s.MatrixPlaceholderRooms(t.Context(), archive.ID, nil, nil, attachmentpolicy.Policy{})
+	req.NoError(err)
+	check.Empty(placeholders)
+	page, scanned, err := s.MatrixPlaceholders(t.Context(), room, 0, 10)
+	req.NoError(err)
+	check.Empty(page)
+	check.Equal(int64(0), scanned)
+	legacy, err := s.ListMatrixLegacyMediaMessagesContext(t.Context(), archive.ID, 0, nil, nil, attachmentpolicy.Policy{})
+	req.NoError(err)
+	check.Empty(legacy)
+	retry, err := s.ListMatrixRetryableAttachmentMessagesContext(t.Context(), archive.ID, 0, 100, attachmentpolicy.Policy{Scope: attachmentpolicy.ScopeAll})
+	req.NoError(err)
+	check.Empty(retry)
+	pending, failed, err := s.MatrixOutstandingMedia(t.Context(), archive.ID, nil, nil)
+	req.NoError(err)
+	check.Zero(pending)
+	check.Zero(failed)
+	candidates, err := s.ListAttachmentPolicyCandidates(t.Context())
+	req.NoError(err)
+	check.Empty(candidates)
+	for _, messageID := range []int64{placeholderID, legacyID, retryID, storedID} {
+		var archiveOnly bool
+		req.NoError(s.DB().QueryRow(s.Rebind(`SELECT EXISTS (SELECT 1 FROM source_merge_archive_only_messages WHERE message_id = ?)`), messageID).Scan(&archiveOnly))
+		check.True(archiveOnly)
+	}
+}

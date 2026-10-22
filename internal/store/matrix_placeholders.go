@@ -15,7 +15,10 @@ const MatrixEncryptedPlaceholder = "[encrypted message — keys unavailable]"
 
 // ListMatrixRoomIDsContext includes archived rooms absent from the sync cursor.
 func (s *Store) ListMatrixRoomIDsContext(ctx context.Context, sourceID int64) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT source_conversation_id FROM conversations WHERE source_id = ? ORDER BY id`, sourceID)
+	rows, err := s.db.QueryContext(ctx, `SELECT c.source_conversation_id FROM conversations c
+		WHERE c.source_id = ?
+		AND NOT EXISTS (SELECT 1 FROM source_merge_conversations smc WHERE smc.conversation_id = c.id)
+		ORDER BY c.id`, sourceID)
 	if err != nil {
 		return nil, err
 	}
@@ -207,7 +210,8 @@ func (s *Store) matrixPlaceholderCandidatesQuery(sourceID int64, include, exclud
 	var query strings.Builder
 	query.WriteString(` FROM messages m JOIN conversations c ON c.id = m.conversation_id
 		JOIN message_raw r ON r.message_id = m.id
-		WHERE m.source_id = ? AND m.message_type = 'matrix' AND m.snippet = ? AND r.raw_format = 'matrix_json'`)
+		WHERE m.source_id = ? AND m.message_type = 'matrix' AND m.snippet = ? AND r.raw_format = 'matrix_json'
+		AND NOT EXISTS (SELECT 1 FROM source_merge_archive_only_messages am WHERE am.message_id = m.id)`)
 	field := s.matrixEventTypeField()
 	query.WriteString(" AND COALESCE(" + field + ", 'm.room.encrypted') = 'm.room.encrypted'")
 	args := []any{sourceID, MatrixEncryptedPlaceholder}
@@ -264,7 +268,8 @@ func (s *Store) MatrixPlaceholderRooms(ctx context.Context, sourceID int64, incl
 func (s *Store) MatrixPlaceholders(ctx context.Context, conversationID, afterID int64, limit int) ([]MatrixPlaceholder, int64, error) {
 	query := ` FROM messages m
 		JOIN message_raw r ON r.message_id = m.id
-		WHERE m.conversation_id = ? AND m.message_type = 'matrix' AND m.snippet = ? AND r.raw_format = 'matrix_json' AND m.id > ?`
+		WHERE m.conversation_id = ? AND m.message_type = 'matrix' AND m.snippet = ? AND r.raw_format = 'matrix_json' AND m.id > ?
+		AND NOT EXISTS (SELECT 1 FROM source_merge_archive_only_messages am WHERE am.message_id = m.id)`
 	args := []any{conversationID, MatrixEncryptedPlaceholder, afterID}
 	args = append(args, limit)
 	rows, err := s.db.QueryContext(ctx, `SELECT m.id, m.deleted_from_source_at IS NOT NULL, m.deleted_at IS NOT NULL, r.raw_data, r.compression, `+s.matrixEventTypeField()+query+` ORDER BY m.id LIMIT ?`, args...)
