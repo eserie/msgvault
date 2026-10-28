@@ -30,7 +30,10 @@ func TestMatrixUnsupportedPlaceholderRetainsRawAndInvalidatesIndexes(t *testing.
 	revision, err := s.DerivedDataRevision()
 	req.NoError(err)
 	req.NoError(s.MatrixRecoveryTransaction(t.Context(), func(view *store.Store) error {
-		if err := view.SetMessageMetadataContext(t.Context(), messageID, sql.NullString{String: `{"matrix_event_type":"example.unsupported","matrix_megolm_session_0":"$unsupported"}`, Valid: true}); err != nil {
+		if err := view.SetMessageMetadataContext(t.Context(), messageID, sql.NullString{String: `{"matrix_event_type":"example.unsupported"}`, Valid: true}); err != nil {
+			return err
+		}
+		if err := view.ClaimMatrixMegolmIndex(t.Context(), convID, "matrix_megolm_session_0", "$unsupported"); err != nil {
 			return err
 		}
 		return view.HideMatrixPlaceholder(t.Context(), source.ID, messageID)

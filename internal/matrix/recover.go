@@ -227,11 +227,7 @@ func (imp *Importer) recoverRoom(ctx context.Context, sourceID int64, room store
 						targetID = 0
 					}
 				}
-				claimID := targetID
-				if claimID == 0 {
-					claimID = messageID
-				}
-				if _, err := worker.claimRecoveredEvent(ctx, room.ConversationID, claimID, replayKeys[messageID], plain.ID.String(), &claims); err != nil {
+				if _, err := worker.claimRecoveredEvent(ctx, room.ConversationID, true, replayKeys[messageID], plain.ID.String(), &claims); err != nil {
 					return err
 				}
 				if targetID == messageID {
@@ -270,7 +266,7 @@ func (imp *Importer) recoverRoom(ctx context.Context, sourceID int64, room store
 				if !matches {
 					continue
 				}
-				allowed, err := worker.claimRecoveredEvent(ctx, room.ConversationID, 0, replayKey, plain.ID.String(), &claims)
+				allowed, err := worker.claimRecoveredEvent(ctx, room.ConversationID, false, replayKey, plain.ID.String(), &claims)
 				if err != nil {
 					return err
 				}
@@ -320,7 +316,7 @@ func (imp *Importer) recoverRoom(ctx context.Context, sourceID int64, room store
 			}
 			slices.SortFunc(relations, func(a, b relation) int { return compareRelations(a.evt, b.evt) })
 			for _, rel := range relations {
-				allowed, err := worker.claimRecoveredEvent(ctx, room.ConversationID, 0, replayKeys[rel.messageID], rel.evt.ID.String(), &claims)
+				allowed, err := worker.claimRecoveredEvent(ctx, room.ConversationID, false, replayKeys[rel.messageID], rel.evt.ID.String(), &claims)
 				if err != nil {
 					return err
 				}
@@ -408,8 +404,8 @@ func ciphertextKey(evt *event.Event) ([sha256.Size]byte, bool) {
 	return sha256.Sum256(append([]byte(content.SessionID+"\x00"), content.MegolmCiphertext...)), true
 }
 
-// A zero messageID checks the claim before applying content; a row ID also saves it.
-func (imp *Importer) claimRecoveredEvent(ctx context.Context, conversationID, messageID int64, key, eventID string, claims *map[string]string) (bool, error) {
+// claimRecoveredEvent checks the claim before content is applied; save also records it.
+func (imp *Importer) claimRecoveredEvent(ctx context.Context, conversationID int64, save bool, key, eventID string, claims *map[string]string) (bool, error) {
 	if *claims == nil {
 		var err error
 		*claims, err = imp.store.MatrixRecoveredEvents(ctx, conversationID)
@@ -420,12 +416,8 @@ func (imp *Importer) claimRecoveredEvent(ctx context.Context, conversationID, me
 	if previous := (*claims)[key]; previous != "" && previous != eventID {
 		return false, nil
 	}
-	if messageID != 0 {
-		metadata, err := imp.mergedMetadata(messageID, map[string]any{key: eventID})
-		if err != nil {
-			return false, err
-		}
-		if err := imp.store.SetMessageMetadataContext(ctx, messageID, sql.NullString{String: string(metadata), Valid: true}); err != nil {
+	if save {
+		if err := imp.store.ClaimMatrixMegolmIndex(ctx, conversationID, key, eventID); err != nil {
 			return false, err
 		}
 		(*claims)[key] = eventID

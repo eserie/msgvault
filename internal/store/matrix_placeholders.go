@@ -152,13 +152,9 @@ type MatrixPlaceholder struct {
 	Raw       []byte
 }
 
-// MatrixRecoveredEvents reads durable Megolm replay claims, including hidden rows.
+// MatrixRecoveredEvents reads Megolm replay claims, which outlive purged message rows.
 func (s *Store) MatrixRecoveredEvents(ctx context.Context, conversationID int64) (map[string]string, error) {
-	fields := "json_each(m.metadata)"
-	if s.IsPostgreSQL() {
-		fields = "jsonb_each_text(m.metadata)"
-	}
-	rows, err := s.db.QueryContext(ctx, `SELECT e.key, e.value FROM messages m CROSS JOIN `+fields+` e WHERE m.conversation_id = ? AND substr(e.key, 1, 14) = 'matrix_megolm_' AND e.value IS NOT NULL ORDER BY m.id`, conversationID)
+	rows, err := s.db.QueryContext(ctx, `SELECT claim_key, event_id FROM matrix_megolm_claims WHERE conversation_id = ?`, conversationID)
 	if err != nil {
 		return nil, err
 	}
@@ -169,11 +165,15 @@ func (s *Store) MatrixRecoveredEvents(ctx context.Context, conversationID int64)
 		if err := rows.Scan(&key, &eventID); err != nil {
 			return nil, err
 		}
-		if _, exists := claims[key]; !exists {
-			claims[key] = eventID
-		}
+		claims[key] = eventID
 	}
 	return claims, rows.Err()
+}
+
+// ClaimMatrixMegolmIndex keeps the first event recovered for a Megolm session and index.
+func (s *Store) ClaimMatrixMegolmIndex(ctx context.Context, conversationID int64, key, eventID string) error {
+	_, err := s.db.ExecContext(ctx, s.dialect.InsertOrIgnore(`INSERT OR IGNORE INTO matrix_megolm_claims (conversation_id, claim_key, event_id) VALUES (?, ?, ?)`), conversationID, key, eventID)
+	return err
 }
 
 // MatrixPlaceholderMatches prevents recovery from restoring a purged or changed row.

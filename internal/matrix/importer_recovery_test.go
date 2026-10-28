@@ -1469,7 +1469,10 @@ func TestImportRecoveredReplyLinksWhenTargetArrivesLater(t *testing.T) {
 				req.NoError(err)
 				var fields map[string]any
 				req.NoError(json.Unmarshal([]byte(metadata.String), &fields))
-				check.Equal(map[string]any{"matrix_event_type": "m.room.encrypted", "referenced_message_id": "$target", "saved": "keep", fmt.Sprintf("matrix_megolm_%s_0", f.backup.out.ID()): "$reply"}, fields)
+				check.Equal(map[string]any{"matrix_event_type": "m.room.encrypted", "referenced_message_id": "$target", "saved": "keep"}, fields)
+				var claimed string
+				req.NoError(f.store.DB().QueryRow(f.store.Rebind(`SELECT event_id FROM matrix_megolm_claims WHERE claim_key = ?`), fmt.Sprintf("matrix_megolm_%s_0", f.backup.out.ID())).Scan(&claimed))
+				check.Equal("$reply", claimed)
 			}
 			check.Equal(wantBody, f.body(t, "$reply"))
 		})
@@ -1799,4 +1802,60 @@ func TestImportQueuesOnlyBoundedSameSenderEditsForEncryptedOriginal(t *testing.T
 	_, err = f.run(t, true, false)
 	req.NoError(err)
 	check.Equal(fmt.Sprintf("edit %d", maxPendingEdits+9), f.body(t, "$original"))
+}
+
+func TestImportEditRollbackKeepsCopiedCiphertextFromClaimingPendingEdit(t *testing.T) {
+	req, check := require.New(t), assert.New(t)
+	f := newRecoveryFixture(t)
+	edit := f.edit(t, "$member-edit", "$original", "member edit", 20)
+	// Encrypted relations stay outside the ciphertext, so a copy can target the copier's own message.
+	content := *edit.Content.AsEncrypted()
+	content.RelatesTo = &event.RelatesTo{Type: event.RelReplace, EventID: "$mallory-message"}
+	copied := &event.Event{ID: "$copy", RoomID: edit.RoomID, Sender: "@mallory:example.org", Timestamp: 40, Type: event.EventEncrypted, Content: event.Content{Parsed: &content}}
+	f.timeline = []*event.Event{
+		f.message(t, "$original", "original", 10),
+		edit,
+		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$mallory-message","sender":"@mallory:example.org","origin_server_ts":30,"content":{"msgtype":"m.text","body":"mallory original"}}`),
+		matrixTestEvent(t, `{"type":"m.room.message","event_id":"$mallory-edit","sender":"@mallory:example.org","origin_server_ts":35,"content":{"msgtype":"m.text","body":"* mallory edit","m.new_content":{"msgtype":"m.text","body":"mallory edit"},"m.relates_to":{"rel_type":"m.replace","event_id":"$mallory-message"}}}`),
+	}
+	_, err := f.run(t, false, false)
+	req.NoError(err)
+	req.Equal("mallory edit", f.body(t, "$mallory-message"))
+
+	// Redacting the applied edit asks the homeserver for the message's other edits.
+	f.edits = []*event.Event{copied}
+	f.timeline = []*event.Event{{ID: "$redaction", Type: event.EventRedaction, Sender: "@mallory:example.org", Redacts: "$mallory-edit", Content: event.Content{Raw: map[string]any{}}}}
+	_, err = f.run(t, true, false)
+	req.NoError(err)
+	check.Equal("mallory original", f.body(t, "$mallory-message"))
+	check.Equal("member edit", f.body(t, "$original"))
+}
+
+func TestImportRecoveryClaimSurvivesArchiveGC(t *testing.T) {
+	req, check := require.New(t), assert.New(t)
+	f := newRecoveryFixture(t)
+	original := f.message(t, "$original", "from member", 10)
+	f.timeline = []*event.Event{original}
+	_, err := f.run(t, true, false)
+	req.NoError(err)
+	req.Equal("from member", f.body(t, "$original"))
+	req.NoError(f.store.MarkMessageDeleted(f.sourceID, "$original"))
+	if f.store.IsPostgreSQL() {
+		// GC is SQLite-only; exercise the equivalent hard delete on PostgreSQL.
+		_, err = f.store.DB().Exec(f.store.Rebind(`DELETE FROM messages WHERE source_message_id = ?`), "$original")
+		req.NoError(err)
+	} else {
+		plan, err := f.store.PlanGCContext(t.Context())
+		req.NoError(err)
+		deleted, err := f.store.ExecuteGCContext(t.Context(), plan)
+		req.NoError(err)
+		req.Equal(int64(1), deleted)
+	}
+
+	replay := *original
+	replay.ID, replay.Sender, replay.Timestamp = "$replay", "@mallory:example.org", 20
+	f.timeline = []*event.Event{&replay}
+	_, err = f.run(t, true, false)
+	req.NoError(err)
+	check.Equal(encryptedPlaceholder, f.body(t, "$replay"))
 }

@@ -3,6 +3,7 @@ package matrix
 import (
 	"cmp"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json/v2"
 	"errors"
@@ -1179,6 +1180,7 @@ func (imp *Importer) restoreAfterEditRedaction(ctx context.Context, sourceID int
 	var newest *event.Event
 	var newestContent *event.MessageEventContent
 	var claims map[string]string
+	var earliest map[[sha256.Size]byte]id.EventID
 	from := ""
 	for {
 		page, err := imp.runtime.Client.GetRelations(ctx, roomID, original.ID, &mautrix.ReqGetRelations{RelationType: event.RelReplace, From: from})
@@ -1204,6 +1206,17 @@ func (imp *Importer) restoreAfterEditRedaction(ctx context.Context, sourceID int
 					}
 					continue
 				}
+				// The relation sits outside the ciphertext, so a copy can target another message.
+				if key, ok := ciphertextKey(edit); ok {
+					if earliest == nil {
+						if earliest, err = imp.earliestCiphertextCopies(ctx, target.ConversationID); err != nil {
+							return err
+						}
+					}
+					if first := earliest[key]; first != "" && first != edit.ID {
+						continue
+					}
+				}
 				replayKey = fmt.Sprintf("matrix_megolm_%s_%d", edit.Content.AsEncrypted().SessionID, index)
 				conversationID = target.ConversationID
 				edit = plain
@@ -1216,7 +1229,7 @@ func (imp *Importer) restoreAfterEditRedaction(ctx context.Context, sourceID int
 				continue
 			}
 			if replayKey != "" {
-				allowed, err := imp.claimRecoveredEvent(ctx, conversationID, messageID, replayKey, edit.ID.String(), &claims)
+				allowed, err := imp.claimRecoveredEvent(ctx, conversationID, true, replayKey, edit.ID.String(), &claims)
 				if err != nil {
 					return err
 				}

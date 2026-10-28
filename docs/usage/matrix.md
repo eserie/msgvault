@@ -1,5 +1,5 @@
 ---
-last_edited: "2026-10-27"
+last_edited: "2026-10-28"
 title: Matrix
 description: Archive Matrix room history with keys from your account's backup.
 ---
@@ -128,7 +128,7 @@ exclude.
 
 - Legacy recovery keys outside Matrix secret storage are unsupported.
 - Decryption uses only the account's key backup. Keys shared directly with a device but absent from the backup remain unavailable.
-- msgvault checks the decrypted `room_id` and the imported session's ID against the outer event's room and `session_id`. When two events in a room carry the same Megolm session and message index, msgvault recovers the one with the earliest server timestamp and leaves the other as a placeholder. A copy recovered in an earlier sync keeps the index. A homeserver that forges an earlier timestamp can still claim another sender's message this way.
+- msgvault checks the decrypted `room_id` and the imported session's ID against the outer event's room and `session_id`. When two events in a room carry the same Megolm session and message index, msgvault recovers the one with the earliest server timestamp and leaves the other as a placeholder. A copy recovered in an earlier sync keeps the index, even after `msgvault gc` purges that message. A homeserver that forges an earlier timestamp can still claim another sender's message this way.
 - msgvault attributes each recovered message to the outer event's sender and doesn't authenticate devices or bind sessions to them. It trusts the backup's keys. A hostile homeserver can supply its own session or change the claimed sender. The backup algorithm encrypts sessions to a public key; see the [Matrix key-backup specification](https://spec.matrix.org/latest/client-server-api/#backup-algorithm-mmegolm_backupv1curve25519-aes-sha2).
 - Only rooms the account has joined are archived. Invited, knocked, and left
   rooms are not imported.
